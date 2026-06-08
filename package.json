@@ -1,0 +1,44 @@
+{
+  "name": "neonfi-backend",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Neonfi backend — Hono + TypeScript API + WebSocket server (Part 1: Foundations)",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "npm run check:singletons && tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "check:singletons": "node scripts/check-singletons.mjs",
+    "prisma:generate": "prisma generate",
+    "prisma:validate": "prisma validate",
+    "migrate:dev": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "db:hypertable": "tsx prisma/sql/run-hypertable.ts",
+    "db:seed": "prisma db seed",
+    "test": "vitest run"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "engineStrict": false,
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@prisma/client": "^6.2.1",
+    "dotenv": "^16.4.7",
+    "hono": "^4.6.14",
+    "ioredis": "^5.4.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "prisma": "^6.2.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,376 @@
+// Neonfi backend — Prisma schema
+//
+// SOURCE OF TRUTH: `Neonfi Database Schema.docx` (reproduced verbatim from the
+// plain-text export `docs/schema.txt`). Per Build Guide §0.1, this schema is
+// authoritative for tables, columns, types, relations, enums-as-lookup-tables,
+// cascade behavior, and uniqueness constraints. Do NOT "improve" types,
+// relations, or @@map names.
+//
+// Deliberate, non-divergent additions (allowed by Build Guide §1.3 / §3.3 — they
+// change no wire shape or column semantics):
+//   - datasource declares both `url` (pooled DATABASE_URL) and `directUrl`
+//     (DIRECT_URL) per the Neon + Prisma requirement.
+//   - @@index added on FK scalar fields that Prisma does not auto-index, plus the
+//     frequently-queried `Portfolio.walletAddress` (System_Architecture Database
+//     Optimization). Fields already covered by @unique or as the leftmost column
+//     of a composite @@unique are not re-indexed.
+//
+// Enums are lookup TABLES (id + name + back-relation), never native Postgres
+// enums (§0.4). Seed rows live in prisma/seed.ts.
+//
+// BalanceSnapshot is defined here as a regular table; its conversion to a
+// TimescaleDB hypertable is a raw-SQL step run AFTER `prisma migrate deploy`
+// (see prisma/sql/001_timescaledb_hypertable.sql).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// USER & ACCESS CONTROL
+
+model User {
+  id                   Int               @id @default(autoincrement())
+  email                String            @unique @db.VarChar(255)
+  passwordHash         String? // null for Google OAuth users
+  fullName             String            @db.VarChar(255)
+  displayName          String?           @db.VarChar(100)
+  avatarUrl            String?           @db.VarChar(2048)
+  authProvider         AuthProvider      @relation("UserAuthProvider", fields: [authProviderId], references: [id])
+  authProviderId       Int
+  onboardingStatus     OnboardingStatus  @relation("UserOnboardingStatus", fields: [onboardingStatusId], references: [id])
+  onboardingStatusId   Int
+  newsletterSubscribed Boolean           @default(false)
+
+  // One to One
+  subscription         Subscription?
+
+  // One to Many
+  sessions             Session[]
+  portfolios           Portfolio[]
+  payments             Payment[]
+  snapshots            BalanceSnapshot[]
+
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  @@index([authProviderId])
+  @@index([onboardingStatusId])
+  @@map("user")
+}
+
+model AuthProvider {
+  id    Int    @id @default(autoincrement())
+  name  String @unique // email | google
+  users User[] @relation("UserAuthProvider")
+
+  @@map("auth_provider")
+}
+
+model OnboardingStatus {
+  id    Int    @id @default(autoincrement())
+  name  String @unique // pending_verification | verified | plan_selected | complete
+  users User[] @relation("UserOnboardingStatus")
+
+  @@map("onboarding_status")
+}
+
+model Session {
+  id        Int       @id @default(autoincrement())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  ipAddress String?   @db.VarChar(45)
+  userAgent String?   @db.VarChar(512)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("session")
+}
+
+// SUBSCRIPTION & PAYMENTS
+
+model Subscription {
+  id                   Int                @id @default(autoincrement())
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId               Int                @unique
+  plan                 Plan               @relation("SubscriptionPlan", fields: [planId], references: [id])
+  planId               Int
+  billingCycle         BillingCycle?      @relation("SubscriptionBillingCycle", fields: [billingCycleId], references: [id])
+  billingCycleId       Int? // null for free plan
+  status               SubscriptionStatus @relation("SubscriptionStatus", fields: [statusId], references: [id])
+  statusId             Int
+  stripeCustomerId     String?            @db.VarChar(255)
+  stripeSubscriptionId String?            @db.VarChar(255)
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  payments             Payment[]
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@index([planId])
+  @@index([billingCycleId])
+  @@index([statusId])
+  @@map("subscription")
+}
+
+model Plan {
+  id            Int            @id @default(autoincrement())
+  name          String         @unique // free | pro
+  subscriptions Subscription[] @relation("SubscriptionPlan")
+  pros          String[] //list of advantages of plan
+  cons          String[]
+
+  @@map("plan")
+}
+
+model BillingCycle {
+  id            Int            @id @default(autoincrement())
+  name          String         @unique // monthly | yearly
+  subscriptions Subscription[] @relation("SubscriptionBillingCycle")
+
+  @@map("billing_cycle")
+}
+
+model SubscriptionStatus {
+  id            Int            @id @default(autoincrement())
+  name          String         @unique // active | cancelled | expired
+  subscriptions Subscription[] @relation("SubscriptionStatus")
+
+  @@map("subscription_status")
+}
+
+model Payment {
+  id                    Int           @id @default(autoincrement())
+  // NOTE (faithful-to-intent, not a contract change): schema.txt writes the
+  // relation type as `User` (non-optional) alongside a nullable `userId Int?`
+  // with onDelete: SetNull. Prisma requires the relation field to be optional
+  // (`User?`) whenever its FK scalar is nullable, so the literal text is invalid
+  // Prisma. `User?` is the only valid encoding of the documented intent
+  // (nullable userId + SetNull → payment history survives user deletion,
+  // Schema:179–181 / Build Guide Stage 4). No column/semantic divergence.
+  user                  User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId                Int?
+  subscription          Subscription  @relation(fields: [subscriptionId], references: [id])
+  subscriptionId        Int
+  stripePaymentIntentId String        @unique @db.VarChar(255)
+  amount                Int // in smallest currency unit e.g. cents
+  currency              String        @db.VarChar(3)
+  status                PaymentStatus @relation("PaymentStatus", fields: [statusId], references: [id])
+  statusId              Int
+  refundAvailable       Boolean       @default(false)
+  createdAt             DateTime      @default(now())
+
+  @@index([userId])
+  @@index([subscriptionId])
+  @@index([statusId])
+  @@map("payment")
+}
+
+model PaymentStatus {
+  id       Int       @id @default(autoincrement())
+  name     String    @unique // pending | succeeded | failed | refunded
+  payments Payment[] @relation("PaymentStatus")
+
+  @@map("payment_status")
+}
+
+// CATALOGUE
+
+model Chain {
+  id         Int         @id @default(autoincrement())
+  name       String      @unique @db.VarChar(100)
+  slug       String      @unique @db.VarChar(50)
+  logoUrl    String?     @db.VarChar(2048)
+  moralisId  String      @unique @db.VarChar(20)
+  portfolios Portfolio[]
+
+  @@map("chain")
+}
+
+model Token {
+  id           Int      @id @default(autoincrement())
+  name         String   @db.VarChar(255)
+  symbol       String   @unique @db.VarChar(20)
+  logoUrl      String?  @db.VarChar(2048)
+  currentPrice Decimal  @db.Decimal(20, 8)
+  marketCap    Decimal? @db.Decimal(30, 2)
+  rank         Int?
+  assets       Asset[]
+
+  updatedAt    DateTime @updatedAt
+
+  @@map("token")
+}
+
+// PORTFOLIOS
+
+model Portfolio {
+  id              Int               @id @default(autoincrement())
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId          Int
+  name            String            @db.VarChar(255)
+  type            PortfolioType     @relation("PortfolioType", fields: [typeId], references: [id])
+  typeId          Int
+  walletAddress   String?           @db.VarChar(255)
+  chain           Chain?            @relation(fields: [chainId], references: [id])
+  chainId         Int? // null for manual portfolios
+  startingBalance Decimal?          @db.Decimal(20, 8) // null for wallet-connected
+  netDeposit      Decimal           @default(0) @db.Decimal(20, 8)
+
+  // One to Many
+  assets          Asset[]
+  transactions    Transaction[]
+  nfts            Nft[]
+  snapshots       BalanceSnapshot[]
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([userId])
+  @@index([typeId])
+  @@index([chainId])
+  @@index([walletAddress])
+  @@map("portfolio")
+}
+
+model PortfolioType {
+  id         Int         @id @default(autoincrement())
+  name       String      @unique // connected | manual
+  portfolios Portfolio[] @relation("PortfolioType")
+
+  @@map("portfolio_type")
+}
+
+model Asset {
+  id          Int       @id @default(autoincrement())
+  portfolio   Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  portfolioId Int
+  token       Token     @relation(fields: [tokenId], references: [id])
+  tokenId     Int
+  balance     Decimal   @default(0) @db.Decimal(20, 8)
+  netDeposit  Decimal   @default(0) @db.Decimal(20, 8)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([portfolioId, tokenId])
+  @@index([tokenId])
+  @@map("asset")
+}
+
+// TRANSACTIONS (POLYMORPHIC)
+
+model Transaction {
+  id              Int                      @id @default(autoincrement())
+  portfolio       Portfolio                @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  portfolioId     Int
+  type            TransactionType          @relation("TransactionType", fields: [typeId], references: [id])
+  typeId          Int
+  from            String?                  @db.VarChar(255)
+  to              String?                  @db.VarChar(255)
+  gasFee          Decimal?                 @db.Decimal(20, 8)
+  transactionHash String?                  @unique @db.VarChar(255)
+  timestamp       DateTime
+
+  // Child detail records
+  nativeDetail    NativeTransactionDetail?
+  erc20Detail     Erc20TransactionDetail?
+  nftDetail       NftTransactionDetail?
+
+  createdAt       DateTime                 @default(now())
+
+  @@index([portfolioId])
+  @@index([typeId])
+  @@map("transaction")
+}
+
+model TransactionType {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique // native | erc20 | nft
+  transactions Transaction[] @relation("TransactionType")
+
+  @@map("transaction_type")
+}
+
+model NativeTransactionDetail {
+  id            Int         @id @default(autoincrement())
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  transactionId Int         @unique
+  amount        Decimal     @db.Decimal(20, 8)
+  symbol        String      @db.VarChar(20)
+
+  @@map("native_transaction_detail")
+}
+
+model Erc20TransactionDetail {
+  id                   Int         @id @default(autoincrement())
+  transaction          Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  transactionId        Int         @unique
+  amount               Decimal     @db.Decimal(20, 8)
+  symbol               String      @db.VarChar(20)
+  tokenContractAddress String      @db.VarChar(255)
+  tokenName            String      @db.VarChar(255)
+  tokenSymbol          String      @db.VarChar(20)
+
+  @@map("erc20_transaction_detail")
+}
+
+model NftTransactionDetail {
+  id                   Int         @id @default(autoincrement())
+  transaction          Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  transactionId        Int         @unique
+  tokenContractAddress String      @db.VarChar(255)
+  nftName              String?     @db.VarChar(255)
+  nftTokenId           String      @db.VarChar(255)
+  collectionName       String?     @db.VarChar(255)
+
+  @@map("nft_transaction_detail")
+}
+
+// NFT HOLDINGS
+
+model Nft {
+  id              Int       @id @default(autoincrement())
+  portfolio       Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  portfolioId     Int
+  name            String?   @db.VarChar(255)
+  tokenId         String    @db.VarChar(255)
+  contractAddress String    @db.VarChar(255)
+  collectionName  String?   @db.VarChar(255)
+  logoUrl         String?   @db.VarChar(2048)
+  chain           String    @db.VarChar(50)
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([portfolioId, contractAddress, tokenId])
+  @@map("nft")
+}
+
+// BALANCE SNAPSHOTS (TimescaleDB hypertable)
+
+model BalanceSnapshot {
+  id           Int       @id @default(autoincrement())
+  portfolio    Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  portfolioId  Int
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId       Int
+  value        Decimal   @db.Decimal(20, 8)
+  snapshotDate DateTime  @db.Date
+
+  createdAt    DateTime  @default(now())
+
+  @@unique([portfolioId, snapshotDate])
+  @@index([userId])
+  @@map("balance_snapshot")
+  // NOTE: This table is converted to a TimescaleDB hypertable via
+  // migration script after prisma migrate deploy:
+  // SELECT create_hypertable('balance_snapshot', 'snapshot_date');
+}

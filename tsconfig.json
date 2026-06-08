@@ -1,0 +1,27 @@
+{
+  // Independent from the frontend's SvelteKit tsconfig, but the same posture:
+  // strict + modern targets (frontend uses strict ESM). This is a Node ESM app
+  // built by tsc and run by node, so it uses NodeNext module resolution; relative
+  // imports therefore carry explicit `.js` extension specifiers.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "declaration": false,
+    "verbatimModuleSyntax": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "tests", "prisma"]
+}
