@@ -63,26 +63,17 @@ const schema = z
 
     // --- Logging ---
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
-  })
-  // Test DB/Redis URLs are required only when running as NODE_ENV=test.
-  .superRefine((env, ctx) => {
-    if (env.NODE_ENV === 'test') {
-      if (!env.DATABASE_URL_TEST) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['DATABASE_URL_TEST'],
-          message: 'DATABASE_URL_TEST is required when NODE_ENV=test',
-        });
-      }
-      if (!env.REDIS_URL_TEST) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['REDIS_URL_TEST'],
-          message: 'REDIS_URL_TEST is required when NODE_ENV=test',
-        });
-      }
-    }
+
+    // --- Auth rate-limiting & lockout (Build Guide Appendix item 10) ---
+    // Both are optional with sensible defaults; set them in .env for production.
+    AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
+    AUTH_LOGIN_LOCKOUT_MS: z.coerce.number().int().min(1000).default(900000),
   });
+  // DATABASE_URL_TEST and REDIS_URL_TEST are optional. When present and
+  // NODE_ENV=test, prisma.ts / redis.ts use them instead of the dev URLs
+  // (option a — separate test DB). When absent and NODE_ENV=test, both
+  // singletons fall back to DATABASE_URL / REDIS_URL with per-test table
+  // cleanup (option b — dev DB, chosen by Idowu for Stage 1A).
 
 const parsed = schema.safeParse(process.env);
 

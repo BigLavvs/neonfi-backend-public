@@ -14,9 +14,15 @@ const globalForRedis = globalThis as unknown as {
   redis: Redis | undefined;
 };
 
+// When NODE_ENV=test and REDIS_URL_TEST is set, use the test Redis instance so
+// integration tests run in isolation from the dev cache.
+const redisUrl = config.NODE_ENV === 'test' && config.REDIS_URL_TEST
+  ? config.REDIS_URL_TEST
+  : config.REDIS_URL;
+
 export const redis: Redis =
   globalForRedis.redis ??
-  new Redis(config.REDIS_URL, {
+  new Redis(redisUrl, {
     lazyConnect: false,
     maxRetriesPerRequest: 2,
   });

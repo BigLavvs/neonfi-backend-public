@@ -81,14 +81,22 @@ model OnboardingStatus {
 }
 
 model Session {
-  id        Int       @id @default(autoincrement())
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  userId    Int
-  ipAddress String?   @db.VarChar(45)
-  userAgent String?   @db.VarChar(512)
-  expiresAt DateTime
-  revokedAt DateTime?
-  createdAt DateTime  @default(now())
+  id               Int       @id @default(autoincrement())
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId           Int
+  ipAddress        String?   @db.VarChar(45)
+  userAgent        String?   @db.VarChar(512)
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, same pattern as
+  // Payment.user and BalanceSnapshot PK): the docx defines stateful refresh
+  // sessions but omits the column required to look up a session by its refresh
+  // token.  Without this field, POST /auth/refresh cannot match the incoming
+  // refresh cookie to a Session row.  The 64-char VarChar holds the hex-encoded
+  // SHA-256 hash of the 32-byte random refresh token; the raw token is stored
+  // only in the HttpOnly `refresh` cookie, never in the database.
+  refreshTokenHash String    @unique @db.VarChar(64)
+  createdAt        DateTime  @default(now())
 
   @@index([userId])
   @@map("session")

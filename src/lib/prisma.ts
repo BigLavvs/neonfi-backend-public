@@ -13,9 +13,16 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
 
+// When NODE_ENV=test and DATABASE_URL_TEST is set, use the test database so
+// integration tests run in isolation from the dev database.
+const testDbUrl = config.NODE_ENV === 'test' && config.DATABASE_URL_TEST
+  ? config.DATABASE_URL_TEST
+  : undefined;
+
 export const prisma: PrismaClient =
   globalForPrisma.prisma ??
   new PrismaClient({
+    datasources: testDbUrl ? { db: { url: testDbUrl } } : undefined,
     log: config.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
   });
 
