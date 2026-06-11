@@ -357,7 +357,17 @@ model Nft {
 // BALANCE SNAPSHOTS (TimescaleDB hypertable)
 
 model BalanceSnapshot {
-  id           Int       @id @default(autoincrement())
+  // Schema docx defect (Idowu owns the docx edit, do NOT modify the docx from here):
+  // docx writes `id Int @id @default(autoincrement())` while also requiring this
+  // table to become a TimescaleDB hypertable on `snapshotDate`. TimescaleDB rejects
+  // that combination (TS103: partition column must be in every unique constraint,
+  // including the PK). Resolution (Option C, signed off by Idowu): keep `id` as a
+  // non-PK autoincrement column with NO @unique (so it does not create a
+  // partition-column-less unique index), and make `(portfolioId, snapshotDate)` the
+  // composite PK — which subsumes the docx's @@unique on the same columns and
+  // satisfies TimescaleDB. The architecture.docx resource rep still returns `id`
+  // unchanged.
+  id           Int       @default(autoincrement())
   portfolio    Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
   portfolioId  Int
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -367,10 +377,11 @@ model BalanceSnapshot {
 
   createdAt    DateTime  @default(now())
 
-  @@unique([portfolioId, snapshotDate])
+  @@id([portfolioId, snapshotDate])
   @@index([userId])
   @@map("balance_snapshot")
-  // NOTE: This table is converted to a TimescaleDB hypertable via
-  // migration script after prisma migrate deploy:
-  // SELECT create_hypertable('balance_snapshot', 'snapshot_date');
+  // Conversion to TimescaleDB hypertable: prisma/sql/001_timescaledb_hypertable.sql,
+  // runs after prisma migrate deploy. Partition column is `snapshotDate` (camelCase
+  // — the docx's `'snapshot_date'` spelling is a docx typo per §0.4 column-naming
+  // rule; Idowu owns the docx edit).
 }

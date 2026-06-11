@@ -23,7 +23,9 @@ async function main(): Promise<void> {
     await prisma.$queryRawUnsafe(
       // Physical column is camelCase "snapshotDate" — Prisma @@maps only table
       // names; the docx's 'snapshot_date' spelling does not exist as a column.
-      "SELECT create_hypertable('balance_snapshot', 'snapshotDate', if_not_exists => TRUE);",
+      // Cast to text: Prisma cannot deserialize the composite record type that
+      // create_hypertable returns, so we stringify it before it crosses the wire.
+      "SELECT create_hypertable('balance_snapshot', 'snapshotDate', if_not_exists => TRUE)::text;",
     );
     // eslint-disable-next-line no-console
     console.log('[hypertable] balance_snapshot converted (or already a hypertable).');

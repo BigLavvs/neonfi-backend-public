@@ -24,4 +24,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 -- NOTE: the partition column is "snapshotDate" (camelCase). Prisma only @@maps
 -- TABLE names to snake_case; column names keep their field casing. The docx's
 -- `'snapshot_date'` spelling does not exist as a physical column.
-SELECT create_hypertable('balance_snapshot', 'snapshotDate', if_not_exists => TRUE);
+-- ::text cast required when running via Prisma $queryRawUnsafe — Prisma cannot
+-- deserialize the composite record type that create_hypertable returns natively.
+-- Direct psql / pgAdmin can omit the cast.
+SELECT create_hypertable('balance_snapshot', 'snapshotDate', if_not_exists => TRUE)::text;
