@@ -54,3 +54,5 @@ export async function checkHealth(): Promise<HealthResult> {
 
   return { ok, db, redis: redisStatus, failure };
 }
+
+// TODO(Stage 10): fold Coinbase WS liveness into this probe per System_Implementation §2 / Build Guide §6.8 — currently DB+Redis only.

@@ -10,7 +10,7 @@
 // so it does not violate the "one shared client per process" runtime rule.
 
 import { PrismaClient } from '@prisma/client';
-import { config } from '../src/lib/config.js';
+import { config } from '../../src/lib/config.js';
 
 async function main(): Promise<void> {
   const prisma = new PrismaClient({
@@ -21,7 +21,9 @@ async function main(): Promise<void> {
     await prisma.$executeRawUnsafe('CREATE EXTENSION IF NOT EXISTS timescaledb;');
     // create_hypertable returns a row → use queryRawUnsafe.
     await prisma.$queryRawUnsafe(
-      "SELECT create_hypertable('balance_snapshot', 'snapshot_date', if_not_exists => TRUE);",
+      // Physical column is camelCase "snapshotDate" — Prisma @@maps only table
+      // names; the docx's 'snapshot_date' spelling does not exist as a column.
+      "SELECT create_hypertable('balance_snapshot', 'snapshotDate', if_not_exists => TRUE);",
     );
     // eslint-disable-next-line no-console
     console.log('[hypertable] balance_snapshot converted (or already a hypertable).');

@@ -100,6 +100,10 @@ Verify the hypertable: `SELECT * FROM timescaledb_information.hypertables;` (or 
 
 Per `System_Implementation` Deployment Flow: install → `prisma migrate deploy` → run the hypertable conversion if not applied (`npm run db:hypertable`) → `npm run build` → `npm start`. CI/CD workflow files are not included in Part 1 (deferred; would target this repo, not a monorepo root).
 
+## Deployment notes
+
+// TODO(CD): the deploy pipeline must run `npm run db:hypertable` between `prisma migrate deploy` and app start. The hypertable runner is idempotent (create_hypertable uses if_not_exists).
+
 ## Out of scope for Part 1
 
 Feature-stage endpoints; auth/session; WS server; Coinbase client; token-vendor selection; chain list; TimescaleDB compression/continuous-aggregates/retention; Prometheus/Grafana; object storage; load balancer/queues. See Build Guide §4 ("What NOT to do") and Parts 3–6.
