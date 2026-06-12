@@ -122,3 +122,14 @@ export async function revokeSession(id: number): Promise<void> {
     data: { revokedAt: new Date() },
   });
 }
+
+export async function findActiveSessionsByUser(userId: number): Promise<Session[]> {
+  return prisma.session.findMany({
+    where: {
+      userId,
+      revokedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+}

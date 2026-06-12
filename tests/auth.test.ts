@@ -7,10 +7,28 @@
 //
 // Uses Hono's app.request() for in-process HTTP — no real TCP server needed.
 
-import { describe, it, beforeEach, expect } from 'vitest';
+import { describe, it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
+
+// ---------------------------------------------------------------------------
+// Google OAuth mocks — hoisted so the factory runs before module loads
+// ---------------------------------------------------------------------------
+
+const { mockGenerateAuthUrl, mockGetToken, mockVerifyIdToken } = vi.hoisted(() => ({
+  mockGenerateAuthUrl: vi.fn(),
+  mockGetToken: vi.fn(),
+  mockVerifyIdToken: vi.fn(),
+}));
+
+vi.mock('google-auth-library', () => ({
+  OAuth2Client: vi.fn().mockImplementation(() => ({
+    generateAuthUrl: mockGenerateAuthUrl,
+    getToken: mockGetToken,
+    verifyIdToken: mockVerifyIdToken,
+  })),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -53,7 +71,13 @@ function cookieMaxAge(res: Response, name: string): number | undefined {
 }
 
 async function clearRedisAuthKeys(): Promise<void> {
-  const patterns = ['email_verify:*', 'lockout:login:*', 'resend_verify:*'];
+  const patterns = [
+    'email_verify:*',
+    'lockout:login:*',
+    'resend_verify:*',
+    'ws_ticket:*',
+    'oauth_state:*',
+  ];
   for (const pattern of patterns) {
     const keys = await redis.keys(pattern);
     if (keys.length > 0) await redis.del(keys);
@@ -89,6 +113,7 @@ beforeEach(async () => {
   await prisma.session.deleteMany();
   await prisma.user.deleteMany();
   await clearRedisAuthKeys();
+  vi.clearAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -336,4 +361,510 @@ it('12: refresh with a revoked session returns 401 SESSION_EXPIRED', async () =>
   expect(res.status).toBe(401);
   const json = await res.json() as { error: { code: string } };
   expect(json.error.code).toBe('SESSION_EXPIRED');
+});
+
+// ---------------------------------------------------------------------------
+// Stage 1B helpers
+// ---------------------------------------------------------------------------
+
+// Fixed state value used in all callback tests (valid base64url-safe string)
+const TEST_OAUTH_STATE = 'dGVzdC1zdGF0ZS10b2tlbi1mb3ItdGVzdHMxMjM0NTY';
+
+const GOOGLE_EMAIL = 'google.user@neonfi.test';
+const TEST_EMAIL_2 = 'second.user@neonfi.test';
+
+async function get(path: string, cookies?: string): Promise<Response> {
+  return app.request(`${BASE}${path}`, {
+    method: 'GET',
+    headers: { ...(cookies ? { Cookie: cookies } : {}) },
+  });
+}
+
+async function del(path: string, cookies?: string): Promise<Response> {
+  return app.request(`${BASE}${path}`, {
+    method: 'DELETE',
+    headers: { ...(cookies ? { Cookie: cookies } : {}) },
+  });
+}
+
+async function seedOAuthState(returnTo = '/dashboard'): Promise<void> {
+  await redis.set(
+    `oauth_state:${TEST_OAUTH_STATE}`,
+    JSON.stringify({ returnTo, createdAt: new Date().toISOString() }),
+    'EX',
+    600,
+  );
+}
+
+function setupGoogleMock(opts?: {
+  email?: string;
+  emailVerified?: boolean;
+  getTokenThrows?: boolean;
+  noIdToken?: boolean;
+}): void {
+  mockGenerateAuthUrl.mockReturnValue('https://accounts.google.com/o/oauth2/v2/auth?mock=1');
+  if (opts?.getTokenThrows) {
+    mockGetToken.mockRejectedValue(new Error('invalid_grant'));
+  } else if (opts?.noIdToken) {
+    mockGetToken.mockResolvedValue({ tokens: {} });
+  } else {
+    mockGetToken.mockResolvedValue({ tokens: { id_token: 'fake-id-token' } });
+  }
+  mockVerifyIdToken.mockResolvedValue({
+    getPayload: () => ({
+      email: opts?.email ?? GOOGLE_EMAIL,
+      email_verified: opts?.emailVerified ?? true,
+      name: 'Google User',
+      picture: null,
+      sub: 'google-sub-123',
+    }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 13. GET /auth/google — happy path: 302, sets oauth_state cookie, Redis key
+// ---------------------------------------------------------------------------
+
+it('13: GET /auth/google redirects to Google and sets oauth_state cookie', async () => {
+  mockGenerateAuthUrl.mockReturnValue('https://accounts.google.com/o/oauth2/v2/auth?mock=1');
+
+  const res = await get('/google');
+  expect(res.status).toBe(302);
+
+  const location = res.headers.get('location') ?? '';
+  expect(location).toContain('accounts.google.com');
+
+  // oauth_state cookie set with correct attributes
+  const setCookies = res.headers.getSetCookie?.() ?? [];
+  const oauthHeader = setCookies.find((c) => c.startsWith('oauth_state=')) ?? '';
+  expect(oauthHeader).toBeTruthy();
+  expect(oauthHeader.toLowerCase()).toContain('httponly');
+  expect(oauthHeader.toLowerCase()).toContain('samesite=lax');
+  expect(oauthHeader).toContain('Path=/api/v1/auth/google');
+
+  // Redis key created for the generated state
+  const state = cookieValue(res, 'oauth_state');
+  expect(state).toBeTruthy();
+  const redisVal = await redis.get(`oauth_state:${state}`);
+  expect(redisVal).toBeTruthy();
+  const parsed = JSON.parse(redisVal!) as { returnTo: string };
+  expect(parsed.returnTo).toBe('/dashboard');
+});
+
+// ---------------------------------------------------------------------------
+// 14. GET /auth/google?return_to=/wallet — returnTo stored in Redis
+// ---------------------------------------------------------------------------
+
+it('14: GET /auth/google stores return_to=/wallet in Redis', async () => {
+  mockGenerateAuthUrl.mockReturnValue('https://accounts.google.com/o/oauth2/v2/auth?mock=1');
+
+  const res = await get('/google?return_to=/wallet');
+  const state = cookieValue(res, 'oauth_state');
+  const redisVal = await redis.get(`oauth_state:${state}`);
+  const parsed = JSON.parse(redisVal!) as { returnTo: string };
+  expect(parsed.returnTo).toBe('/wallet');
+});
+
+// ---------------------------------------------------------------------------
+// 15. GET /auth/google?return_to=https://evil.com — open-redirect blocked
+// ---------------------------------------------------------------------------
+
+it('15: GET /auth/google blocks open-redirect, defaults returnTo to /dashboard', async () => {
+  mockGenerateAuthUrl.mockReturnValue('https://accounts.google.com/o/oauth2/v2/auth?mock=1');
+
+  const res = await get('/google?return_to=https://evil.com');
+  const state = cookieValue(res, 'oauth_state');
+  const redisVal = await redis.get(`oauth_state:${state}`);
+  const parsed = JSON.parse(redisVal!) as { returnTo: string };
+  expect(parsed.returnTo).toBe('/dashboard');
+});
+
+// ---------------------------------------------------------------------------
+// 16. GET /auth/google/callback — new Google user created, session issued
+// ---------------------------------------------------------------------------
+
+it('16: callback creates new Google user, session, sets cookies, redirects', async () => {
+  await seedOAuthState();
+  setupGoogleMock();
+
+  const res = await get(
+    `/google/callback?code=fake-code&state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  expect(res.status).toBe(302);
+  const location = res.headers.get('location') ?? '';
+  expect(location).toContain('/dashboard');
+
+  // User created with google provider
+  const user = await prisma.user.findUnique({
+    where: { email: GOOGLE_EMAIL },
+    include: { authProvider: true, onboardingStatus: true },
+  });
+  expect(user).toBeTruthy();
+  expect(user!.authProvider.name).toBe('google');
+  expect(user!.onboardingStatus.name).toBe('verified');
+  expect(user!.passwordHash).toBeNull();
+
+  // Session created
+  const sessions = await prisma.session.findMany({ where: { userId: user!.id } });
+  expect(sessions).toHaveLength(1);
+
+  // Auth cookies set
+  const setCookies = res.headers.getSetCookie?.() ?? [];
+  expect(setCookies.some((c) => c.startsWith('session='))).toBe(true);
+  expect(setCookies.some((c) => c.startsWith('refresh='))).toBe(true);
+
+  // oauth_state cookie cleared
+  expect(cookieValue(res, 'oauth_state')).toBeUndefined();
+});
+
+// ---------------------------------------------------------------------------
+// 17. GET /auth/google/callback — returning Google user logs in (no new User row)
+// ---------------------------------------------------------------------------
+
+it('17: callback logs in existing Google user without creating a duplicate', async () => {
+  await seedOAuthState();
+  setupGoogleMock();
+
+  // First login — creates the user
+  await get(
+    `/google/callback?code=fake-code&state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  await seedOAuthState(); // re-seed state for second login
+  vi.clearAllMocks();
+  setupGoogleMock();
+
+  const res = await get(
+    `/google/callback?code=fake-code&state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  expect(res.status).toBe(302);
+
+  // Still only one user row
+  const users = await prisma.user.findMany({ where: { email: GOOGLE_EMAIL } });
+  expect(users).toHaveLength(1);
+
+  // Two sessions (one per login)
+  const sessions = await prisma.session.findMany({ where: { userId: users[0]!.id } });
+  expect(sessions).toHaveLength(2);
+});
+
+// ---------------------------------------------------------------------------
+// 18. GET /auth/google/callback — email collision with email-auth account → 302 error
+// ---------------------------------------------------------------------------
+
+it('18: callback redirects with email_in_use_with_password when email has password account', async () => {
+  // Register an email-auth user with the same email as the Google mock
+  await post('/register', {
+    email: GOOGLE_EMAIL,
+    password: 'Test1234',
+    fullName: 'Existing User',
+  });
+
+  await seedOAuthState();
+  setupGoogleMock({ email: GOOGLE_EMAIL });
+
+  const res = await get(
+    `/google/callback?code=fake-code&state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  expect(res.status).toBe(302);
+  expect(res.headers.get('location')).toContain('oauth_error=email_in_use_with_password');
+});
+
+// ---------------------------------------------------------------------------
+// 19. GET /auth/google/callback — missing oauth_state cookie → redirect invalid_state
+// ---------------------------------------------------------------------------
+
+it('19: callback without oauth_state cookie redirects with invalid_state', async () => {
+  await seedOAuthState();
+
+  // No cookie header
+  const res = await get(`/google/callback?code=fake-code&state=${TEST_OAUTH_STATE}`);
+
+  expect(res.status).toBe(302);
+  expect(res.headers.get('location')).toContain('oauth_error=invalid_state');
+});
+
+// ---------------------------------------------------------------------------
+// 20. GET /auth/google/callback — cookie/query state mismatch → redirect invalid_state
+// ---------------------------------------------------------------------------
+
+it('20: callback with mismatched state cookie redirects with invalid_state', async () => {
+  await seedOAuthState();
+
+  const res = await get(
+    `/google/callback?code=fake-code&state=${TEST_OAUTH_STATE}`,
+    'oauth_state=wrong-state-value',
+  );
+
+  expect(res.status).toBe(302);
+  expect(res.headers.get('location')).toContain('oauth_error=invalid_state');
+});
+
+// ---------------------------------------------------------------------------
+// 21. GET /auth/google/callback — Redis key missing (expired/replayed) → redirect invalid_state
+// ---------------------------------------------------------------------------
+
+it('21: callback with expired/missing Redis state redirects with invalid_state', async () => {
+  // Do NOT seed Redis — key is absent
+  const res = await get(
+    `/google/callback?code=fake-code&state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  expect(res.status).toBe(302);
+  expect(res.headers.get('location')).toContain('oauth_error=invalid_state');
+});
+
+// ---------------------------------------------------------------------------
+// 22. GET /auth/google/callback — error query param → redirect access_denied
+// ---------------------------------------------------------------------------
+
+it('22: callback with ?error=access_denied redirects with oauth_error=access_denied', async () => {
+  const res = await get(
+    `/google/callback?error=access_denied&state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  expect(res.status).toBe(302);
+  expect(res.headers.get('location')).toContain('oauth_error=access_denied');
+});
+
+// ---------------------------------------------------------------------------
+// 23. GET /auth/google/callback — getToken throws → redirect invalid_token
+// ---------------------------------------------------------------------------
+
+it('23: callback when getToken throws redirects with oauth_error=invalid_token', async () => {
+  await seedOAuthState();
+  setupGoogleMock({ getTokenThrows: true });
+
+  const res = await get(
+    `/google/callback?code=bad-code&state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  expect(res.status).toBe(302);
+  expect(res.headers.get('location')).toContain('oauth_error=invalid_token');
+});
+
+// ---------------------------------------------------------------------------
+// 24. GET /auth/google/callback — unverified email in payload → redirect invalid_token
+// ---------------------------------------------------------------------------
+
+it('24: callback with email_verified=false redirects with oauth_error=invalid_token', async () => {
+  await seedOAuthState();
+  setupGoogleMock({ emailVerified: false });
+
+  const res = await get(
+    `/google/callback?code=fake-code&state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  expect(res.status).toBe(302);
+  expect(res.headers.get('location')).toContain('oauth_error=invalid_token');
+});
+
+// ---------------------------------------------------------------------------
+// 25. GET /auth/google/callback — missing code param → redirect invalid_token
+// ---------------------------------------------------------------------------
+
+it('25: callback without code param redirects with oauth_error=invalid_token', async () => {
+  await seedOAuthState();
+  // No code — state validates, but code exchange fails
+  const res = await get(
+    `/google/callback?state=${TEST_OAUTH_STATE}`,
+    `oauth_state=${TEST_OAUTH_STATE}`,
+  );
+
+  expect(res.status).toBe(302);
+  expect(res.headers.get('location')).toContain('oauth_error=invalid_token');
+});
+
+// ---------------------------------------------------------------------------
+// 26. GET /auth/sessions — authenticated user gets list with 1 current session
+// ---------------------------------------------------------------------------
+
+it('26: GET /auth/sessions returns 1 session with current=true', async () => {
+  await registerTestUser();
+  const loginRes = await loginTestUser();
+  const sessionCookie = cookieValue(loginRes, 'session')!;
+
+  const res = await get('/sessions', `session=${sessionCookie}`);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as {
+    data: { sessions: Array<{ id: number; current: boolean }> };
+    meta: { total: number };
+  };
+  expect(json.meta.total).toBe(1);
+  expect(json.data.sessions).toHaveLength(1);
+  expect(json.data.sessions[0]!.current).toBe(true);
+  expect(json.data.sessions[0]).not.toHaveProperty('userId');
+});
+
+// ---------------------------------------------------------------------------
+// 27. GET /auth/sessions — unauthenticated returns 401
+// ---------------------------------------------------------------------------
+
+it('27: GET /auth/sessions without auth returns 401', async () => {
+  const res = await get('/sessions');
+  expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// 28. GET /auth/sessions — two active sessions, correct current flag per caller
+// ---------------------------------------------------------------------------
+
+it('28: GET /auth/sessions shows 2 sessions with correct current flag', async () => {
+  await registerTestUser();
+  const loginRes1 = await loginTestUser(); // session 1
+  const loginRes2 = await loginTestUser(); // session 2
+  const cookie2 = cookieValue(loginRes2, 'session')!;
+
+  const res = await get('/sessions', `session=${cookie2}`);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as {
+    data: { sessions: Array<{ current: boolean }> };
+    meta: { total: number };
+  };
+  expect(json.meta.total).toBe(2);
+  expect(json.data.sessions.filter((s) => s.current)).toHaveLength(1);
+  expect(json.data.sessions.filter((s) => !s.current)).toHaveLength(1);
+});
+
+// ---------------------------------------------------------------------------
+// 29. DELETE /auth/sessions/:id — revoke non-current session, loggedOut=false
+// ---------------------------------------------------------------------------
+
+it('29: DELETE /auth/sessions/:id revokes a non-current session; loggedOut=false', async () => {
+  await registerTestUser();
+  await loginTestUser(); // session A (older)
+  const loginResB = await loginTestUser(); // session B (current)
+  const cookieB = cookieValue(loginResB, 'session')!;
+
+  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  const sessions = await prisma.session.findMany({
+    where: { userId: dbUser.id },
+    orderBy: { createdAt: 'asc' },
+  });
+  const sessionAId = sessions[0]!.id;
+
+  const res = await del(`/sessions/${sessionAId}`, `session=${cookieB}`);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { ok: boolean; loggedOut: boolean } };
+  expect(json.data.ok).toBe(true);
+  expect(json.data.loggedOut).toBe(false);
+
+  // Session A revoked in DB
+  const sessionA = await prisma.session.findUnique({ where: { id: sessionAId } });
+  expect(sessionA!.revokedAt).not.toBeNull();
+
+  // Auth cookies NOT cleared (Max-Age not 0)
+  expect(cookieMaxAge(res, 'session')).not.toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// 30. DELETE /auth/sessions/:id — revoke current session, loggedOut=true, cookies cleared
+// ---------------------------------------------------------------------------
+
+it('30: DELETE /auth/sessions/:id on current session returns loggedOut=true and clears cookies', async () => {
+  await registerTestUser();
+  const loginRes = await loginTestUser();
+  const sessionCookie = cookieValue(loginRes, 'session')!;
+
+  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  const session = await prisma.session.findFirst({ where: { userId: dbUser.id } });
+  const sessionId = session!.id;
+
+  const res = await del(`/sessions/${sessionId}`, `session=${sessionCookie}`);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { ok: boolean; loggedOut: boolean } };
+  expect(json.data.ok).toBe(true);
+  expect(json.data.loggedOut).toBe(true);
+
+  // Auth cookies cleared
+  expect(cookieMaxAge(res, 'session')).toBe(0);
+  expect(cookieMaxAge(res, 'refresh')).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// 31. DELETE /auth/sessions/:id — wrong user's session returns 403
+// ---------------------------------------------------------------------------
+
+it('31: DELETE /auth/sessions/:id on another users session returns 403', async () => {
+  // User A
+  await registerTestUser();
+  const loginResA = await loginTestUser();
+  const cookieA = cookieValue(loginResA, 'session')!;
+
+  // User B
+  await post('/register', { email: TEST_EMAIL_2, password: 'Test1234', fullName: 'User B' });
+  const loginResB = await post('/login', { email: TEST_EMAIL_2, password: 'Test1234' });
+  const userB = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL_2 } });
+  const sessionB = await prisma.session.findFirst({ where: { userId: userB.id } });
+
+  // User A tries to delete User B's session
+  const res = await del(`/sessions/${sessionB!.id}`, `session=${cookieA}`);
+  expect(res.status).toBe(403);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('FORBIDDEN');
+});
+
+// ---------------------------------------------------------------------------
+// 32. DELETE /auth/sessions/:id — non-existent session ID returns 403
+// ---------------------------------------------------------------------------
+
+it('32: DELETE /auth/sessions/:id with non-existent ID returns 403', async () => {
+  await registerTestUser();
+  const loginRes = await loginTestUser();
+  const sessionCookie = cookieValue(loginRes, 'session')!;
+
+  const res = await del('/sessions/99999999', `session=${sessionCookie}`);
+  expect(res.status).toBe(403);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('FORBIDDEN');
+});
+
+// ---------------------------------------------------------------------------
+// 33. GET /auth/ws-token — returns token + expiresIn=60, Redis key exists
+// ---------------------------------------------------------------------------
+
+it('33: GET /auth/ws-token issues ticket stored in Redis as userId:sessionId', async () => {
+  await registerTestUser();
+  const loginRes = await loginTestUser();
+  const sessionCookie = cookieValue(loginRes, 'session')!;
+
+  const res = await get('/ws-token', `session=${sessionCookie}`);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { token: string; expiresIn: number } };
+  expect(json.data.token).toBeTruthy();
+  expect(json.data.expiresIn).toBe(60);
+
+  // Redis key exists with userId:sessionId format
+  const redisVal = await redis.get(`ws_ticket:${json.data.token}`);
+  expect(redisVal).toBeTruthy();
+  const [userId, sessionId] = redisVal!.split(':');
+  expect(parseInt(userId!, 10)).toBeGreaterThan(0);
+  expect(parseInt(sessionId!, 10)).toBeGreaterThan(0);
+});
+
+// ---------------------------------------------------------------------------
+// 34. GET /auth/ws-token — unauthenticated returns 401
+// ---------------------------------------------------------------------------
+
+it('34: GET /auth/ws-token without auth returns 401', async () => {
+  const res = await get('/ws-token');
+  expect(res.status).toBe(401);
 });

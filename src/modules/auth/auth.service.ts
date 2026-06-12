@@ -13,6 +13,7 @@
 //     /auth/refresh should generate a new refresh token + hash, invalidate old.
 
 import { createHash, randomBytes } from 'node:crypto';
+import { OAuth2Client } from 'google-auth-library';
 import { config } from '../../lib/config.js';
 import { redis } from '../../lib/redis.js';
 import { signAccessToken } from '../../lib/jwt.js';
@@ -28,7 +29,9 @@ import {
   findSessionById,
   findSessionByRefreshHash,
   revokeSession,
+  findActiveSessionsByUser,
   type UserDTO,
+  type UserWithRelations,
 } from '../users/users.repository.js';
 import { sendWelcomeEmail, sendVerificationEmail } from '../email/email.service.js';
 import type {
@@ -295,4 +298,216 @@ export async function refresh(
 
   const accessToken = await signAccessToken({ userId: user.id, sessionId: session.id });
   return { accessToken };
+}
+
+// ---------------------------------------------------------------------------
+// Google OAuth — shared OAuth2 client (one per process)
+// ---------------------------------------------------------------------------
+
+const oauthClient = new OAuth2Client({
+  clientId: config.GOOGLE_CLIENT_ID,
+  clientSecret: config.GOOGLE_CLIENT_SECRET,
+  redirectUri: config.GOOGLE_REDIRECT_URI,
+});
+
+// ---------------------------------------------------------------------------
+// googleOAuthInit — generate CSRF state + return Google auth URL
+// ---------------------------------------------------------------------------
+
+export async function googleOAuthInit(
+  returnTo: string,
+): Promise<{ authUrl: string; state: string }> {
+  const state = randomBytes(32).toString('base64url');
+  await redis.set(
+    `oauth_state:${state}`,
+    JSON.stringify({ returnTo, createdAt: new Date().toISOString() }),
+    'EX',
+    600,
+  );
+  const authUrl = oauthClient.generateAuthUrl({
+    scope: ['openid', 'email', 'profile'],
+    state,
+    prompt: 'select_account',
+  });
+  return { authUrl, state };
+}
+
+// ---------------------------------------------------------------------------
+// handleGoogleCallback — exchange code, verify ID token, upsert user + session
+// ---------------------------------------------------------------------------
+
+export type GoogleCallbackOutcome =
+  | { ok: true; accessToken: string; refreshToken: string; returnTo: string }
+  | { ok: false; reason: string };
+
+export async function handleGoogleCallback(opts: {
+  code: string | undefined;
+  queryState: string | undefined;
+  cookieState: string | undefined;
+  ip: string | null;
+  userAgent: string | null;
+}): Promise<GoogleCallbackOutcome> {
+  const { code, queryState, cookieState, ip, userAgent } = opts;
+
+  // CSRF: cookie must be present and match query param
+  if (!cookieState || !queryState || queryState !== cookieState) {
+    return { ok: false, reason: 'invalid_state' };
+  }
+
+  // Atomic single-use state: GETDEL removes the key so it can't be replayed
+  const stateJson = await redis.getdel(`oauth_state:${queryState}`);
+  if (!stateJson) {
+    return { ok: false, reason: 'invalid_state' };
+  }
+
+  let returnTo = '/dashboard';
+  try {
+    const parsed = JSON.parse(stateJson) as { returnTo?: string };
+    if (typeof parsed.returnTo === 'string') returnTo = parsed.returnTo;
+  } catch {
+    // keep default
+  }
+
+  if (!code) {
+    return { ok: false, reason: 'invalid_token' };
+  }
+
+  // Exchange authorization code for tokens
+  let idToken: string;
+  try {
+    const { tokens } = await oauthClient.getToken(code);
+    if (!tokens.id_token) return { ok: false, reason: 'invalid_token' };
+    idToken = tokens.id_token;
+  } catch {
+    return { ok: false, reason: 'invalid_token' };
+  }
+
+  // Verify ID token and extract user identity
+  let email: string;
+  let fullName: string;
+  let avatarUrl: string | null;
+  try {
+    const ticket = await oauthClient.verifyIdToken({
+      idToken,
+      audience: config.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    if (!payload) return { ok: false, reason: 'invalid_token' };
+    if (!payload.email || payload.email_verified !== true) {
+      return { ok: false, reason: 'invalid_token' };
+    }
+    email = payload.email.toLowerCase();
+    fullName = payload.name ?? email.split('@')[0]!;
+    avatarUrl = payload.picture ?? null;
+  } catch {
+    return { ok: false, reason: 'invalid_token' };
+  }
+
+  // Find or create user — no auto-merge of email+google accounts (§1.2)
+  const existingUser = await findUserByEmail(email);
+  if (existingUser && existingUser.authProvider.name !== 'google') {
+    return { ok: false, reason: 'email_in_use_with_password' };
+  }
+
+  let user: UserWithRelations;
+  if (existingUser) {
+    user = existingUser;
+  } else {
+    const [authProvider, onboardingStatus] = await Promise.all([
+      prisma.authProvider.findUniqueOrThrow({ where: { name: 'google' } }),
+      // Google users bypass email verification — start as verified
+      prisma.onboardingStatus.findUniqueOrThrow({ where: { name: 'verified' } }),
+    ]);
+    user = await prisma.user.create({
+      data: {
+        email,
+        passwordHash: null,
+        fullName,
+        displayName: fullName,
+        avatarUrl,
+        authProviderId: authProvider.id,
+        onboardingStatusId: onboardingStatus.id,
+      },
+      include: { authProvider: true, onboardingStatus: true },
+    });
+  }
+
+  // Create session
+  const { raw: refreshToken, hash: refreshTokenHash } = makeRefreshToken();
+  const expiresAt = new Date(Date.now() + parseDurationToMs(config.REFRESH_TOKEN_EXPIRY));
+  const session = await createSession({
+    userId: user.id,
+    ipAddress: ip,
+    userAgent,
+    expiresAt,
+    refreshTokenHash,
+  });
+
+  const accessToken = await signAccessToken({ userId: user.id, sessionId: session.id });
+  return { ok: true, accessToken, refreshToken, returnTo };
+}
+
+// ---------------------------------------------------------------------------
+// listSessions — active sessions for the caller, current session flagged
+// ---------------------------------------------------------------------------
+
+export interface SessionItem {
+  id: number;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: Date;
+  expiresAt: Date;
+  current: boolean;
+}
+
+export async function listSessions(
+  userId: number,
+  currentSessionId: number,
+): Promise<SessionItem[]> {
+  const sessions = await findActiveSessionsByUser(userId);
+  return sessions.map((s) => ({
+    id: s.id,
+    ipAddress: s.ipAddress,
+    userAgent: s.userAgent,
+    createdAt: s.createdAt,
+    expiresAt: s.expiresAt,
+    current: s.id === currentSessionId,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// revokeSessionById — ownership check then revoke; 403 prevents enumeration
+// ---------------------------------------------------------------------------
+
+export async function revokeSessionById(
+  sessionId: number,
+  currentUserId: number,
+  currentSessionId: number,
+): Promise<{ loggedOut: boolean }> {
+  const session = await findSessionById(sessionId);
+
+  // Uniform 403 for not-found or wrong user (§3.4 — no enumeration leak)
+  if (!session || session.userId !== currentUserId) {
+    throw new AuthError(403, 'FORBIDDEN', 'Session not found or access denied');
+  }
+
+  // Idempotent: already-revoked sessions succeed without error
+  if (!session.revokedAt) {
+    await revokeSession(session.id);
+  }
+
+  return { loggedOut: session.id === currentSessionId };
+}
+
+// ---------------------------------------------------------------------------
+// issueWsTicket — 32-byte opaque ticket stored in Redis for 60 s
+// ---------------------------------------------------------------------------
+
+export async function issueWsTicket(
+  userId: number,
+  sessionId: number,
+): Promise<{ token: string }> {
+  const token = randomBytes(32).toString('base64url');
+  await redis.set(`ws_ticket:${token}`, `${userId}:${sessionId}`, 'EX', 60);
+  return { token };
 }

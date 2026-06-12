@@ -33,6 +33,10 @@ export const ResendVerificationSchema = z.object({
   email: z.string().email('Invalid email address').transform((e) => e.toLowerCase()),
 });
 
+export const SessionIdParamSchema = z.object({
+  id: z.coerce.number().int().positive(),
+});
+
 export type RegisterBody = z.infer<typeof RegisterSchema>;
 export type LoginBody = z.infer<typeof LoginSchema>;
 export type VerifyEmailBody = z.infer<typeof VerifyEmailSchema>;
