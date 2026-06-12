@@ -57,7 +57,10 @@ async function main(): Promise<void> {
   // 8. transaction_type
   await upsertByName(prisma.transactionType, ['native', 'erc20', 'nft']);
 
-  // 9. chains — GATE B resolved in Stage 5; list locked by Idowu
+  // 9. transaction_direction
+  await upsertByName(prisma.transactionDirection, ['buy', 'sell', 'transfer']);
+
+  // 10. chains — GATE B resolved in Stage 5; list locked by Idowu
   for (const chain of CHAINS) {
     await prisma.chain.upsert({
       where: { slug: chain.slug },
@@ -66,7 +69,7 @@ async function main(): Promise<void> {
     });
   }
 
-  // 10. tokens — 30 popular tokens for dev usability (upsert by symbol)
+  // 11. tokens — 30 popular tokens for dev usability (upsert by symbol)
   for (const token of TOKENS) {
     await prisma.token.upsert({
       where: { symbol: token.symbol },
@@ -87,7 +90,7 @@ async function main(): Promise<void> {
   }
 
   // eslint-disable-next-line no-console
-  console.log('[seed] lookup tables seeded (auth_provider, onboarding_status, plan, billing_cycle, subscription_status, payment_status, portfolio_type, transaction_type, chain, token — 30 tokens).');
+  console.log('[seed] lookup tables seeded (auth_provider, onboarding_status, plan, billing_cycle, subscription_status, payment_status, portfolio_type, transaction_type, transaction_direction, chain, token — 30 tokens).');
 }
 
 main()

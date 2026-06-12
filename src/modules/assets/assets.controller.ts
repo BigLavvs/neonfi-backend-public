@@ -34,7 +34,7 @@ function parseId(raw: string): number | null {
 router.use('*', requireAuth);
 router.use('*', async (c, next) => {
   const user = c.get('user');
-  const portfolioId = parseId(c.req.param('portfolioId'));
+  const portfolioId = parseId(c.req.param('portfolioId') ?? '');
   if (portfolioId === null) {
     return c.json(err('VALIDATION_ERROR', 'Invalid portfolio ID'), 400);
   }

@@ -137,7 +137,6 @@ async function portDelete(path: string, cookies?: string): Promise<Response> {
 beforeEach(async () => {
   await prisma.payment.deleteMany();
   await prisma.subscription.deleteMany();
-  await prisma.asset.deleteMany();
   await prisma.portfolio.deleteMany();
   await prisma.session.deleteMany();
   await prisma.user.deleteMany();

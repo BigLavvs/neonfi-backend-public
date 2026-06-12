@@ -291,6 +291,12 @@ model Transaction {
   portfolioId     Int
   type            TransactionType          @relation("TransactionType", fields: [typeId], references: [id])
   typeId          Int
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, same pattern as
+  // Session.refreshTokenHash, Subscription.scheduledPlanId): architecture rep
+  // treats direction as first-class ("buy | sell | transfer") and the balance
+  // recalc rule reads from it, but the schema docx omits the column.
+  direction       TransactionDirection     @relation("TransactionDirection", fields: [directionId], references: [id])
+  directionId     Int
   from            String?                  @db.VarChar(255)
   to              String?                  @db.VarChar(255)
   gasFee          Decimal?                 @db.Decimal(20, 8)
@@ -306,7 +312,16 @@ model Transaction {
 
   @@index([portfolioId])
   @@index([typeId])
+  @@index([directionId])
   @@map("transaction")
+}
+
+model TransactionDirection {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique // buy | sell | transfer
+  transactions Transaction[] @relation("TransactionDirection")
+
+  @@map("transaction_direction")
 }
 
 model TransactionType {
