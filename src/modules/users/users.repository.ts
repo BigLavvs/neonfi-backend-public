@@ -147,6 +147,22 @@ export async function findActiveSessionsByUser(userId: number): Promise<Session[
 }
 
 // ---------------------------------------------------------------------------
+// Onboarding transitions (called by subscriptions module during activation)
+// ---------------------------------------------------------------------------
+
+export async function transitionToCompleteOnboarding(
+  userId: number,
+  tx?: Prisma.TransactionClient,
+): Promise<void> {
+  const client = tx ?? prisma;
+  const status = await client.onboardingStatus.findUniqueOrThrow({ where: { name: 'complete' } });
+  await client.user.update({
+    where: { id: userId },
+    data: { onboardingStatusId: status.id },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Profile update
 // ---------------------------------------------------------------------------
 

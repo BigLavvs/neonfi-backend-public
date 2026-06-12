@@ -4,11 +4,21 @@
 // beforeEach truncates session and user tables, clears auth Redis keys.
 // Uses Hono's app.request() for in-process HTTP.
 
-import { it, beforeEach, expect } from 'vitest';
+import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
 import { cookieValue, clearRedisAuthKeys } from './helpers.js';
+
+// ---------------------------------------------------------------------------
+// Email mock — prevents real Resend calls during tests
+// ---------------------------------------------------------------------------
+
+vi.mock('../src/modules/email/email.service.js', () => ({
+  sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
+  sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
+  sendSubscriptionConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers

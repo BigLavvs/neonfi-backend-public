@@ -32,6 +32,16 @@ vi.mock('google-auth-library', () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// Email mock — prevents real Resend calls during tests
+// ---------------------------------------------------------------------------
+
+vi.mock('../src/modules/email/email.service.js', () => ({
+  sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
+  sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
+  sendSubscriptionConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+}));
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

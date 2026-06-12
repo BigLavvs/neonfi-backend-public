@@ -114,3 +114,23 @@ export async function sendVerificationEmail(opts: {
       `Hi ${opts.fullName},\n\nPlease verify your email address by visiting:\n${opts.verificationUrl}\n\nThis link expires in 24 hours.`,
   });
 }
+
+export async function sendSubscriptionConfirmationEmail(opts: {
+  to: string;
+  fullName: string;
+  plan: string;
+}): Promise<void> {
+  const planLabel = opts.plan === 'pro' ? 'Pro' : 'Free';
+  await send({
+    to: opts.to,
+    template: 'subscription_confirmation',
+    subject: `Your Neonfi ${planLabel} plan is now active`,
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>Your Neonfi <strong>${planLabel}</strong> subscription is confirmed and active.</p>
+      <p>Head to your dashboard to get started.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nYour Neonfi ${planLabel} subscription is confirmed and active.\n\nHead to your dashboard to get started.`,
+  });
+}

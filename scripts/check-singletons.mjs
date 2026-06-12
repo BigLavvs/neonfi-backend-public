@@ -20,6 +20,7 @@ const allowDir = join(root, 'src', 'lib') + sep;
 const patterns = [
   { re: /new\s+PrismaClient\s*\(/, what: 'new PrismaClient()' },
   { re: /new\s+(IORedis|Redis)\s*\(/, what: 'new Redis()' },
+  { re: /new\s+Stripe\s*\(/, what: 'new Stripe()' },
 ];
 
 /** @param {string} dir @returns {string[]} */
@@ -54,4 +55,4 @@ if (violations.length > 0) {
   process.exit(1);
 }
 
-console.log('[check:singletons] OK — no Prisma/Redis client constructed outside src/lib/.');
+console.log('[check:singletons] OK — no Prisma/Redis/Stripe client constructed outside src/lib/.');
