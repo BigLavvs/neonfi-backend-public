@@ -11,6 +11,7 @@ import { describe, it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
+import { cookieValue, cookieMaxAge, clearRedisAuthKeys } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Google OAuth mocks — hoisted so the factory runs before module loads
@@ -51,38 +52,6 @@ async function post(
   });
 }
 
-function cookieValue(res: Response, name: string): string | undefined {
-  const setCookies = res.headers.getSetCookie?.() ?? [];
-  for (const header of setCookies) {
-    const match = new RegExp(`^${name}=([^;]+)`).exec(header);
-    if (match?.[1]) return match[1];
-  }
-  return undefined;
-}
-
-function cookieMaxAge(res: Response, name: string): number | undefined {
-  const setCookies = res.headers.getSetCookie?.() ?? [];
-  for (const header of setCookies) {
-    if (!header.startsWith(`${name}=`)) continue;
-    const m = /Max-Age=(\d+)/i.exec(header);
-    return m ? parseInt(m[1]!, 10) : undefined;
-  }
-  return undefined;
-}
-
-async function clearRedisAuthKeys(): Promise<void> {
-  const patterns = [
-    'email_verify:*',
-    'lockout:login:*',
-    'resend_verify:*',
-    'ws_ticket:*',
-    'oauth_state:*',
-  ];
-  for (const pattern of patterns) {
-    const keys = await redis.keys(pattern);
-    if (keys.length > 0) await redis.del(keys);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -131,7 +100,8 @@ it('1: register creates user with correct fields and pending_verification status
   expect(json.data.user.emailVerified).toBe(false);
   expect(json.data.user.onboardingStatus).toBe('pending_verification');
   expect(json.data.user).not.toHaveProperty('passwordHash');
-  expect(json.data.user).not.toHaveProperty('newsletterSubscribed');
+  expect(json.data.user).not.toHaveProperty('authProviderId');
+  expect(json.data.user.newsletterSubscribed).toBe(false);
 
   // Verify DB row
   const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });

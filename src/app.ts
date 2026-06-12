@@ -13,6 +13,7 @@ import { isProduction } from './lib/config.js';
 import { checkHealth } from './lib/health.js';
 import { err, ok } from './lib/envelope.js';
 import { authRouter } from './modules/auth/auth.controller.js';
+import { usersRouter } from './modules/users/users.controller.js';
 
 export function createApp(): Hono {
   const app = new Hono();
@@ -30,6 +31,7 @@ export function createApp(): Hono {
   const api = new Hono();
   api.get('/_ping', (c) => c.json(ok({ ok: true }), 200));
   api.route('/auth', authRouter);
+  api.route('/users', usersRouter);
   app.route('/api/v1', api);
 
   // 404 + global error handler — standard envelopes, no stack traces

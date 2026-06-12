@@ -7,7 +7,10 @@ export default defineConfig({
     // to account for Neon cold-start latency.
     testTimeout: 30000,
     hookTimeout: 30000,
-    // Single file runs sequentially by default; explicit for clarity.
+    // Tests share a single dev DB + Redis instance. Run ALL test files
+    // sequentially so each file's beforeEach truncations don't race with
+    // another file's test setup.
+    fileParallelism: false,
     sequence: { sequential: true },
   },
 });

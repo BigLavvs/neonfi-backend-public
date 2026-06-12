@@ -28,12 +28,19 @@ export interface UserDTO {
   email: string;
   fullName: string;
   displayName: string | null;
+  avatarUrl: string | null;
   /** Gate C: this is `displayName`, not a `name` column. */
   authProvider: string;
   /** Gate D: derived — onboardingStatus.name !== 'pending_verification'. */
   emailVerified: boolean;
   onboardingStatus: string;
+  /** TODO(Stage 3): populate from Subscription row once billing is implemented. */
+  plan: string | null;
+  /** TODO(Stage 3): populate from Subscription row once billing is implemented. */
+  billingCycle: string | null;
+  newsletterSubscribed: boolean;
   createdAt: Date;
+  updatedAt: Date;
 }
 
 export function toUserDTO(user: UserWithRelations): UserDTO {
@@ -42,10 +49,15 @@ export function toUserDTO(user: UserWithRelations): UserDTO {
     email: user.email,
     fullName: user.fullName,
     displayName: user.displayName,
+    avatarUrl: user.avatarUrl,
     authProvider: user.authProvider.name,
     emailVerified: user.onboardingStatus.name !== 'pending_verification',
     onboardingStatus: user.onboardingStatus.name,
+    plan: null,        // TODO(Stage 3): resolve from subscription
+    billingCycle: null, // TODO(Stage 3): resolve from subscription
+    newsletterSubscribed: user.newsletterSubscribed,
     createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
   };
 }
 
@@ -131,5 +143,25 @@ export async function findActiveSessionsByUser(userId: number): Promise<Session[
       expiresAt: { gt: new Date() },
     },
     orderBy: { createdAt: 'desc' },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Profile update
+// ---------------------------------------------------------------------------
+
+export async function updateProfile(
+  userId: number,
+  data: {
+    fullName?: string;
+    displayName?: string | null;
+    avatarUrl?: string | null;
+    newsletterSubscribed?: boolean;
+  },
+): Promise<UserWithRelations> {
+  return prisma.user.update({
+    where: { id: userId },
+    data,
+    ...USER_INCLUDE,
   });
 }
