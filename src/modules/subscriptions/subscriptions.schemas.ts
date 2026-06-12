@@ -39,3 +39,11 @@ export const DowngradeSubscriptionSchema = z
   );
 
 export type DowngradeSubscriptionBody = z.infer<typeof DowngradeSubscriptionSchema>;
+
+export const RefundSubscriptionSchema = z
+  .object({
+    reason: z.string().max(500).optional(),
+  })
+  .strict();
+
+export type RefundSubscriptionBody = z.infer<typeof RefundSubscriptionSchema>;

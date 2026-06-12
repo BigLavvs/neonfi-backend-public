@@ -20,17 +20,22 @@ import {
   upgradeSubscription,
   downgradeSubscription,
   cancelSubscription,
+  refundSubscription,
 } from './subscriptions.service.js';
 import {
   CreateSubscriptionSchema,
   UpgradeSubscriptionSchema,
   DowngradeSubscriptionSchema,
+  RefundSubscriptionSchema,
 } from './subscriptions.schemas.js';
 
 const router = new Hono<AuthEnv>();
 
 function handleError(e: unknown, c: { json(body: unknown, status?: number): Response }): Response {
   if (e instanceof SubscriptionError) {
+    if (e.meta) {
+      return c.json({ ...err(e.code, e.message), meta: e.meta }, e.statusCode);
+    }
     return c.json(err(e.code, e.message), e.statusCode);
   }
   throw e;
@@ -153,6 +158,33 @@ router.post('/cancel', requireAuth, async (c) => {
   try {
     const user = c.get('user');
     const result = await cancelSubscription(user);
+    return c.json(ok(result), 200);
+  } catch (e) {
+    return handleError(e, c);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /subscriptions/refund — request refund of most recent payment
+// ---------------------------------------------------------------------------
+
+router.post('/refund', requireAuth, async (c) => {
+  let rawBody: unknown;
+  try {
+    rawBody = await c.req.json();
+  } catch {
+    rawBody = {};
+  }
+
+  const parsed = RefundSubscriptionSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return c.json(err('VALIDATION_ERROR', issue?.message ?? 'Validation failed'), 400);
+  }
+
+  try {
+    const user = c.get('user');
+    const result = await refundSubscription(user, parsed.data);
     return c.json(ok(result), 200);
   } catch (e) {
     return handleError(e, c);

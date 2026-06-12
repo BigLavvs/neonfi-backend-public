@@ -26,7 +26,7 @@ import {
   sendCancellationScheduledEmail,
 } from '../email/email.service.js';
 import type { UserWithRelations } from '../users/users.repository.js';
-import type { CreateSubscriptionBody, UpgradeSubscriptionBody, DowngradeSubscriptionBody } from './subscriptions.schemas.js';
+import type { CreateSubscriptionBody, UpgradeSubscriptionBody, DowngradeSubscriptionBody, RefundSubscriptionBody } from './subscriptions.schemas.js';
 
 // ---------------------------------------------------------------------------
 // Shared error type
@@ -37,6 +37,7 @@ export class SubscriptionError extends Error {
     public readonly statusCode: number,
     public readonly code: string,
     message: string,
+    public readonly meta?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'SubscriptionError';
@@ -351,4 +352,56 @@ export async function cancelSubscription(
   }));
 
   return { subscription: toSubscriptionDTO(updatedSub) };
+}
+
+// ---------------------------------------------------------------------------
+// refundSubscription — POST /subscriptions/refund
+// ---------------------------------------------------------------------------
+
+const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+
+export async function refundSubscription(
+  user: UserWithRelations,
+  body: RefundSubscriptionBody,
+): Promise<{ refundRequested: boolean; paymentId: number }> {
+  const sub = await findSubscriptionByUserId(user.id);
+  if (!sub) {
+    throw new SubscriptionError(409, 'NO_SUBSCRIPTION_TO_REFUND', 'No subscription found for this user');
+  }
+
+  const succeededStatus = await prisma.paymentStatus.findUniqueOrThrow({ where: { name: 'succeeded' } });
+  const payment = await prisma.payment.findFirst({
+    where: { userId: user.id, statusId: succeededStatus.id },
+    orderBy: { createdAt: 'desc' },
+    include: { status: true },
+  });
+  if (!payment) {
+    throw new SubscriptionError(409, 'NO_PAYMENT_TO_REFUND', 'No successful payment found to refund');
+  }
+
+  const eligible =
+    payment.refundAvailable &&
+    payment.status.name === 'succeeded' &&
+    Date.now() - payment.createdAt.getTime() <= THREE_DAYS_MS;
+
+  if (!eligible) {
+    throw new SubscriptionError(400, 'REFUND_NOT_ELIGIBLE', 'This payment is not eligible for refund');
+  }
+
+  const refundParams: Parameters<typeof stripe.refunds.create>[0] = {
+    payment_intent: payment.stripePaymentIntentId,
+  };
+  if (body.reason) {
+    refundParams.reason = 'requested_by_customer';
+    refundParams.metadata = { user_reason: body.reason.slice(0, 500) };
+  }
+
+  try {
+    await stripe.refunds.create(refundParams);
+  } catch (e: unknown) {
+    const code = (e as { code?: string }).code ?? 'unknown';
+    throw new SubscriptionError(400, 'REFUND_FAILED', 'Refund request failed', { stripeCode: code });
+  }
+
+  return { refundRequested: true, paymentId: payment.id };
 }

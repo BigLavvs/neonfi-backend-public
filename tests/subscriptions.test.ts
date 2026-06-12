@@ -6,7 +6,7 @@
 import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { cookieValue, clearRedisAuthKeys } from './helpers.js';
+import { cookieValue, clearRedisAuthKeys, seedPayment } from './helpers.js';
 import { config } from '../src/lib/config.js';
 
 // ---------------------------------------------------------------------------
@@ -19,12 +19,14 @@ const {
   mockSubscriptionsRetrieve,
   mockSubscriptionSchedulesCreate,
   mockSubscriptionSchedulesUpdate,
+  mockRefundsCreate,
 } = vi.hoisted(() => ({
   mockCreateSession: vi.fn(),
   mockSubscriptionsUpdate: vi.fn(),
   mockSubscriptionsRetrieve: vi.fn(),
   mockSubscriptionSchedulesCreate: vi.fn(),
   mockSubscriptionSchedulesUpdate: vi.fn(),
+  mockRefundsCreate: vi.fn(),
 }));
 
 vi.mock('stripe', () => {
@@ -32,6 +34,7 @@ vi.mock('stripe', () => {
     checkout: { sessions: { create: mockCreateSession } },
     subscriptions: { update: mockSubscriptionsUpdate, retrieve: mockSubscriptionsRetrieve },
     subscriptionSchedules: { create: mockSubscriptionSchedulesCreate, update: mockSubscriptionSchedulesUpdate },
+    refunds: { create: mockRefundsCreate },
   }));
   return { default: Stripe };
 });
@@ -164,6 +167,7 @@ async function createProSubscription(
 beforeEach(async () => {
   vi.clearAllMocks();
   mockCreateSession.mockResolvedValue({ url: 'https://checkout.stripe.com/test-session-url' });
+  mockRefundsCreate.mockResolvedValue({ id: 're_test_refund_id', status: 'succeeded' });
   mockSubscriptionsRetrieve.mockResolvedValue({
     items: { data: [{ id: 'si_test_item_id' }] },
     current_period_end: 1751356800,   // ~2025-07-01 UTC (Unix timestamp)
@@ -176,6 +180,7 @@ beforeEach(async () => {
   });
   mockSubscriptionSchedulesCreate.mockResolvedValue({ id: 'sub_sched_test_id' });
   mockSubscriptionSchedulesUpdate.mockResolvedValue({ id: 'sub_sched_test_id' });
+  await prisma.payment.deleteMany();
   await prisma.subscription.deleteMany();
   await prisma.session.deleteMany();
   await prisma.user.deleteMany();
@@ -772,4 +777,216 @@ it('78: cancel free subscription → 400 CANNOT_CANCEL_FREE', async () => {
 
   const json = await res.json() as { error: { code: string } };
   expect(json.error.code).toBe('CANNOT_CANCEL_FREE');
+});
+
+// ---------------------------------------------------------------------------
+// Refund tests helpers
+// ---------------------------------------------------------------------------
+
+async function createProSubDirectly(email: string): Promise<{ userId: number; subscriptionId: number }> {
+  const user = await prisma.user.findUniqueOrThrow({ where: { email } });
+  const plan = await prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } });
+  const cycle = await prisma.billingCycle.findUniqueOrThrow({ where: { name: 'monthly' } });
+  const statusRow = await prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'active' } });
+  const sub = await prisma.subscription.create({
+    data: {
+      userId: user.id,
+      planId: plan.id,
+      billingCycleId: cycle.id,
+      statusId: statusRow.id,
+      stripeCustomerId: 'cus_test_refund',
+      stripeSubscriptionId: 'sub_test_refund',
+      currentPeriodStart: new Date('2026-06-01T00:00:00Z'),
+      currentPeriodEnd: new Date('2026-07-01T00:00:00Z'),
+    },
+  });
+  return { userId: user.id, subscriptionId: sub.id };
+}
+
+// ---------------------------------------------------------------------------
+// 109. POST /subscriptions/refund — eligible succeeded payment within 3 days
+// ---------------------------------------------------------------------------
+
+it('109: POST /subscriptions/refund — eligible payment within 3 days → 200, Stripe called correctly, Payment not mutated', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
+
+  const payment = await seedPayment({
+    userId,
+    subscriptionId,
+    status: 'succeeded',
+    refundAvailable: true,
+  });
+
+  const res = await post('/refund', { reason: 'I changed my mind' }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { refundRequested: boolean; paymentId: number } };
+  expect(json.data.refundRequested).toBe(true);
+  expect(json.data.paymentId).toBe(payment.id);
+
+  // Stripe called with correct args
+  expect(mockRefundsCreate).toHaveBeenCalledWith(
+    expect.objectContaining({
+      payment_intent: payment.stripePaymentIntentId,
+      reason: 'requested_by_customer',
+      metadata: { user_reason: 'I changed my mind' },
+    }),
+  );
+
+  // Payment row NOT mutated — status still succeeded, refundAvailable still true
+  const dbPayment = await prisma.payment.findUniqueOrThrow({
+    where: { id: payment.id },
+    include: { status: true },
+  });
+  expect(dbPayment.status.name).toBe('succeeded');
+  expect(dbPayment.refundAvailable).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// 110. POST /subscriptions/refund — no reason
+// ---------------------------------------------------------------------------
+
+it('110: POST /subscriptions/refund — no reason → 200, Stripe called without reason or metadata', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
+
+  await seedPayment({ userId, subscriptionId, status: 'succeeded', refundAvailable: true });
+
+  const res = await post('/refund', {}, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { refundRequested: boolean } };
+  expect(json.data.refundRequested).toBe(true);
+
+  // Called without reason and without metadata.user_reason
+  expect(mockRefundsCreate).toHaveBeenCalledWith(
+    expect.not.objectContaining({ reason: expect.anything() }),
+  );
+  const callArg = mockRefundsCreate.mock.calls[0]![0] as Record<string, unknown>;
+  expect(callArg.reason).toBeUndefined();
+  expect((callArg.metadata as Record<string, unknown> | undefined)?.user_reason).toBeUndefined();
+});
+
+// ---------------------------------------------------------------------------
+// 111. POST /subscriptions/refund — payment >3 days old → 400 REFUND_NOT_ELIGIBLE
+// ---------------------------------------------------------------------------
+
+it('111: POST /subscriptions/refund — payment >3 days old → 400 REFUND_NOT_ELIGIBLE; Stripe NOT called', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
+
+  await seedPayment({
+    userId,
+    subscriptionId,
+    status: 'succeeded',
+    refundAvailable: true,
+    createdAt: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000), // 4 days ago
+  });
+
+  const res = await post('/refund', {}, cookies);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('REFUND_NOT_ELIGIBLE');
+  expect(mockRefundsCreate).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 112. POST /subscriptions/refund — payment.refundAvailable=false → 400
+// ---------------------------------------------------------------------------
+
+it('112: POST /subscriptions/refund — refundAvailable=false → 400 REFUND_NOT_ELIGIBLE; Stripe NOT called', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
+
+  await seedPayment({
+    userId,
+    subscriptionId,
+    status: 'succeeded',
+    refundAvailable: false,
+  });
+
+  const res = await post('/refund', {}, cookies);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('REFUND_NOT_ELIGIBLE');
+  expect(mockRefundsCreate).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 113. POST /subscriptions/refund — no successful payments → 409
+// ---------------------------------------------------------------------------
+
+it('113: POST /subscriptions/refund — no successful payments → 409 NO_PAYMENT_TO_REFUND', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
+
+  // Only failed and pending payments
+  await seedPayment({ userId, subscriptionId, status: 'failed' });
+  await seedPayment({ userId, subscriptionId, status: 'pending' });
+
+  const res = await post('/refund', {}, cookies);
+  expect(res.status).toBe(409);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('NO_PAYMENT_TO_REFUND');
+  expect(mockRefundsCreate).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 114. POST /subscriptions/refund — no subscription → 409
+// ---------------------------------------------------------------------------
+
+it('114: POST /subscriptions/refund — no subscription → 409 NO_SUBSCRIPTION_TO_REFUND', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+
+  const res = await post('/refund', {}, cookies);
+  expect(res.status).toBe(409);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('NO_SUBSCRIPTION_TO_REFUND');
+  expect(mockRefundsCreate).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 115. POST /subscriptions/refund — Stripe throws → 400 REFUND_FAILED with meta.stripeCode
+// ---------------------------------------------------------------------------
+
+it('115: POST /subscriptions/refund — Stripe throws → 400 REFUND_FAILED with meta.stripeCode; no DB writes', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
+
+  const payment = await seedPayment({
+    userId,
+    subscriptionId,
+    status: 'succeeded',
+    refundAvailable: true,
+  });
+
+  const stripeError = Object.assign(new Error('Stripe error'), { code: 'card_error' });
+  mockRefundsCreate.mockRejectedValueOnce(stripeError);
+
+  const res = await post('/refund', {}, cookies);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string }; meta: { stripeCode: string } };
+  expect(json.error.code).toBe('REFUND_FAILED');
+  expect(json.meta.stripeCode).toBe('card_error');
+
+  // Payment row NOT mutated
+  const dbPayment = await prisma.payment.findUniqueOrThrow({
+    where: { id: payment.id },
+    include: { status: true },
+  });
+  expect(dbPayment.status.name).toBe('succeeded');
+  expect(dbPayment.refundAvailable).toBe(true);
 });

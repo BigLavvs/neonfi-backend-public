@@ -16,6 +16,7 @@ import { authRouter } from './modules/auth/auth.controller.js';
 import { usersRouter } from './modules/users/users.controller.js';
 import { subscriptionsRouter } from './modules/subscriptions/subscriptions.controller.js';
 import { webhooksRouter } from './modules/webhooks/webhooks.controller.js';
+import { paymentsRouter } from './modules/payments/payments.controller.js';
 
 export function createApp(): Hono {
   const app = new Hono();
@@ -36,6 +37,7 @@ export function createApp(): Hono {
   api.route('/users', usersRouter);
   api.route('/subscriptions', subscriptionsRouter);
   api.route('/webhooks', webhooksRouter);
+  api.route('/payments', paymentsRouter);
   app.route('/api/v1', api);
 
   // 404 + global error handler — standard envelopes, no stack traces

@@ -96,7 +96,9 @@ async function loginTestUser(): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 beforeEach(async () => {
-  // Delete in FK-safe order: session → user (lookup tables left intact)
+  // Delete in FK-safe order: payment → subscription → session → user
+  await prisma.payment.deleteMany();
+  await prisma.subscription.deleteMany();
   await prisma.session.deleteMany();
   await prisma.user.deleteMany();
   await clearRedisAuthKeys();
