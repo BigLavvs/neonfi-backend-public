@@ -10,6 +10,7 @@
 
 import { prisma } from '../src/lib/prisma.js';
 import { CHAINS } from '../src/modules/chains/chains.constants.js';
+import { TOKENS } from '../src/modules/tokens/tokens.constants.js';
 
 async function upsertByName(
   model: { upsert: (args: unknown) => Promise<unknown> },
@@ -65,11 +66,28 @@ async function main(): Promise<void> {
     });
   }
 
-  // `token`: populated by the Token Metadata Sync job (Stage 9); not hand-seeded
-  //   here. Vendor is an open decision (Appendix item 2).
+  // 10. tokens — 30 popular tokens for dev usability (upsert by symbol)
+  for (const token of TOKENS) {
+    await prisma.token.upsert({
+      where: { symbol: token.symbol },
+      update: {
+        name: token.name,
+        rank: token.rank,
+        currentPrice: token.currentPrice,
+        marketCap: token.marketCap,
+      },
+      create: {
+        name: token.name,
+        symbol: token.symbol,
+        rank: token.rank,
+        currentPrice: token.currentPrice,
+        marketCap: token.marketCap,
+      },
+    });
+  }
 
   // eslint-disable-next-line no-console
-  console.log('[seed] lookup tables seeded (auth_provider, onboarding_status, plan, billing_cycle, subscription_status, payment_status, portfolio_type, transaction_type, chain). token intentionally empty.');
+  console.log('[seed] lookup tables seeded (auth_provider, onboarding_status, plan, billing_cycle, subscription_status, payment_status, portfolio_type, transaction_type, chain, token — 30 tokens).');
 }
 
 main()
