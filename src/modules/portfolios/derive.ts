@@ -1,10 +1,11 @@
-// Derived portfolio fields — all return 0 until later stages.
-// TODO(Stage 8): sum totalValue from assets × prices.
+// Derived portfolio fields — PnL stays 0 until Stage 13.
 // TODO(Stage 13): PnL from BalanceSnapshot rows.
 //
 // Redis cache key pattern: `portfolio_pnl:<portfolioId>` (5-min TTL).
 // Cache wiring is deferred to Stage 13. Do NOT write zeros to Redis here —
 // writing 0s would make stale cache indistinguishable from real 0-balance portfolios.
+
+import { prisma } from '../../lib/prisma.js';
 
 export interface DerivedFields {
   totalValue: number;
@@ -18,9 +19,21 @@ export interface DerivedFields {
   pnl30dValue: number;
 }
 
-export function computeDerived(): DerivedFields {
+export async function computeDerived(portfolioId: number): Promise<DerivedFields> {
+  const assets = await prisma.asset.findMany({
+    where: { portfolioId },
+    include: { token: true },
+  });
+
+  let totalValue = 0;
+  for (const a of assets) {
+    const balance = Number(a.balance.toString());
+    const price = Number(a.token.currentPrice.toString());
+    totalValue += balance * price;
+  }
+
   return {
-    totalValue: 0,
+    totalValue,
     pnlAllTime: 0,
     pnlAllTimeValue: 0,
     pnl24h: 0,

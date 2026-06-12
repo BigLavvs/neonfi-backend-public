@@ -98,7 +98,7 @@ export async function createPortfolio(
       walletAddress: validation.normalized!,
       chainId: chain.id,
     });
-    return toPortfolioDTO(portfolio);
+    return await toPortfolioDTO(portfolio);
   }
 
   // type === 'manual'
@@ -108,7 +108,7 @@ export async function createPortfolio(
     typeId: portfolioType.id,
     startingBalance: body.startingBalance,
   });
-  return toPortfolioDTO(portfolio);
+  return await toPortfolioDTO(portfolio);
 }
 
 export async function listPortfolios(
@@ -120,7 +120,7 @@ export async function listPortfolios(
     offset: query.offset,
   });
   return {
-    portfolios: portfolios.map(toPortfolioDTO),
+    portfolios: await Promise.all(portfolios.map((p) => toPortfolioDTO(p))),
     meta: { limit: query.limit, offset: query.offset, total },
   };
 }
@@ -130,7 +130,7 @@ export async function getPortfolio(userId: number, id: number): Promise<Portfoli
   if (!portfolio || portfolio.userId !== userId) {
     throw new PortfolioError(403, 'FORBIDDEN', 'Forbidden');
   }
-  return toPortfolioDTO(portfolio);
+  return await toPortfolioDTO(portfolio);
 }
 
 export async function updatePortfolio(
@@ -143,11 +143,11 @@ export async function updatePortfolio(
     throw new PortfolioError(403, 'FORBIDDEN', 'Forbidden');
   }
   if (body.name === portfolio.name) {
-    return toPortfolioDTO(portfolio);
+    return await toPortfolioDTO(portfolio);
   }
   await assertSlugAvailable(userId, body.name, id);
   const updated = await updatePortfolioName(id, body.name);
-  return toPortfolioDTO(updated);
+  return await toPortfolioDTO(updated);
 }
 
 export async function deletePortfolioById(userId: number, id: number): Promise<void> {

@@ -29,7 +29,8 @@ export interface PortfolioDTO {
   updatedAt: Date;
 }
 
-export function toPortfolioDTO(portfolio: PortfolioWithRelations): PortfolioDTO {
+export async function toPortfolioDTO(portfolio: PortfolioWithRelations): Promise<PortfolioDTO> {
+  const derived = await computeDerived(portfolio.id);
   return {
     id: portfolio.id,
     userId: portfolio.userId,
@@ -43,7 +44,7 @@ export function toPortfolioDTO(portfolio: PortfolioWithRelations): PortfolioDTO 
         ? Number(portfolio.startingBalance.toString())
         : null,
     netDeposit: Number(portfolio.netDeposit.toString()),
-    ...computeDerived(),
+    ...derived,
     createdAt: portfolio.createdAt,
     updatedAt: portfolio.updatedAt,
   };
