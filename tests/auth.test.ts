@@ -42,6 +42,11 @@ vi.mock('../src/modules/email/email.service.js', () => ({
   sendUpgradeEmail: vi.fn().mockResolvedValue(undefined),
   sendDowngradeScheduledEmail: vi.fn().mockResolvedValue(undefined),
   sendCancellationScheduledEmail: vi.fn().mockResolvedValue(undefined),
+  sendPaymentReceiptEmail: vi.fn().mockResolvedValue(undefined),
+  sendPaymentFailedEmail: vi.fn().mockResolvedValue(undefined),
+  sendRefundConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+  sendSubscriptionExpiredEmail: vi.fn().mockResolvedValue(undefined),
+  sendPlanDowngradeAppliedEmail: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ---------------------------------------------------------------------------

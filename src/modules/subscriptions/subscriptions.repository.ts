@@ -31,11 +31,12 @@ export async function createFreeSubscription(
   userId: number,
   tx?: Prisma.TransactionClient,
 ): Promise<SubscriptionWithRelations> {
-  const client = tx ?? prisma;
+  // Lookups use the main prisma client — static seed data, safe outside tx.
   const [plan, status] = await Promise.all([
-    client.plan.findUniqueOrThrow({ where: { name: 'free' } }),
-    client.subscriptionStatus.findUniqueOrThrow({ where: { name: 'active' } }),
+    prisma.plan.findUniqueOrThrow({ where: { name: 'free' } }),
+    prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'active' } }),
   ]);
+  const client = tx ?? prisma;
   return client.subscription.create({
     data: {
       userId,
@@ -58,6 +59,78 @@ export async function updateSubscriptionById(
   return prisma.subscription.update({
     where: { id },
     data,
+    ...SUBSCRIPTION_INCLUDE,
+  });
+}
+
+export async function upsertSubscriptionFromCheckout(params: {
+  userId: number;
+  billingCycle: 'monthly' | 'yearly';
+  stripeCustomerId: string | null;
+  stripeSubscriptionId: string | null;
+  currentPeriodStart: Date;
+  currentPeriodEnd: Date;
+  tx?: Prisma.TransactionClient;
+}): Promise<SubscriptionWithRelations> {
+  const { userId, billingCycle, stripeCustomerId, stripeSubscriptionId, currentPeriodStart, currentPeriodEnd, tx } = params;
+  // Lookups use the main prisma client — static seed data, safe outside tx.
+  const [proPlan, billingCycleRow, activeStatus] = await Promise.all([
+    prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } }),
+    prisma.billingCycle.findUniqueOrThrow({ where: { name: billingCycle } }),
+    prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'active' } }),
+  ]);
+  const client = tx ?? prisma;
+
+  return client.subscription.upsert({
+    where: { userId },
+    update: {
+      planId: proPlan.id,
+      billingCycleId: billingCycleRow.id,
+      statusId: activeStatus.id,
+      stripeCustomerId,
+      stripeSubscriptionId,
+      currentPeriodStart,
+      currentPeriodEnd,
+      scheduledPlanId: null,
+      scheduledBillingCycleId: null,
+    },
+    create: {
+      userId,
+      planId: proPlan.id,
+      billingCycleId: billingCycleRow.id,
+      statusId: activeStatus.id,
+      stripeCustomerId,
+      stripeSubscriptionId,
+      currentPeriodStart,
+      currentPeriodEnd,
+    },
+    ...SUBSCRIPTION_INCLUDE,
+  });
+}
+
+export async function applyScheduledDowngrade(
+  subscriptionId: number,
+  tx?: Prisma.TransactionClient,
+): Promise<SubscriptionWithRelations> {
+  // Lookups use the main prisma client — static seed data, safe outside tx.
+  const [freePlan, activeStatus] = await Promise.all([
+    prisma.plan.findUniqueOrThrow({ where: { name: 'free' } }),
+    prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'active' } }),
+  ]);
+  const client = tx ?? prisma;
+  return client.subscription.update({
+    where: { id: subscriptionId },
+    data: {
+      planId: freePlan.id,
+      billingCycleId: null,
+      statusId: activeStatus.id,
+      stripeCustomerId: null,
+      stripeSubscriptionId: null,
+      currentPeriodStart: null,
+      currentPeriodEnd: null,
+      scheduledPlanId: null,
+      scheduledBillingCycleId: null,
+    },
     ...SUBSCRIPTION_INCLUDE,
   });
 }

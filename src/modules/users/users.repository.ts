@@ -162,8 +162,10 @@ export async function transitionToCompleteOnboarding(
   userId: number,
   tx?: Prisma.TransactionClient,
 ): Promise<void> {
+  // Use the main prisma client for the lookup — static seed data, safe outside tx.
+  // Keeps the transaction query count low to avoid Neon's P2028 timeout.
+  const status = await prisma.onboardingStatus.findUniqueOrThrow({ where: { name: 'complete' } });
   const client = tx ?? prisma;
-  const status = await client.onboardingStatus.findUniqueOrThrow({ where: { name: 'complete' } });
   await client.user.update({
     where: { id: userId },
     data: { onboardingStatusId: status.id },

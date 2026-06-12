@@ -112,7 +112,7 @@ export async function activateSubscription(
       const sub = await createFreeSubscription(user.id, tx);
       await transitionToCompleteOnboarding(user.id, tx);
       return sub;
-    });
+    }, { timeout: 15000 });
 
     fireEmail(() => sendSubscriptionConfirmationEmail({
       to: user.email,

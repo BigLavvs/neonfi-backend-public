@@ -191,3 +191,107 @@ export async function sendCancellationScheduledEmail(opts: {
       `Hi ${opts.fullName},\n\nYour subscription has been cancelled and will expire on ${dateStr}.\n\nYou'll continue to have access until then.`,
   });
 }
+
+export async function sendPaymentReceiptEmail(opts: {
+  to: string;
+  fullName: string;
+  amount: number;
+  currency: string;
+  periodStart: Date;
+  periodEnd: Date;
+}): Promise<void> {
+  const fmt = (d: Date) => d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const amountFormatted = (opts.amount / 100).toFixed(2);
+  await send({
+    to: opts.to,
+    template: 'payment_receipt',
+    subject: 'Your Neonfi payment receipt',
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>Payment of ${opts.currency.toUpperCase()} ${amountFormatted} received.</p>
+      <p>Billing period: ${fmt(opts.periodStart)} – ${fmt(opts.periodEnd)}.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nPayment of ${opts.currency.toUpperCase()} ${amountFormatted} received.\n\nBilling period: ${fmt(opts.periodStart)} – ${fmt(opts.periodEnd)}.`,
+  });
+}
+
+export async function sendPaymentFailedEmail(opts: {
+  to: string;
+  fullName: string;
+  retryAt: Date | null;
+}): Promise<void> {
+  const retryStr = opts.retryAt
+    ? `Stripe will retry on ${opts.retryAt.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}.`
+    : 'Stripe will retry automatically.';
+  await send({
+    to: opts.to,
+    template: 'payment_failed',
+    subject: 'Your Neonfi payment failed',
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>We were unable to process your payment. ${retryStr}</p>
+      <p>Please update your payment method if needed.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nWe were unable to process your payment. ${retryStr}\n\nPlease update your payment method if needed.`,
+  });
+}
+
+export async function sendRefundConfirmationEmail(opts: {
+  to: string;
+  fullName: string;
+  amount: number;
+  currency: string;
+}): Promise<void> {
+  const amountFormatted = (opts.amount / 100).toFixed(2);
+  await send({
+    to: opts.to,
+    template: 'refund_confirmation',
+    subject: 'Your Neonfi refund has been processed',
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>Your refund of ${opts.currency.toUpperCase()} ${amountFormatted} has been processed.</p>
+      <p>It may take 5–10 business days to appear on your statement.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nYour refund of ${opts.currency.toUpperCase()} ${amountFormatted} has been processed.\n\nIt may take 5–10 business days to appear on your statement.`,
+  });
+}
+
+export async function sendSubscriptionExpiredEmail(opts: {
+  to: string;
+  fullName: string;
+}): Promise<void> {
+  await send({
+    to: opts.to,
+    template: 'subscription_expired',
+    subject: 'Your Neonfi subscription has expired',
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>Your Neonfi Pro subscription has expired.</p>
+      <p>You can reactivate at any time from your account settings.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nYour Neonfi Pro subscription has expired.\n\nYou can reactivate at any time from your account settings.`,
+  });
+}
+
+export async function sendPlanDowngradeAppliedEmail(opts: {
+  to: string;
+  fullName: string;
+  newPlan: string;
+}): Promise<void> {
+  const planLabel = opts.newPlan === 'free' ? 'Free' : 'Pro';
+  await send({
+    to: opts.to,
+    template: 'plan_downgrade_applied',
+    subject: `Your Neonfi plan has changed to ${planLabel}`,
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>Your scheduled plan change has been applied — you are now on the <strong>${planLabel}</strong> plan.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nYour scheduled plan change has been applied — you are now on the ${planLabel} plan.`,
+  });
+}
