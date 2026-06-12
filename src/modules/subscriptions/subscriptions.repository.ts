@@ -1,4 +1,4 @@
-// Neonfi backend — Subscriptions module: data-access layer (Stage 3A).
+// Neonfi backend — Subscriptions module: data-access layer (Stage 3A/3B).
 //
 // All DB queries for the Subscription table go through this file.
 // The free-activation path calls createFreeSubscription inside a transaction;
@@ -9,7 +9,13 @@ import { prisma } from '../../lib/prisma.js';
 import type { SubscriptionWithRelations } from './subscriptions.dto.js';
 
 const SUBSCRIPTION_INCLUDE = {
-  include: { plan: true, billingCycle: true, status: true },
+  include: {
+    plan: true,
+    billingCycle: true,
+    status: true,
+    scheduledPlan: true,
+    scheduledBillingCycle: true,
+  },
 } as const satisfies Prisma.SubscriptionDefaultArgs;
 
 export async function findSubscriptionByUserId(
@@ -41,6 +47,17 @@ export async function createFreeSubscription(
       currentPeriodStart: null,
       currentPeriodEnd: null,
     },
+    ...SUBSCRIPTION_INCLUDE,
+  });
+}
+
+export async function updateSubscriptionById(
+  id: number,
+  data: Prisma.SubscriptionUncheckedUpdateInput,
+): Promise<SubscriptionWithRelations> {
+  return prisma.subscription.update({
+    where: { id },
+    data,
     ...SUBSCRIPTION_INCLUDE,
   });
 }

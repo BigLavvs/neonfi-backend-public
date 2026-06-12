@@ -3,9 +3,8 @@
 // Reads the `session` HttpOnly cookie (JWT access token), verifies it, loads
 // the Session row and User, and attaches them to the Hono context.
 //
-// Used by POST /auth/logout (this module) and every authenticated endpoint in
-// later stages. Stage 1B (GET /auth/sessions, DELETE /auth/sessions/{id},
-// GET /auth/ws-token) will reuse it without modification.
+// Stage 3B: AuthVariables gains an optional `subscription` field set by
+// requirePlan (not requireAuth) for plan-gated routes.
 
 import type { Context, Next, MiddlewareHandler } from 'hono';
 import { getCookie } from 'hono/cookie';
@@ -13,10 +12,12 @@ import { err } from '../../lib/envelope.js';
 import { verifyAccessToken, JWTExpired } from '../../lib/jwt.js';
 import { findSessionById, findUserById } from '../users/users.repository.js';
 import type { UserWithRelations, Session } from '../users/users.repository.js';
+import type { SubscriptionWithRelations } from '../subscriptions/subscriptions.dto.js';
 
 export interface AuthVariables {
   user: UserWithRelations;
   session: Session;
+  subscription?: SubscriptionWithRelations;  // set by requirePlan, not requireAuth
 }
 
 export type AuthEnv = { Variables: AuthVariables };

@@ -1,12 +1,19 @@
-// Neonfi backend — Subscriptions module: DTO mapper (Stage 3A).
+// Neonfi backend — Subscriptions module: DTO mapper (Stage 3A/3B).
 //
 // toSubscriptionDTO resolves lookup-table FKs to their string names.
-// The raw planId/billingCycleId/statusId are never exposed.
+// The raw planId/billingCycleId/statusId/scheduledPlanId/scheduledBillingCycleId
+// are never exposed in the DTO.
 
 import type { Prisma } from '@prisma/client';
 
 export type SubscriptionWithRelations = Prisma.SubscriptionGetPayload<{
-  include: { plan: true; billingCycle: true; status: true };
+  include: {
+    plan: true;
+    billingCycle: true;
+    status: true;
+    scheduledPlan: true;
+    scheduledBillingCycle: true;
+  };
 }>;
 
 export interface SubscriptionDTO {
@@ -19,6 +26,8 @@ export interface SubscriptionDTO {
   stripeSubscriptionId: string | null;
   currentPeriodStart: Date | null;
   currentPeriodEnd: Date | null;
+  scheduledPlan: string | null;
+  scheduledBillingCycle: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -34,6 +43,8 @@ export function toSubscriptionDTO(sub: SubscriptionWithRelations): SubscriptionD
     stripeSubscriptionId: sub.stripeSubscriptionId,
     currentPeriodStart: sub.currentPeriodStart,
     currentPeriodEnd: sub.currentPeriodEnd,
+    scheduledPlan: sub.scheduledPlan?.name ?? null,
+    scheduledBillingCycle: sub.scheduledBillingCycle?.name ?? null,
     createdAt: sub.createdAt,
     updatedAt: sub.updatedAt,
   };

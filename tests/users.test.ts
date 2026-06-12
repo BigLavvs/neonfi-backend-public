@@ -18,6 +18,9 @@ vi.mock('../src/modules/email/email.service.js', () => ({
   sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   sendSubscriptionConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+  sendUpgradeEmail: vi.fn().mockResolvedValue(undefined),
+  sendDowngradeScheduledEmail: vi.fn().mockResolvedValue(undefined),
+  sendCancellationScheduledEmail: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ---------------------------------------------------------------------------
@@ -380,4 +383,79 @@ it('50: readback — GET /users/me returns values matching the PATCH response', 
   expect(getJson.data.user.newsletterSubscribed).toBe(true);
   expect(getJson.data.user.displayName).toBe(patchJson.data.user.displayName);
   expect(getJson.data.user.newsletterSubscribed).toBe(patchJson.data.user.newsletterSubscribed);
+});
+
+// ---------------------------------------------------------------------------
+// 51. GET /users/me — active Pro subscription → plan and billingCycle populated
+// ---------------------------------------------------------------------------
+
+it('51: GET /users/me with active Pro subscription → plan: pro, billingCycle: monthly', async () => {
+  await authPost('/register', { email: TEST_EMAIL, password: TEST_PASSWORD, fullName: TEST_FULL_NAME });
+
+  // Directly create a Pro subscription row (simulates Stage 4 webhook result)
+  const user = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  const [plan, cycle, status] = await Promise.all([
+    prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } }),
+    prisma.billingCycle.findUniqueOrThrow({ where: { name: 'monthly' } }),
+    prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'active' } }),
+  ]);
+  await prisma.subscription.create({
+    data: {
+      userId: user.id,
+      planId: plan.id,
+      billingCycleId: cycle.id,
+      statusId: status.id,
+      stripeCustomerId: 'cus_test',
+      stripeSubscriptionId: 'sub_test',
+      currentPeriodStart: new Date('2026-06-01T00:00:00Z'),
+      currentPeriodEnd: new Date('2026-07-01T00:00:00Z'),
+    },
+  });
+
+  const loginRes = await authPost('/login', { email: TEST_EMAIL, password: TEST_PASSWORD });
+  const sessionCookie = `session=${cookieValue(loginRes, 'session')!}`;
+
+  const res = await get('/me', sessionCookie);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { user: Record<string, unknown> } };
+  expect(json.data.user.plan).toBe('pro');
+  expect(json.data.user.billingCycle).toBe('monthly');
+});
+
+// ---------------------------------------------------------------------------
+// 52. GET /users/me — cancelled Pro with future currentPeriodEnd → still pro
+// ---------------------------------------------------------------------------
+
+it('52: GET /users/me with cancelled-but-in-period Pro → plan: pro (effectively active)', async () => {
+  await authPost('/register', { email: TEST_EMAIL, password: TEST_PASSWORD, fullName: TEST_FULL_NAME });
+
+  const user = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  const [plan, cycle, status] = await Promise.all([
+    prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } }),
+    prisma.billingCycle.findUniqueOrThrow({ where: { name: 'monthly' } }),
+    prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'cancelled' } }),
+  ]);
+  await prisma.subscription.create({
+    data: {
+      userId: user.id,
+      planId: plan.id,
+      billingCycleId: cycle.id,
+      statusId: status.id,
+      stripeCustomerId: 'cus_test',
+      stripeSubscriptionId: 'sub_test',
+      currentPeriodStart: new Date('2026-06-01T00:00:00Z'),
+      currentPeriodEnd: new Date('2026-07-01T00:00:00Z'), // future relative to 2026-06-12
+    },
+  });
+
+  const loginRes = await authPost('/login', { email: TEST_EMAIL, password: TEST_PASSWORD });
+  const sessionCookie = `session=${cookieValue(loginRes, 'session')!}`;
+
+  const res = await get('/me', sessionCookie);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { user: Record<string, unknown> } };
+  expect(json.data.user.plan).toBe('pro');
+  expect(json.data.user.billingCycle).toBe('monthly');
 });

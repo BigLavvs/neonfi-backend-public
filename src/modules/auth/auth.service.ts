@@ -122,7 +122,7 @@ export async function register(body: RegisterBody): Promise<{ user: UserDTO }> {
     }
   })();
 
-  return { user: toUserDTO(user) };
+  return { user: await toUserDTO(user) };
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ export async function login(
   // 6. Issue access token JWT
   const accessToken = await signAccessToken({ userId: user.id, sessionId: session.id });
 
-  return { user: toUserDTO(user), accessToken, refreshToken };
+  return { user: await toUserDTO(user), accessToken, refreshToken };
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ export async function verifyEmail(
     });
   })();
 
-  return { user: toUserDTO(updated) };
+  return { user: await toUserDTO(updated) };
 }
 
 // ---------------------------------------------------------------------------

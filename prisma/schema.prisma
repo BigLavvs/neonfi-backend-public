@@ -105,43 +105,53 @@ model Session {
 // SUBSCRIPTION & PAYMENTS
 
 model Subscription {
-  id                   Int                @id @default(autoincrement())
-  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  userId               Int                @unique
-  plan                 Plan               @relation("SubscriptionPlan", fields: [planId], references: [id])
-  planId               Int
-  billingCycle         BillingCycle?      @relation("SubscriptionBillingCycle", fields: [billingCycleId], references: [id])
-  billingCycleId       Int? // null for free plan
-  status               SubscriptionStatus @relation("SubscriptionStatus", fields: [statusId], references: [id])
-  statusId             Int
-  stripeCustomerId     String?            @db.VarChar(255)
-  stripeSubscriptionId String?            @db.VarChar(255)
-  currentPeriodStart   DateTime?
-  currentPeriodEnd     DateTime?
-  payments             Payment[]
-  createdAt            DateTime           @default(now())
-  updatedAt            DateTime           @updatedAt
+  id                      Int                @id @default(autoincrement())
+  user                    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId                  Int                @unique
+  plan                    Plan               @relation("SubscriptionPlan", fields: [planId], references: [id])
+  planId                  Int
+  billingCycle            BillingCycle?      @relation("SubscriptionBillingCycle", fields: [billingCycleId], references: [id])
+  billingCycleId          Int? // null for free plan
+  status                  SubscriptionStatus @relation("SubscriptionStatus", fields: [statusId], references: [id])
+  statusId                Int
+  stripeCustomerId        String?            @db.VarChar(255)
+  stripeSubscriptionId    String?            @db.VarChar(255)
+  currentPeriodStart      DateTime?
+  currentPeriodEnd        DateTime?
+  // Deferred change fields: set when user schedules a downgrade that takes effect
+  // at currentPeriodEnd. Stage 4 webhook clears them after the period transitions.
+  scheduledPlan           Plan?              @relation("ScheduledPlan", fields: [scheduledPlanId], references: [id])
+  scheduledPlanId         Int?
+  scheduledBillingCycle   BillingCycle?      @relation("ScheduledBillingCycle", fields: [scheduledBillingCycleId], references: [id])
+  scheduledBillingCycleId Int?
+  payments                Payment[]
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
 
   @@index([planId])
   @@index([billingCycleId])
   @@index([statusId])
+  @@index([scheduledPlanId])
+  @@index([scheduledBillingCycleId])
   @@map("subscription")
 }
 
 model Plan {
-  id            Int            @id @default(autoincrement())
-  name          String         @unique // free | pro
-  subscriptions Subscription[] @relation("SubscriptionPlan")
-  pros          String[] //list of advantages of plan
-  cons          String[]
+  id                     Int            @id @default(autoincrement())
+  name                   String         @unique // free | pro
+  subscriptions          Subscription[] @relation("SubscriptionPlan")
+  scheduledSubscriptions Subscription[] @relation("ScheduledPlan")
+  pros                   String[] //list of advantages of plan
+  cons                   String[]
 
   @@map("plan")
 }
 
 model BillingCycle {
-  id            Int            @id @default(autoincrement())
-  name          String         @unique // monthly | yearly
-  subscriptions Subscription[] @relation("SubscriptionBillingCycle")
+  id                     Int            @id @default(autoincrement())
+  name                   String         @unique // monthly | yearly
+  subscriptions          Subscription[] @relation("SubscriptionBillingCycle")
+  scheduledSubscriptions Subscription[] @relation("ScheduledBillingCycle")
 
   @@map("billing_cycle")
 }

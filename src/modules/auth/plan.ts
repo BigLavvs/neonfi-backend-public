@@ -1,19 +1,57 @@
-// Neonfi backend — Auth module: plan-based access control (Stage 1A skeleton).
+// Neonfi backend — Auth module: plan-based access control (Stage 3B activation).
 //
-// This middleware is a no-op pass-through until Stage 3 (subscriptions module).
-// It exists so future per-endpoint call sites can be wired now and activated in
-// Stage 3 without touching every route file.
+// Checks the user's active subscription plan. Must run after requireAuth.
+// Attaches the subscription to context so downstream handlers can read it
+// without an additional DB round-trip.
 //
-// TODO(Stage 3): once the Subscription module exists, read the user's active
-// subscription plan and check it against `allowed`. Return 403 with code
-// PLAN_REQUIRED if the user's plan is not in `allowed`. The user object is
-// guaranteed to be on context by this point because requireAuth runs first.
+// Treats cancelled-but-in-period subscriptions as effectively active per
+// Build Guide §4.7: "subscription still functions as Pro until currentPeriodEnd".
 
 import type { Context, Next, MiddlewareHandler } from 'hono';
+import { prisma } from '../../lib/prisma.js';
+import { err } from '../../lib/envelope.js';
 import type { AuthEnv } from './middleware.js';
 
 export const requirePlan =
-  (_allowed: ('free' | 'pro')[]): MiddlewareHandler<AuthEnv> =>
-  async (_c: Context<AuthEnv>, next: Next) => {
+  (allowed: Array<'free' | 'pro'>): MiddlewareHandler<AuthEnv> =>
+  async (c: Context<AuthEnv>, next: Next) => {
+    const user = c.get('user');
+
+    const subscription = await prisma.subscription.findUnique({
+      where: { userId: user.id },
+      include: {
+        plan: true,
+        billingCycle: true,
+        status: true,
+        scheduledPlan: true,
+        scheduledBillingCycle: true,
+      },
+    });
+
+    if (!subscription) {
+      return c.json(err('SUBSCRIPTION_REQUIRED', 'Activate a subscription to access this resource'), 403);
+    }
+
+    const now = new Date();
+    const effectivelyActive =
+      subscription.status.name === 'active' ||
+      (subscription.status.name === 'cancelled' &&
+        subscription.currentPeriodEnd !== null &&
+        subscription.currentPeriodEnd > now);
+
+    if (!effectivelyActive) {
+      return c.json(err('SUBSCRIPTION_EXPIRED', 'Subscription is no longer active'), 403);
+    }
+
+    const userPlan = subscription.plan.name as 'free' | 'pro';
+    if (!allowed.includes(userPlan)) {
+      return c.json(
+        err('PLAN_LIMIT_REACHED', `This resource requires one of: ${allowed.join(', ')}`),
+        403,
+      );
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    c.set('subscription', subscription as any);
     await next();
   };

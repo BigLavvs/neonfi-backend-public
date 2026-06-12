@@ -3,13 +3,8 @@
 // Mounted at /api/v1/users by src/app.ts.
 //
 // Endpoints:
-//   GET  /users/me — read own profile (requireAuth)
+//   GET  /users/me  — read own profile (requireAuth)
 //   PATCH /users/me — update own profile (requireAuth)
-//
-// Out of scope (doc-fix items — need spec update before building):
-//   POST DELETE /users/me/password — password change for email users
-//   DELETE /users/me              — account deletion
-//   PATCH /users/me with `email`  — email change requires re-verification flow
 
 import { Hono } from 'hono';
 import { ok, err } from '../../lib/envelope.js';
@@ -26,7 +21,7 @@ const router = new Hono<AuthEnv>();
 
 router.get('/me', requireAuth, async (c) => {
   const user = c.get('user');
-  return c.json(ok(getMe(user)), 200);
+  return c.json(ok(await getMe(user)), 200);
 });
 
 // ---------------------------------------------------------------------------

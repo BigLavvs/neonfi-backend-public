@@ -1,12 +1,10 @@
 // Neonfi backend — Users module: data-access layer for User and Session tables.
 //
-// Ownership: the users module owns User and Session (Build Guide §2, Stage 1 /
-// System_Implementation §4 Layer Separation).  All DB queries for these two
-// models go through this file.  No other module queries User or Session directly.
-//
 // toUserDTO: centralises Gate C (displayName, not name) and Gate D
 // (emailVerified derived as onboardingStatus !== 'pending_verification').
-// Never add a `name` column or an `emailVerified` column — both are locked.
+// Stage 3B: toUserDTO is now async — it queries Subscription to populate
+// plan/billingCycle. Uses the "effectively active" rule: active OR
+// (cancelled AND currentPeriodEnd > now).
 
 import { type Prisma, type Session } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
@@ -29,21 +27,31 @@ export interface UserDTO {
   fullName: string;
   displayName: string | null;
   avatarUrl: string | null;
-  /** Gate C: this is `displayName`, not a `name` column. */
   authProvider: string;
   /** Gate D: derived — onboardingStatus.name !== 'pending_verification'. */
   emailVerified: boolean;
   onboardingStatus: string;
-  /** TODO(Stage 3): populate from Subscription row once billing is implemented. */
   plan: string | null;
-  /** TODO(Stage 3): populate from Subscription row once billing is implemented. */
   billingCycle: string | null;
   newsletterSubscribed: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
 
-export function toUserDTO(user: UserWithRelations): UserDTO {
+export async function toUserDTO(user: UserWithRelations): Promise<UserDTO> {
+  const subscription = await prisma.subscription.findUnique({
+    where: { userId: user.id },
+    include: { plan: true, billingCycle: true, status: true },
+  });
+
+  const now = new Date();
+  const effectivelyActive =
+    subscription !== null &&
+    (subscription.status.name === 'active' ||
+      (subscription.status.name === 'cancelled' &&
+        subscription.currentPeriodEnd !== null &&
+        subscription.currentPeriodEnd > now));
+
   return {
     id: user.id,
     email: user.email,
@@ -53,8 +61,8 @@ export function toUserDTO(user: UserWithRelations): UserDTO {
     authProvider: user.authProvider.name,
     emailVerified: user.onboardingStatus.name !== 'pending_verification',
     onboardingStatus: user.onboardingStatus.name,
-    plan: null,        // TODO(Stage 3): resolve from subscription
-    billingCycle: null, // TODO(Stage 3): resolve from subscription
+    plan: effectivelyActive ? (subscription!.plan.name as 'free' | 'pro') : null,
+    billingCycle: effectivelyActive ? (subscription!.billingCycle?.name ?? null) : null,
     newsletterSubscribed: user.newsletterSubscribed,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,

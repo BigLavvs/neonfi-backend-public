@@ -13,13 +13,25 @@ import { config } from '../src/lib/config.js';
 // Stripe mock — prevents real Stripe API calls during tests
 // ---------------------------------------------------------------------------
 
-const { mockCreateSession } = vi.hoisted(() => ({
+const {
+  mockCreateSession,
+  mockSubscriptionsUpdate,
+  mockSubscriptionsRetrieve,
+  mockSubscriptionSchedulesCreate,
+  mockSubscriptionSchedulesUpdate,
+} = vi.hoisted(() => ({
   mockCreateSession: vi.fn(),
+  mockSubscriptionsUpdate: vi.fn(),
+  mockSubscriptionsRetrieve: vi.fn(),
+  mockSubscriptionSchedulesCreate: vi.fn(),
+  mockSubscriptionSchedulesUpdate: vi.fn(),
 }));
 
 vi.mock('stripe', () => {
   const Stripe = vi.fn().mockImplementation(() => ({
     checkout: { sessions: { create: mockCreateSession } },
+    subscriptions: { update: mockSubscriptionsUpdate, retrieve: mockSubscriptionsRetrieve },
+    subscriptionSchedules: { create: mockSubscriptionSchedulesCreate, update: mockSubscriptionSchedulesUpdate },
   }));
   return { default: Stripe };
 });
@@ -32,6 +44,9 @@ vi.mock('../src/modules/email/email.service.js', () => ({
   sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   sendSubscriptionConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+  sendUpgradeEmail: vi.fn().mockResolvedValue(undefined),
+  sendDowngradeScheduledEmail: vi.fn().mockResolvedValue(undefined),
+  sendCancellationScheduledEmail: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ---------------------------------------------------------------------------
@@ -95,6 +110,48 @@ async function setOnboardingStatus(email: string, statusName: string): Promise<v
   await prisma.user.update({ where: { email }, data: { onboardingStatusId: status.id } });
 }
 
+async function createProSubscription(
+  email: string,
+  billingCycle: 'monthly' | 'yearly',
+  opts: {
+    status?: 'active' | 'cancelled' | 'expired';
+    scheduledPlan?: 'free' | 'pro';
+    scheduledBillingCycle?: 'monthly' | 'yearly';
+  } = {},
+): Promise<void> {
+  const user = await prisma.user.findUniqueOrThrow({ where: { email } });
+  const plan = await prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } });
+  const cycle = await prisma.billingCycle.findUniqueOrThrow({ where: { name: billingCycle } });
+  const statusRow = await prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: opts.status ?? 'active' } });
+
+  let scheduledPlanId: number | undefined;
+  let scheduledBillingCycleId: number | undefined;
+
+  if (opts.scheduledPlan) {
+    const sp = await prisma.plan.findUniqueOrThrow({ where: { name: opts.scheduledPlan } });
+    scheduledPlanId = sp.id;
+  }
+  if (opts.scheduledBillingCycle) {
+    const sc = await prisma.billingCycle.findUniqueOrThrow({ where: { name: opts.scheduledBillingCycle } });
+    scheduledBillingCycleId = sc.id;
+  }
+
+  await prisma.subscription.create({
+    data: {
+      userId: user.id,
+      planId: plan.id,
+      billingCycleId: cycle.id,
+      statusId: statusRow.id,
+      stripeCustomerId: 'cus_test_customer',
+      stripeSubscriptionId: 'sub_test_subscription',
+      currentPeriodStart: new Date('2026-06-01T00:00:00Z'),
+      currentPeriodEnd: new Date('2026-07-01T00:00:00Z'),
+      ...(scheduledPlanId !== undefined && { scheduledPlanId }),
+      ...(scheduledBillingCycleId !== undefined && { scheduledBillingCycleId }),
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
@@ -102,6 +159,18 @@ async function setOnboardingStatus(email: string, statusName: string): Promise<v
 beforeEach(async () => {
   vi.clearAllMocks();
   mockCreateSession.mockResolvedValue({ url: 'https://checkout.stripe.com/test-session-url' });
+  mockSubscriptionsRetrieve.mockResolvedValue({
+    items: { data: [{ id: 'si_test_item_id' }] },
+    current_period_end: 1751356800,   // ~2025-07-01 UTC (Unix timestamp)
+    current_period_start: 1748678400, // ~2025-06-01 UTC
+  });
+  mockSubscriptionsUpdate.mockResolvedValue({
+    current_period_end: 1782892800,   // ~2026-07-01 UTC (after yearly switch)
+    current_period_start: 1751356800,
+    cancel_at_period_end: false,
+  });
+  mockSubscriptionSchedulesCreate.mockResolvedValue({ id: 'sub_sched_test_id' });
+  mockSubscriptionSchedulesUpdate.mockResolvedValue({ id: 'sub_sched_test_id' });
   await prisma.subscription.deleteMany();
   await prisma.session.deleteMany();
   await prisma.user.deleteMany();
@@ -392,4 +461,310 @@ it('63: GET /subscriptions/me when no subscription → 404 SUBSCRIPTION_NOT_FOUN
 it('64: GET /subscriptions/me without auth → 401 UNAUTHENTICATED', async () => {
   const res = await get('/me');
   expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// 65. POST /subscriptions/upgrade — free → pro monthly → 200 checkoutUrl
+// ---------------------------------------------------------------------------
+
+it('65: upgrade free → pro monthly → 200 checkoutUrl, Stripe checkout called, DB unchanged', async () => {
+  await registerUser();
+  await setOnboardingStatus(TEST_EMAIL, 'verified');
+  const cookies = await loginUser();
+  // Activate free subscription first
+  await post('', { plan: 'free' }, cookies);
+
+  const res = await post('/upgrade', { billingCycle: 'monthly' }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { checkoutUrl: string } };
+  expect(json.data.checkoutUrl).toBe('https://checkout.stripe.com/test-session-url');
+
+  // Verify Stripe checkout was called with monthly price
+  expect(mockCreateSession).toHaveBeenCalledWith(
+    expect.objectContaining({
+      mode: 'subscription',
+      line_items: [{ price: config.STRIPE_PRO_MONTHLY_PRICE_ID, quantity: 1 }],
+    }),
+  );
+
+  // DB subscription still shows 'free' (no webhook yet)
+  const sub = await prisma.subscription.findFirst({ include: { plan: true } });
+  expect(sub!.plan.name).toBe('free');
+});
+
+// ---------------------------------------------------------------------------
+// 66. POST /subscriptions/upgrade — pro monthly → pro yearly → 200 SubscriptionDTO
+// ---------------------------------------------------------------------------
+
+it('66: upgrade pro monthly → pro yearly → 200, retrieve+update called, DB billingCycle updated', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'monthly');
+
+  const res = await post('/upgrade', { billingCycle: 'yearly' }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { subscription: Record<string, unknown> } };
+  expect(json.data.subscription.billingCycle).toBe('yearly');
+  expect(json.data.subscription.status).toBe('active');
+  expect(json.data.subscription.scheduledPlan).toBeNull();
+  expect(json.data.subscription.scheduledBillingCycle).toBeNull();
+
+  expect(mockSubscriptionsRetrieve).toHaveBeenCalledWith('sub_test_subscription');
+  expect(mockSubscriptionsUpdate).toHaveBeenCalledWith(
+    'sub_test_subscription',
+    expect.objectContaining({
+      items: [{ id: 'si_test_item_id', price: config.STRIPE_PRO_YEARLY_PRICE_ID }],
+      proration_behavior: 'create_prorations',
+    }),
+  );
+
+  // DB should reflect the updated billing cycle
+  const sub = await prisma.subscription.findFirst({ include: { billingCycle: true } });
+  expect(sub!.billingCycle!.name).toBe('yearly');
+});
+
+// ---------------------------------------------------------------------------
+// 67. POST /subscriptions/upgrade — pro yearly → pro monthly → 400 INVALID_UPGRADE
+// ---------------------------------------------------------------------------
+
+it('67: upgrade pro yearly → monthly → 400 INVALID_UPGRADE', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'yearly');
+
+  const res = await post('/upgrade', { billingCycle: 'monthly' }, cookies);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('INVALID_UPGRADE');
+});
+
+// ---------------------------------------------------------------------------
+// 68. POST /subscriptions/upgrade — pro yearly → pro yearly (no-op) → 400
+// ---------------------------------------------------------------------------
+
+it('68: upgrade pro yearly → yearly (no-op) → 400 NO_CHANGE_TO_APPLY', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'yearly');
+
+  const res = await post('/upgrade', { billingCycle: 'yearly' }, cookies);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('NO_CHANGE_TO_APPLY');
+});
+
+// ---------------------------------------------------------------------------
+// 69. POST /subscriptions/upgrade — pro yearly with pending cancellation → reactivates
+// ---------------------------------------------------------------------------
+
+it('69: upgrade pro yearly with cancellation pending → 200, status reverts to active', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'yearly', { status: 'cancelled' });
+
+  const res = await post('/upgrade', { billingCycle: 'yearly' }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { subscription: Record<string, unknown> } };
+  expect(json.data.subscription.status).toBe('active');
+
+  // Stripe was called to clear cancel_at_period_end
+  expect(mockSubscriptionsUpdate).toHaveBeenCalledWith(
+    'sub_test_subscription',
+    expect.objectContaining({ cancel_at_period_end: false }),
+  );
+
+  // DB status updated to active
+  const sub = await prisma.subscription.findFirst({ include: { status: true } });
+  expect(sub!.status.name).toBe('active');
+});
+
+// ---------------------------------------------------------------------------
+// 70. POST /subscriptions/upgrade — no subscription → 409
+// ---------------------------------------------------------------------------
+
+it('70: upgrade with no subscription → 409 NO_SUBSCRIPTION_TO_UPGRADE', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+
+  const res = await post('/upgrade', { billingCycle: 'monthly' }, cookies);
+  expect(res.status).toBe(409);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('NO_SUBSCRIPTION_TO_UPGRADE');
+});
+
+// ---------------------------------------------------------------------------
+// 71. POST /subscriptions/downgrade — pro monthly → free → 200
+// ---------------------------------------------------------------------------
+
+it('71: downgrade pro monthly → free → 200, Stripe cancel_at_period_end set, scheduledPlanId updated', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'monthly');
+
+  const res = await post('/downgrade', { plan: 'free' }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { subscription: Record<string, unknown> } };
+  expect(json.data.subscription.scheduledPlan).toBe('free');
+  expect(json.data.subscription.status).toBe('active'); // still active until period end
+
+  expect(mockSubscriptionsUpdate).toHaveBeenCalledWith(
+    'sub_test_subscription',
+    expect.objectContaining({ cancel_at_period_end: true }),
+  );
+
+  // DB: scheduledPlanId set to free plan row
+  const sub = await prisma.subscription.findFirst({ include: { scheduledPlan: true } });
+  expect(sub!.scheduledPlan!.name).toBe('free');
+});
+
+// ---------------------------------------------------------------------------
+// 72. POST /subscriptions/downgrade — pro yearly → monthly → 200 (schedule created)
+// ---------------------------------------------------------------------------
+
+it('72: downgrade pro yearly → monthly → 200, schedule created, scheduledBillingCycleId set', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'yearly');
+
+  const res = await post('/downgrade', { billingCycle: 'monthly' }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { subscription: Record<string, unknown> } };
+  expect(json.data.subscription.scheduledBillingCycle).toBe('monthly');
+  expect(json.data.subscription.plan).toBe('pro');
+
+  expect(mockSubscriptionsRetrieve).toHaveBeenCalledWith('sub_test_subscription');
+  expect(mockSubscriptionSchedulesCreate).toHaveBeenCalledWith({ from_subscription: 'sub_test_subscription' });
+  expect(mockSubscriptionSchedulesUpdate).toHaveBeenCalledWith(
+    'sub_sched_test_id',
+    expect.objectContaining({
+      phases: expect.arrayContaining([
+        expect.objectContaining({ items: [{ price: config.STRIPE_PRO_YEARLY_PRICE_ID, quantity: 1 }] }),
+        expect.objectContaining({ items: [{ price: config.STRIPE_PRO_MONTHLY_PRICE_ID, quantity: 1 }] }),
+      ]),
+    }),
+  );
+
+  // DB: scheduledBillingCycleId set to monthly row; plan unchanged
+  const sub = await prisma.subscription.findFirst({ include: { plan: true, scheduledBillingCycle: true } });
+  expect(sub!.plan.name).toBe('pro');
+  expect(sub!.scheduledBillingCycle!.name).toBe('monthly');
+});
+
+// ---------------------------------------------------------------------------
+// 73. POST /subscriptions/downgrade — from free → 400
+// ---------------------------------------------------------------------------
+
+it('73: downgrade from free plan → 400 CANNOT_DOWNGRADE_FROM_FREE', async () => {
+  await registerUser();
+  await setOnboardingStatus(TEST_EMAIL, 'verified');
+  const cookies = await loginUser();
+  // Activate free subscription
+  await post('', { plan: 'free' }, cookies);
+
+  const res = await post('/downgrade', { plan: 'free' }, cookies);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('CANNOT_DOWNGRADE_FROM_FREE');
+});
+
+// ---------------------------------------------------------------------------
+// 74. POST /subscriptions/downgrade — no subscription → 409
+// ---------------------------------------------------------------------------
+
+it('74: downgrade with no subscription → 409 NO_SUBSCRIPTION_TO_DOWNGRADE', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+
+  const res = await post('/downgrade', { plan: 'free' }, cookies);
+  expect(res.status).toBe(409);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('NO_SUBSCRIPTION_TO_DOWNGRADE');
+});
+
+// ---------------------------------------------------------------------------
+// 75. POST /subscriptions/downgrade — downgrade already scheduled → 409
+// ---------------------------------------------------------------------------
+
+it('75: downgrade with scheduled change already pending → 409 DOWNGRADE_ALREADY_SCHEDULED', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'monthly', { scheduledPlan: 'free' });
+
+  const res = await post('/downgrade', { plan: 'free' }, cookies);
+  expect(res.status).toBe(409);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('DOWNGRADE_ALREADY_SCHEDULED');
+});
+
+// ---------------------------------------------------------------------------
+// 76. POST /subscriptions/cancel — active pro → 200, status becomes cancelled
+// ---------------------------------------------------------------------------
+
+it('76: cancel active pro → 200, Stripe cancel_at_period_end set, DB status cancelled', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'monthly');
+
+  const res = await post('/cancel', {}, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { subscription: Record<string, unknown> } };
+  expect(json.data.subscription.status).toBe('cancelled');
+
+  expect(mockSubscriptionsUpdate).toHaveBeenCalledWith(
+    'sub_test_subscription',
+    expect.objectContaining({ cancel_at_period_end: true }),
+  );
+
+  // DB: status set to cancelled, currentPeriodEnd unchanged
+  const sub = await prisma.subscription.findFirst({ include: { status: true } });
+  expect(sub!.status.name).toBe('cancelled');
+  expect(sub!.currentPeriodEnd?.toISOString().startsWith('2026-07-01')).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// 77. POST /subscriptions/cancel — already cancelled (idempotent) → 200, no Stripe call
+// ---------------------------------------------------------------------------
+
+it('77: cancel already-cancelled pro → 200 idempotent, Stripe NOT called again', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  await createProSubscription(TEST_EMAIL, 'monthly', { status: 'cancelled' });
+
+  const res = await post('/cancel', {}, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { subscription: Record<string, unknown> } };
+  expect(json.data.subscription.status).toBe('cancelled');
+
+  expect(mockSubscriptionsUpdate).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 78. POST /subscriptions/cancel — free plan → 400
+// ---------------------------------------------------------------------------
+
+it('78: cancel free subscription → 400 CANNOT_CANCEL_FREE', async () => {
+  await registerUser();
+  await setOnboardingStatus(TEST_EMAIL, 'verified');
+  const cookies = await loginUser();
+  // Activate free subscription
+  await post('', { plan: 'free' }, cookies);
+
+  const res = await post('/cancel', {}, cookies);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('CANNOT_CANCEL_FREE');
 });

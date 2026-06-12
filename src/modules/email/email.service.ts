@@ -1,18 +1,9 @@
 // Neonfi backend — Email module: transactional email via Resend (Build Guide
 // Stage 15 / stage-1a.md §5).
 //
-// Stage 1A provides two emails only: welcome and email-verification.
-// Stage 15 extends this module with subscription-confirmation, payment-receipt,
-// refund, and cancellation emails plus retry logic.
-//
 // Contract: every exported function is FIRE-AND-FORGET — it NEVER throws.
 // Callers run it in a background void block after the DB transaction commits so
-// an email failure cannot break the HTTP response (§2.9 async/non-blocking).
-//
-// If Resend returns 403 ("domain not verified"), a clear console.error is
-// emitted so the developer knows to either verify neonfi.live on Resend or
-// switch EMAIL_FROM_ADDRESS to onboarding@resend.dev.  Do NOT change .env
-// programmatically.
+// an email failure cannot break the HTTP response.
 
 import { config } from '../../lib/config.js';
 
@@ -132,5 +123,71 @@ export async function sendSubscriptionConfirmationEmail(opts: {
     `,
     text:
       `Hi ${opts.fullName},\n\nYour Neonfi ${planLabel} subscription is confirmed and active.\n\nHead to your dashboard to get started.`,
+  });
+}
+
+export async function sendUpgradeEmail(opts: {
+  to: string;
+  fullName: string;
+  newPlan: string;
+  newBillingCycle: string;
+}): Promise<void> {
+  const cycleLabel = opts.newBillingCycle === 'yearly' ? 'Yearly' : 'Monthly';
+  await send({
+    to: opts.to,
+    template: 'upgrade_confirmation',
+    subject: `Your Neonfi plan was upgraded to Pro ${cycleLabel}`,
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>Your Neonfi subscription has been upgraded to <strong>Pro ${cycleLabel}</strong>.</p>
+      <p>The change takes effect immediately.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nYour Neonfi subscription has been upgraded to Pro ${cycleLabel}.\n\nThe change takes effect immediately.`,
+  });
+}
+
+export async function sendDowngradeScheduledEmail(opts: {
+  to: string;
+  fullName: string;
+  scheduledPlan: string | null;
+  scheduledBillingCycle: string | null;
+  effectiveDate: Date;
+}): Promise<void> {
+  const target = opts.scheduledPlan === 'free'
+    ? 'Free plan'
+    : `Pro ${opts.scheduledBillingCycle === 'yearly' ? 'Yearly' : 'Monthly'}`;
+  const dateStr = opts.effectiveDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  await send({
+    to: opts.to,
+    template: 'downgrade_scheduled',
+    subject: `Your Neonfi subscription change is scheduled`,
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>Your subscription will change to <strong>${target}</strong> on ${dateStr}.</p>
+      <p>You'll continue to enjoy your current plan until that date.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nYour subscription will change to ${target} on ${dateStr}.\n\nYou'll continue to enjoy your current plan until that date.`,
+  });
+}
+
+export async function sendCancellationScheduledEmail(opts: {
+  to: string;
+  fullName: string;
+  effectiveDate: Date;
+}): Promise<void> {
+  const dateStr = opts.effectiveDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  await send({
+    to: opts.to,
+    template: 'cancellation_scheduled',
+    subject: 'Your Neonfi subscription has been cancelled',
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>Your subscription has been cancelled and will expire on ${dateStr}.</p>
+      <p>You'll continue to have access until then.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nYour subscription has been cancelled and will expire on ${dateStr}.\n\nYou'll continue to have access until then.`,
   });
 }
