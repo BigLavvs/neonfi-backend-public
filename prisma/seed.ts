@@ -9,6 +9,7 @@
 // Uses the shared Prisma singleton (no `new PrismaClient()` outside lib/, §3.4).
 
 import { prisma } from '../src/lib/prisma.js';
+import { CHAINS } from '../src/modules/chains/chains.constants.js';
 
 async function upsertByName(
   model: { upsert: (args: unknown) => Promise<unknown> },
@@ -55,16 +56,20 @@ async function main(): Promise<void> {
   // 8. transaction_type
   await upsertByName(prisma.transactionType, ['native', 'erc20', 'nft']);
 
-  // --- NOT seeded in Part 1 ---
-  // `chain`: GATE B — the 15 supported chains and which 3 are free-tier are NOT
-  //   enumerated in any doc (Appendix item 1). The user chose "skip for now", so
-  //   the chain table is intentionally left EMPTY. /chains and any chainId FK
-  //   have no rows behind them until the list is provided. Do NOT invent it.
+  // 9. chains — GATE B resolved in Stage 5; list locked by Idowu
+  for (const chain of CHAINS) {
+    await prisma.chain.upsert({
+      where: { slug: chain.slug },
+      update: { name: chain.name, moralisId: chain.moralisId, logoUrl: chain.logoUrl },
+      create: chain,
+    });
+  }
+
   // `token`: populated by the Token Metadata Sync job (Stage 9); not hand-seeded
   //   here. Vendor is an open decision (Appendix item 2).
 
   // eslint-disable-next-line no-console
-  console.log('[seed] lookup tables seeded (auth_provider, onboarding_status, plan, billing_cycle, subscription_status, payment_status, portfolio_type, transaction_type). chain + token intentionally empty.');
+  console.log('[seed] lookup tables seeded (auth_provider, onboarding_status, plan, billing_cycle, subscription_status, payment_status, portfolio_type, transaction_type, chain). token intentionally empty.');
 }
 
 main()

@@ -45,6 +45,26 @@ export class SubscriptionError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Soft plan helper — never 403s; returns 'free' for no-sub / expired cases
+// ---------------------------------------------------------------------------
+
+export async function getEffectivePlan(userId: number): Promise<'free' | 'pro'> {
+  const subscription = await prisma.subscription.findUnique({
+    where: { userId },
+    include: { plan: true, status: true },
+  });
+  if (!subscription) return 'free';
+  const now = new Date();
+  const effectivelyActive =
+    subscription.status.name === 'active' ||
+    (subscription.status.name === 'cancelled' &&
+      subscription.currentPeriodEnd !== null &&
+      subscription.currentPeriodEnd > now);
+  if (!effectivelyActive) return 'free';
+  return subscription.plan.name as 'free' | 'pro';
+}
+
+// ---------------------------------------------------------------------------
 // Shared helper: build a Stripe Checkout session URL for Pro
 // ---------------------------------------------------------------------------
 

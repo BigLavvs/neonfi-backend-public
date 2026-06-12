@@ -8,6 +8,7 @@
 
 import { type Prisma, type Session } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 
 // ---------------------------------------------------------------------------
 // User with relations
@@ -41,7 +42,7 @@ export interface UserDTO {
 export async function toUserDTO(user: UserWithRelations): Promise<UserDTO> {
   const subscription = await prisma.subscription.findUnique({
     where: { userId: user.id },
-    include: { plan: true, billingCycle: true, status: true },
+    include: { billingCycle: true, status: true },
   });
 
   const now = new Date();
@@ -52,6 +53,9 @@ export async function toUserDTO(user: UserWithRelations): Promise<UserDTO> {
         subscription.currentPeriodEnd !== null &&
         subscription.currentPeriodEnd > now));
 
+  const plan = effectivelyActive ? await getEffectivePlan(user.id) : null;
+  const billingCycle = effectivelyActive ? (subscription!.billingCycle?.name ?? null) : null;
+
   return {
     id: user.id,
     email: user.email,
@@ -61,8 +65,8 @@ export async function toUserDTO(user: UserWithRelations): Promise<UserDTO> {
     authProvider: user.authProvider.name,
     emailVerified: user.onboardingStatus.name !== 'pending_verification',
     onboardingStatus: user.onboardingStatus.name,
-    plan: effectivelyActive ? (subscription!.plan.name as 'free' | 'pro') : null,
-    billingCycle: effectivelyActive ? (subscription!.billingCycle?.name ?? null) : null,
+    plan,
+    billingCycle,
     newsletterSubscribed: user.newsletterSubscribed,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
