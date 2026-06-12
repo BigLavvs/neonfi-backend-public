@@ -3,10 +3,28 @@
 // Strategy: real DB + Redis, per-test truncation. No Stripe mock needed —
 // GET endpoints do not call Stripe.
 
-import { it, beforeEach, expect } from 'vitest';
+import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { cookieValue, clearRedisAuthKeys, seedPayment } from './helpers.js';
+
+// ---------------------------------------------------------------------------
+// Email mock — prevents real Resend calls during tests
+// ---------------------------------------------------------------------------
+
+vi.mock('../src/modules/email/email.service.js', () => ({
+  sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
+  sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
+  sendSubscriptionConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+  sendUpgradeEmail: vi.fn().mockResolvedValue(undefined),
+  sendDowngradeScheduledEmail: vi.fn().mockResolvedValue(undefined),
+  sendCancellationScheduledEmail: vi.fn().mockResolvedValue(undefined),
+  sendPaymentReceiptEmail: vi.fn().mockResolvedValue(undefined),
+  sendPaymentFailedEmail: vi.fn().mockResolvedValue(undefined),
+  sendRefundConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+  sendSubscriptionExpiredEmail: vi.fn().mockResolvedValue(undefined),
+  sendPlanDowngradeAppliedEmail: vi.fn().mockResolvedValue(undefined),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -83,7 +101,7 @@ beforeEach(async () => {
 it('99: GET /payments — auth, no payments → 200, empty list, correct meta', async () => {
   const cookies = await registerAndLogin(TEST_EMAIL, TEST_PASSWORD, TEST_FULL_NAME);
 
-  const res = await payGet('/', cookies);
+  const res = await payGet('', cookies);
   expect(res.status).toBe(200);
 
   const json = await res.json() as { data: { payments: unknown[] }; meta: { limit: number; offset: number; total: number } };
@@ -108,7 +126,7 @@ it('100: GET /payments — multiple payments → returned newest-first, total co
   await seedPayment({ userId, subscriptionId: subId, status: 'succeeded', amount: 3000,
     createdAt: new Date('2026-06-01T03:00:00Z') });
 
-  const res = await payGet('/', cookies);
+  const res = await payGet('', cookies);
   expect(res.status).toBe(200);
 
   const json = await res.json() as { data: { payments: Record<string, unknown>[] }; meta: { total: number; limit: number; offset: number } };
@@ -154,7 +172,7 @@ it('101: GET /payments — ?limit=5&offset=5 → returns 6th–10th payments, me
     });
   }
 
-  const res = await payGet('/?limit=5&offset=5', cookies);
+  const res = await payGet('?limit=5&offset=5', cookies);
   expect(res.status).toBe(200);
 
   const json = await res.json() as { data: { payments: Record<string, unknown>[] }; meta: Record<string, number> };
@@ -182,7 +200,7 @@ it('102: GET /payments — ?status=succeeded → only succeeded payments, total 
   await seedPayment({ userId, subscriptionId: subId, status: 'succeeded' });
   await seedPayment({ userId, subscriptionId: subId, status: 'pending' });
 
-  const res = await payGet('/?status=succeeded', cookies);
+  const res = await payGet('?status=succeeded', cookies);
   expect(res.status).toBe(200);
 
   const json = await res.json() as { data: { payments: Record<string, unknown>[] }; meta: { total: number } };
@@ -208,7 +226,7 @@ it('103: GET /payments — cross-user isolation: user B sees empty list when onl
   }
 
   // User B's request should return 0 payments
-  const res = await payGet('/', cookiesB);
+  const res = await payGet('', cookiesB);
   expect(res.status).toBe(200);
 
   const json = await res.json() as { data: { payments: unknown[] }; meta: { total: number } };
@@ -216,7 +234,7 @@ it('103: GET /payments — cross-user isolation: user B sees empty list when onl
   expect(json.meta.total).toBe(0);
 
   // User A still sees their 3 payments
-  const resA = await payGet('/', cookiesA);
+  const resA = await payGet('', cookiesA);
   const jsonA = await resA.json() as { data: { payments: unknown[] }; meta: { total: number } };
   expect(jsonA.data.payments).toHaveLength(3);
 });
@@ -226,7 +244,7 @@ it('103: GET /payments — cross-user isolation: user B sees empty list when onl
 // ---------------------------------------------------------------------------
 
 it('104: GET /payments — no auth → 401', async () => {
-  const res = await payGet('/');
+  const res = await payGet('');
   expect(res.status).toBe(401);
 });
 
@@ -237,12 +255,12 @@ it('104: GET /payments — no auth → 401', async () => {
 it('105: GET /payments — invalid limit (0 and 200) → 400 VALIDATION_ERROR', async () => {
   const cookies = await registerAndLogin(TEST_EMAIL, TEST_PASSWORD, TEST_FULL_NAME);
 
-  const resZero = await payGet('/?limit=0', cookies);
+  const resZero = await payGet('?limit=0', cookies);
   expect(resZero.status).toBe(400);
   const jsonZero = await resZero.json() as { error: { code: string } };
   expect(jsonZero.error.code).toBe('VALIDATION_ERROR');
 
-  const res200 = await payGet('/?limit=200', cookies);
+  const res200 = await payGet('?limit=200', cookies);
   expect(res200.status).toBe(400);
   const json200 = await res200.json() as { error: { code: string } };
   expect(json200.error.code).toBe('VALIDATION_ERROR');

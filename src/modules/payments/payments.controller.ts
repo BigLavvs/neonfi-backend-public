@@ -11,7 +11,7 @@ const router = new Hono<AuthEnv>();
 // GET /payments — list own payments (paginated)
 // ---------------------------------------------------------------------------
 
-router.get('/', requireAuth, async (c) => {
+router.get('', requireAuth, async (c) => {
   const rawQuery = c.req.query();
   const parsed = ListPaymentsQuerySchema.safeParse(rawQuery);
   if (!parsed.success) {
