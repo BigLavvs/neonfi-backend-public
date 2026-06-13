@@ -8,6 +8,7 @@
 
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
+import cron from 'node-cron';
 
 loadDotenv();
 
@@ -69,6 +70,13 @@ const schema = z
     // Both are optional with sensible defaults; set them in .env for production.
     AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
     AUTH_LOGIN_LOCKOUT_MS: z.coerce.number().int().min(1000).default(900000),
+
+    // --- Token metadata sync (Stage 9B) ---
+    TOKEN_SYNC_ENABLED: z.coerce.boolean().default(true),
+    TOKEN_SYNC_CRON: z
+      .string()
+      .default('0 */6 * * *')
+      .refine((v) => cron.validate(v), 'TOKEN_SYNC_CRON must be a valid cron expression'),
   });
   // DATABASE_URL_TEST and REDIS_URL_TEST are optional. When present and
   // NODE_ENV=test, prisma.ts / redis.ts use them instead of the dev URLs

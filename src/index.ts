@@ -36,6 +36,7 @@
 import { serve } from '@hono/node-server';
 import { config } from './lib/config.js';
 import { app } from './app.js';
+import { startTokenSyncScheduler } from './jobs/token-sync.job.js';
 
 // --- Start ------------------------------------------------------------------
 // The WS server is intentionally NOT started in Part 1 (see src/ws/server.ts,
@@ -45,5 +46,9 @@ serve({ fetch: app.fetch, port }, (info) => {
   // eslint-disable-next-line no-console
   console.log(`[neonfi-backend] listening on http://localhost:${info.port} (NODE_ENV=${config.NODE_ENV})`);
 });
+
+if (config.NODE_ENV !== 'test') {
+  startTokenSyncScheduler();
+}
 
 export { app };

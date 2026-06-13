@@ -1,0 +1,230 @@
+// Neonfi backend — Token Metadata Sync tests (Stage 9B).
+//
+// Strategy: inject a mock TokenMetadataProvider; call runTokenMetadataSync()
+// directly. No real Moralis HTTP calls. Token table is NOT truncated between
+// tests (30 seeded rows stay). afterEach restores the 3 tokens mutated by tests.
+// Note: with 30 seeded tokens, `skipped` counts will include all tokens the mock
+// provider didn't return data for (not just explicitly "skipped" ones).
+
+import { it, beforeEach, afterEach, expect } from 'vitest';
+import { prisma } from '../src/lib/prisma.js';
+import { redis } from '../src/lib/redis.js';
+import { runTokenMetadataSync } from '../src/modules/tokens/sync/sync.js';
+import type { TokenMetadataProvider, TokenMetadata } from '../src/modules/tokens/sync/provider.js';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeMockProvider(
+  name: string,
+  data: Map<string, TokenMetadata>,
+): TokenMetadataProvider {
+  return {
+    name,
+    fetchMetadata: async (_symbols: string[]) => data,
+  };
+}
+
+function makeThrowingProvider(name: string): TokenMetadataProvider {
+  return {
+    name,
+    fetchMetadata: async (_symbols: string[]) => {
+      throw new Error('Simulated provider network failure');
+    },
+  };
+}
+
+// Seed values mirrored from prisma/seed.ts (used for afterEach restore)
+const BTC_SEED = { currentPrice: '93000.00', marketCap: '1850000000000.00', rank: 1 };
+const ETH_SEED = { currentPrice: '3200.00', marketCap: '385000000000.00', rank: 2 };
+const USDT_SEED = { currentPrice: '1.00', marketCap: '120000000000.00', rank: 3 };
+
+// ---------------------------------------------------------------------------
+// Setup / teardown
+// ---------------------------------------------------------------------------
+
+beforeEach(async () => {
+  const keys = await redis.keys('token_meta:*');
+  if (keys.length > 0) await redis.del(keys);
+});
+
+afterEach(async () => {
+  // Restore seed values for the tokens used across these tests
+  await prisma.token.update({ where: { symbol: 'BTC' }, data: BTC_SEED });
+  await prisma.token.update({ where: { symbol: 'ETH' }, data: ETH_SEED });
+  await prisma.token.update({ where: { symbol: 'USDT' }, data: USDT_SEED });
+  const keys = await redis.keys('token_meta:*');
+  if (keys.length > 0) await redis.del(keys);
+});
+
+// ---------------------------------------------------------------------------
+// 225. Happy path — provider returns data for 3 symbols
+// ---------------------------------------------------------------------------
+
+it('225: happy path — provider returns metadata for 3 symbols; updated=3, failed=0; Token rows reflect new values', async () => {
+  const mockData = new Map<string, TokenMetadata>([
+    ['BTC',  { symbol: 'BTC',  currentPrice: '100000.00', marketCap: '2000000000000.00', rank: 1 }],
+    ['ETH',  { symbol: 'ETH',  currentPrice: '4000.00',   marketCap: '500000000000.00',  rank: 2 }],
+    ['USDT', { symbol: 'USDT', currentPrice: '1.0001',    marketCap: '125000000000.00',  rank: 3 }],
+  ]);
+  const provider = makeMockProvider('mock', mockData);
+
+  const result = await runTokenMetadataSync(provider);
+
+  expect(result.updated).toBe(3);
+  expect(result.failed).toBe(0);
+
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  expect(Number(btc.currentPrice.toString())).toBeCloseTo(100000);
+
+  const eth = await prisma.token.findUniqueOrThrow({ where: { symbol: 'ETH' } });
+  expect(Number(eth.currentPrice.toString())).toBeCloseTo(4000);
+
+  const usdt = await prisma.token.findUniqueOrThrow({ where: { symbol: 'USDT' } });
+  expect(Number(usdt.currentPrice.toString())).toBeCloseTo(1.0001);
+});
+
+// ---------------------------------------------------------------------------
+// 226. Skipped symbol — provider doesn't return USDT
+// ---------------------------------------------------------------------------
+
+it('226: skipped symbol — provider returns BTC+ETH but not USDT; updated=2, failed=0; USDT row unchanged', async () => {
+  const mockData = new Map<string, TokenMetadata>([
+    ['BTC', { symbol: 'BTC', currentPrice: '95000.00', marketCap: '1900000000000.00', rank: 1 }],
+    ['ETH', { symbol: 'ETH', currentPrice: '3500.00',  marketCap: '420000000000.00',  rank: 2 }],
+  ]);
+  const provider = makeMockProvider('mock', mockData);
+
+  const result = await runTokenMetadataSync(provider);
+
+  expect(result.updated).toBe(2);
+  expect(result.failed).toBe(0);
+  // skipped >= 1 (USDT plus the 27 other seeded tokens not in provider response)
+  expect(result.skipped).toBeGreaterThanOrEqual(1);
+
+  // USDT row must be unchanged
+  const usdt = await prisma.token.findUniqueOrThrow({ where: { symbol: 'USDT' } });
+  expect(Number(usdt.currentPrice.toString())).toBeCloseTo(1.0); // original seed value
+});
+
+// ---------------------------------------------------------------------------
+// 227. Provider throws — all tokens fail
+// ---------------------------------------------------------------------------
+
+it('227: provider throws — updated=0, skipped=0, failed=total_token_count; no Token rows modified', async () => {
+  const btcBefore = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  const tokenCount = await prisma.token.count();
+
+  const result = await runTokenMetadataSync(makeThrowingProvider('mock'));
+
+  expect(result.updated).toBe(0);
+  expect(result.skipped).toBe(0);
+  expect(result.failed).toBe(tokenCount);
+
+  // BTC row must be unchanged
+  const btcAfter = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  expect(btcAfter.currentPrice.toString()).toBe(btcBefore.currentPrice.toString());
+});
+
+// ---------------------------------------------------------------------------
+// 228. Per-symbol DB failure — one symbol has invalid price; others succeed
+// ---------------------------------------------------------------------------
+
+it('228: per-symbol failure — invalid price for BTC causes DB error; updated=2, skipped=27, failed=1', async () => {
+  const mockData = new Map<string, TokenMetadata>([
+    ['BTC',  { symbol: 'BTC',  currentPrice: 'not_a_decimal', marketCap: null,                  rank: null }],
+    ['ETH',  { symbol: 'ETH',  currentPrice: '3600.00',       marketCap: '440000000000.00',      rank: 2    }],
+    ['USDT', { symbol: 'USDT', currentPrice: '1.002',         marketCap: '121000000000.00',      rank: 3    }],
+  ]);
+  const provider = makeMockProvider('mock', mockData);
+
+  const result = await runTokenMetadataSync(provider);
+
+  expect(result.updated).toBe(2);  // ETH + USDT
+  expect(result.failed).toBe(1);   // BTC
+
+  // BTC row must be unchanged (failed update)
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  expect(Number(btc.currentPrice.toString())).toBeCloseTo(93000); // seed value
+
+  // ETH and USDT were updated
+  const eth = await prisma.token.findUniqueOrThrow({ where: { symbol: 'ETH' } });
+  expect(Number(eth.currentPrice.toString())).toBeCloseTo(3600);
+});
+
+// ---------------------------------------------------------------------------
+// 229. Redis cache invalidation
+// ---------------------------------------------------------------------------
+
+it('229: Redis cache invalidation — token_meta:BTC key deleted after successful sync', async () => {
+  // Pre-seed a stale cache key
+  await redis.set('token_meta:BTC', JSON.stringify({ price: 93000 }));
+  expect(await redis.exists('token_meta:BTC')).toBe(1);
+
+  const mockData = new Map<string, TokenMetadata>([
+    ['BTC', { symbol: 'BTC', currentPrice: '96000.00', marketCap: '1920000000000.00', rank: 1 }],
+  ]);
+  const provider = makeMockProvider('mock', mockData);
+
+  await runTokenMetadataSync(provider);
+
+  // Key must be gone after sync
+  expect(await redis.exists('token_meta:BTC')).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// 230. rank:null in provider response — existing rank NOT overwritten
+// ---------------------------------------------------------------------------
+
+it('230: rank=null in provider — existing Token.rank is NOT overwritten with null', async () => {
+  const btcBefore = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  expect(btcBefore.rank).toBe(1); // seed value
+
+  const mockData = new Map<string, TokenMetadata>([
+    ['BTC', { symbol: 'BTC', currentPrice: '97000.00', marketCap: '1950000000000.00', rank: null }],
+  ]);
+  const provider = makeMockProvider('mock', mockData);
+
+  await runTokenMetadataSync(provider);
+
+  const btcAfter = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  // Price updated but rank preserved
+  expect(Number(btcAfter.currentPrice.toString())).toBeCloseTo(97000);
+  expect(btcAfter.rank).toBe(1); // unchanged
+});
+
+// ---------------------------------------------------------------------------
+// 231. Provider returns empty map — all tokens skipped, no failures
+// ---------------------------------------------------------------------------
+
+it('231: provider returns empty map → all symbols skipped, updated=0, failed=0', async () => {
+  const provider = makeMockProvider('mock', new Map());
+  const tokenCount = await prisma.token.count();
+
+  const result = await runTokenMetadataSync(provider);
+
+  expect(result.updated).toBe(0);
+  expect(result.failed).toBe(0);
+  expect(result.skipped).toBe(tokenCount); // every DB symbol was skipped
+});
+
+// ---------------------------------------------------------------------------
+// 232. Stats reporting shape
+// ---------------------------------------------------------------------------
+
+it('232: stats reporting — return value has correct shape; durationMs > 0', async () => {
+  const mockData = new Map<string, TokenMetadata>([
+    ['BTC', { symbol: 'BTC', currentPrice: '94000.00', marketCap: '1860000000000.00', rank: 1 }],
+  ]);
+  const provider = makeMockProvider('mock', mockData);
+
+  const result = await runTokenMetadataSync(provider);
+
+  expect(typeof result.updated).toBe('number');
+  expect(typeof result.skipped).toBe('number');
+  expect(typeof result.failed).toBe('number');
+  expect(typeof result.durationMs).toBe('number');
+  expect(result.durationMs).toBeGreaterThan(0);
+  expect(result.updated + result.skipped + result.failed).toBe(await prisma.token.count());
+});
