@@ -22,6 +22,8 @@ import { tokensRouter } from './modules/tokens/tokens.controller.js';
 import { portfoliosRouter } from './modules/portfolios/portfolios.controller.js';
 import { assetsRouter } from './modules/assets/assets.controller.js';
 import { transactionsRouter } from './modules/transactions/transactions.controller.js';
+import { pricesRouter } from './modules/prices/prices.controller.js';
+import { wsHealthHandler } from './ws/health.js';
 
 export function createApp(): Hono {
   const app = new Hono();
@@ -30,7 +32,7 @@ export function createApp(): Hono {
   app.get('/health', async (c) => {
     const health = await checkHealth();
     if (health.ok) {
-      return c.json(ok({ status: 'ok', db: health.db, redis: health.redis }), 200);
+      return c.json(ok({ status: 'ok', db: health.db, redis: health.redis, coinbase: health.coinbase }), 200);
     }
     return c.json(err('HEALTH_FAILED', health.failure ?? 'dependency unavailable'), 503);
   });
@@ -48,7 +50,11 @@ export function createApp(): Hono {
   api.route('/portfolios', portfoliosRouter);
   api.route('/portfolios/:portfolioId/assets', assetsRouter);
   api.route('/portfolios/:portfolioId/transactions', transactionsRouter);
+  api.route('/prices', pricesRouter);
   app.route('/api/v1', api);
+
+  // WebSocket health — not under /api/v1 (Coolify polls externally, like /health)
+  app.get('/ws/health', wsHealthHandler);
 
   // 404 + global error handler — standard envelopes, no stack traces
   app.notFound((c) => c.json(err('NOT_FOUND', 'Resource not found'), 404));

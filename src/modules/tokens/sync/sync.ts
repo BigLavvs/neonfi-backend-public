@@ -2,13 +2,13 @@ import { prisma } from '../../../lib/prisma.js';
 import { redis } from '../../../lib/redis.js';
 import { config } from '../../../lib/config.js';
 import type { TokenMetadataProvider } from './provider.js';
-import { MoralisTokenMetadataProvider } from './moralis-provider.js';
+import { CoinMarketCapTokenMetadataProvider } from './coinmarketcap-provider.js';
 
 let _defaultProvider: TokenMetadataProvider | null = null;
 
 function getDefaultProvider(): TokenMetadataProvider {
   if (!_defaultProvider) {
-    _defaultProvider = new MoralisTokenMetadataProvider(config.MORALIS_API_KEY);
+    _defaultProvider = new CoinMarketCapTokenMetadataProvider(config.COINMARKETCAP_API_KEY);
   }
   return _defaultProvider;
 }
