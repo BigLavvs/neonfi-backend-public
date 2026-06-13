@@ -73,7 +73,13 @@ const schema = z
     AUTH_LOGIN_LOCKOUT_MS: z.coerce.number().int().min(1000).default(900000),
 
     // --- Token metadata sync (Stage 9B) ---
-    TOKEN_SYNC_ENABLED: z.coerce.boolean().default(true),
+    // NOTE: deliberately NOT z.coerce.boolean() — Boolean("false") === true in JS,
+    // so "false" would NOT disable. Stage 13 caught the same bug for SNAPSHOT_ENABLED;
+    // mirror the same explicit-transform pattern here.
+    TOKEN_SYNC_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
     TOKEN_SYNC_CRON: z
       .string()
       .default('0 */6 * * *')

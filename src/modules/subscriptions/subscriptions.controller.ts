@@ -56,7 +56,7 @@ function parseBody(schema: typeof CreateSubscriptionSchema | typeof UpgradeSubsc
 // POST /subscriptions — initial activation
 // ---------------------------------------------------------------------------
 
-router.post('/', requireAuth, async (c) => {
+router.post('', requireAuth, async (c) => {
   let rawBody: unknown;
   try {
     rawBody = await c.req.json();

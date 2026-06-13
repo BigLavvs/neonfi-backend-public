@@ -56,4 +56,57 @@ if (config.NODE_ENV !== 'test') {
   void startWsServer(server);
 }
 
+// --- Graceful shutdown (A19) -------------------------------------------------
+// Coolify sends SIGTERM on container stop. Without these handlers WS connections,
+// the Coinbase feed, and the Redis subscriber drop without unsubscribe, leaving
+// orphan `subs:<SYMBOL>` SET entries the next process can't clean up. Each close
+// is wrapped so one failure can't block the rest of the shutdown chain.
+async function shutdown(signal: string): Promise<void> {
+  console.log(`[neonfi-backend] received ${signal}, shutting down gracefully`);
+
+  // Lazy imports — only loaded when shutdown fires; avoids forcing module load
+  // order at boot and lets tests skip the shutdown machinery entirely.
+  const { stopWsServer } = await import('./ws/server.js');
+  const { redis } = await import('./lib/redis.js');
+  const { prisma } = await import('./lib/prisma.js');
+
+  try {
+    await stopWsServer();
+  } catch (e) {
+    console.error('[neonfi-backend] stopWsServer error:', e);
+  }
+
+  try {
+    coinbase.disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] coinbase disconnect error:', e);
+  }
+
+  try {
+    server.close();
+  } catch (e) {
+    console.error('[neonfi-backend] http server close error:', e);
+  }
+
+  try {
+    await redis.quit();
+  } catch (e) {
+    console.error('[neonfi-backend] redis quit error:', e);
+  }
+
+  try {
+    await prisma.$disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] prisma disconnect error:', e);
+  }
+
+  console.log('[neonfi-backend] shutdown complete');
+  process.exit(0);
+}
+
+if (config.NODE_ENV !== 'test') {
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+}
+
 export { app };

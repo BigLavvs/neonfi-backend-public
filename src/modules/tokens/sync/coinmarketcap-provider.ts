@@ -45,18 +45,28 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
       return null;
     }
 
-    const batch = symbols.slice(0, MAX_SYMBOLS_PER_CALL).join(',');
-    const url = `${CMC_URL}?symbol=${encodeURIComponent(batch)}`;
+    // CMC accepts up to 50 symbols per call. The previous .slice(0, 50) silently
+    // dropped everything past the 50th symbol (A23); batch loop covers the full
+    // catalogue and merges each batch's data into one aggregated response.
+    const aggregated: CmcResponse = { data: {} };
 
-    const res = await fetch(url, {
-      headers: { 'X-CMC_PRO_API_KEY': this.apiKey, Accept: 'application/json' },
-    });
+    for (let i = 0; i < symbols.length; i += MAX_SYMBOLS_PER_CALL) {
+      const batch = symbols.slice(i, i + MAX_SYMBOLS_PER_CALL).join(',');
+      const url = `${CMC_URL}?symbol=${encodeURIComponent(batch)}`;
 
-    if (!res.ok) {
-      throw new Error(`CMC HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+      const res = await fetch(url, {
+        headers: { 'X-CMC_PRO_API_KEY': this.apiKey, Accept: 'application/json' },
+      });
+
+      if (!res.ok) {
+        throw new Error(`CMC HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+      }
+
+      const body = (await res.json()) as CmcResponse;
+      Object.assign(aggregated.data, body.data);
     }
 
-    return res.json() as Promise<CmcResponse>;
+    return aggregated;
   }
 
   async fetchMetadata(symbols: string[]): Promise<Map<string, TokenMetadata>> {

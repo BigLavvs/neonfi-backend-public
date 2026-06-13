@@ -14,7 +14,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { OAuth2Client } from 'google-auth-library';
-import { config } from '../../lib/config.js';
+import { config, isProduction } from '../../lib/config.js';
 import { redis } from '../../lib/redis.js';
 import { signAccessToken } from '../../lib/jwt.js';
 import { hashPassword, verifyPassword } from '../../lib/password.js';
@@ -113,8 +113,12 @@ export async function register(body: RegisterBody): Promise<{ user: UserDTO }> {
       const token = makeVerificationToken();
       await redis.set(`email_verify:${token}`, String(user.id), 'EX', 86400);
       const verificationUrl = `${config.APP_BASE_URL}/verify-email?token=${token}`;
-      // Log the URL so dev can test without waiting for email delivery.
-      console.log(`[auth] verification URL for ${user.email}: ${verificationUrl}`);
+      // Log the URL so dev can test without waiting for email delivery. Never in
+      // production — the URL carries a single-use verification token and would let
+      // anyone with Coolify log access verify any user's email (A11).
+      if (!isProduction) {
+        console.log(`[auth] verification URL for ${user.email}: ${verificationUrl}`);
+      }
       await sendWelcomeEmail({ to: user.email, fullName: user.fullName });
       await sendVerificationEmail({ to: user.email, fullName: user.fullName, verificationUrl });
     } catch (e) {
@@ -265,7 +269,10 @@ export async function resendVerification(body: ResendVerificationBody): Promise<
       const token = makeVerificationToken();
       await redis.set(`email_verify:${token}`, String(user.id), 'EX', 86400);
       const verificationUrl = `${config.APP_BASE_URL}/verify-email?token=${token}`;
-      console.log(`[auth] resend verification URL for ${user.email}: ${verificationUrl}`);
+      // Dev-only — see A11 note in register(); never log the token in production.
+      if (!isProduction) {
+        console.log(`[auth] resend verification URL for ${user.email}: ${verificationUrl}`);
+      }
       await sendVerificationEmail({ to: user.email, fullName: user.fullName, verificationUrl });
     } catch (e) {
       console.error('[auth] resendVerification post-rate-limit failed', e instanceof Error ? e.message : e);

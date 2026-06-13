@@ -182,6 +182,7 @@ it('198: POST native buy → 201; Transaction row + NativeTransactionDetail crea
   const tx = json.data.transaction;
   expect(tx.type).toBe('native');
   expect(tx.direction).toBe('buy');
+  expect(tx.status).toBe('completed'); // A7 — hardcoded MVP status
   expect((tx.detail as Record<string, unknown>).amount).toBe(0.5);
   expect((tx.detail as Record<string, unknown>).symbol).toBe('BTC');
 
@@ -480,6 +481,7 @@ it('212: GET native detail → 200; nativeDetail populated; erc20/nft detail nul
   const tx = json.data.transaction;
   expect(tx.type).toBe('native');
   expect(tx.direction).toBe('buy');
+  expect(tx.status).toBe('completed'); // A7 — TransactionDetailDTO inherits status
   const detail = tx.detail as Record<string, unknown>;
   expect(detail.amount).toBe(1.0);
   expect(detail.symbol).toBe('BTC');

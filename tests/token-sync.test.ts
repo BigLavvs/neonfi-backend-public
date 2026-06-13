@@ -6,10 +6,11 @@
 // Note: with 30 seeded tokens, `skipped` counts will include all tokens the mock
 // provider didn't return data for (not just explicitly "skipped" ones).
 
-import { it, beforeEach, afterEach, expect } from 'vitest';
+import { it, beforeEach, afterEach, expect, vi } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
 import { runTokenMetadataSync } from '../src/modules/tokens/sync/sync.js';
+import { CoinMarketCapTokenMetadataProvider } from '../src/modules/tokens/sync/coinmarketcap-provider.js';
 import type { TokenMetadataProvider, TokenMetadata } from '../src/modules/tokens/sync/provider.js';
 
 // ---------------------------------------------------------------------------
@@ -227,4 +228,41 @@ it('232: stats reporting — return value has correct shape; durationMs > 0', as
   expect(typeof result.durationMs).toBe('number');
   expect(result.durationMs).toBeGreaterThan(0);
   expect(result.updated + result.skipped + result.failed).toBe(await prisma.token.count());
+});
+
+// ---------------------------------------------------------------------------
+// 302. CMC adapter batches symbols >50 per call (A23)
+// ---------------------------------------------------------------------------
+
+it('302: 60-symbol fetchMetadata makes 2 batches and returns all 60 symbols', async () => {
+  const symbols = Array.from({ length: 60 }, (_, i) => `SYM${i}`);
+
+  // Mock global fetch — return CMC-shaped data only for the symbols actually in
+  // each batch's `symbol=` query param, so the aggregation is genuinely tested
+  // (batch 1 carries 50, batch 2 carries 10; neither alone has all 60).
+  const fetchMock = vi.fn(async (url: string | URL) => {
+    const requested = new URL(url).searchParams.get('symbol')!.split(',');
+    const data: Record<string, unknown> = {};
+    for (const s of requested) {
+      data[s] = [
+        { cmc_rank: 1, quote: { USD: { price: 1.23, percent_change_24h: 0, market_cap: 1000 } } },
+      ];
+    }
+    return { ok: true, json: async () => ({ data }) } as Response;
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  try {
+    const provider = new CoinMarketCapTokenMetadataProvider('test-key');
+    const result = await provider.fetchMetadata(symbols);
+
+    // 60 symbols / 50 per call = 2 batches.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.size).toBe(60);
+    for (const s of symbols) {
+      expect(result.has(s)).toBe(true);
+    }
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

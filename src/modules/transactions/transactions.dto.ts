@@ -19,6 +19,12 @@ export interface TransactionListDTO {
   portfolioId: number;
   type: string;
   direction: string;
+  // Hardcoded for MVP — no on-chain status tracking yet. Architecture rep defines
+  // status as "completed | pending | failed", but the schema has no column. All MVP
+  // transactions are effectively completed (manual = user-logged after the fact;
+  // connected = webhook events arrive post-confirmation). Replace with a real column
+  // when pending/failed states ship post-MVP.
+  status: 'completed';
   from: string | null;
   to: string | null;
   gasFee: number | null;
@@ -57,6 +63,7 @@ export function toTransactionListDTO(tx: TransactionWithTypeDirection): Transact
     portfolioId: tx.portfolioId,
     type: tx.type.name,
     direction: tx.direction.name,
+    status: 'completed',
     from: tx.from ?? null,
     to: tx.to ?? null,
     gasFee: tx.gasFee !== null ? Number(tx.gasFee.toString()) : null,
