@@ -148,6 +148,109 @@ export async function createTransaction(
 }
 
 // ---------------------------------------------------------------------------
+// POST (webhook bypass — Stage 11)
+// ---------------------------------------------------------------------------
+
+// Webhook-driven counterpart to createTransaction. Bypasses two user-facing guards:
+//   1. CONNECTED_PORTFOLIO_READ_ONLY — webhooks ARE the source of truth for connected portfolios.
+//   2. ASSET_NOT_IN_PORTFOLIO       — auto-creates the Asset row when missing; Moralis tells us
+//      what tokens the wallet holds, so we can't require the user to pre-add them.
+// Plan-rank check (Stage 8) is also skipped: the rank cap governs what a free user can ADD,
+// not what tokens a connected wallet actually holds. All on-chain holdings are shown.
+// Direction convention (differs from Stage 9A manual-portfolio transfer=no-op):
+//   IN  (to === walletAddress) → direction='buy'  → balance += amount
+//   OUT (from === walletAddress) → direction='sell' → balance -= amount
+export async function createTransactionFromWebhook(params: {
+  portfolio: PortfolioWithRelations;
+  body: CreateTransactionBody;
+}): Promise<TransactionDetailDTO> {
+  const { portfolio, body } = params;
+
+  const [typeRow, directionRow] = await Promise.all([
+    prisma.transactionType.findUniqueOrThrow({ where: { name: body.type } }),
+    prisma.transactionDirection.findUniqueOrThrow({ where: { name: body.direction } }),
+  ]);
+
+  let tokenId: number | null = null;
+  if (body.type === 'native' || body.type === 'erc20') {
+    const token = await prisma.token.findUnique({ where: { symbol: body.symbol } });
+    if (!token) {
+      throw new TransactionError(
+        400,
+        'UNKNOWN_TOKEN_SYMBOL',
+        `Unknown token symbol: ${body.symbol}`,
+      );
+    }
+    tokenId = token.id;
+  }
+
+  const newTxId = await prisma.$transaction(
+    async (tx) => {
+      // Auto-create Asset if not yet in portfolio — bypasses ASSET_NOT_IN_PORTFOLIO check
+      if (tokenId !== null) {
+        const asset = await tx.asset.findUnique({
+          where: { portfolioId_tokenId: { portfolioId: portfolio.id, tokenId } },
+        });
+        if (!asset) {
+          await tx.asset.create({
+            data: { portfolioId: portfolio.id, tokenId, balance: '0', netDeposit: '0' },
+          });
+        }
+      }
+
+      let created: { id: number };
+      try {
+        created = await createTransactionRow(tx, {
+          portfolioId: portfolio.id,
+          typeId: typeRow.id,
+          directionId: directionRow.id,
+          from: body.from ?? null,
+          to: body.to ?? null,
+          gasFee: body.gasFee ?? null,
+          transactionHash: body.transactionHash,
+          timestamp: new Date(body.timestamp),
+        });
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          throw new TransactionError(
+            409,
+            'TRANSACTION_HASH_DUPLICATE',
+            'A transaction with this hash already exists',
+          );
+        }
+        throw e;
+      }
+
+      if (body.type === 'native') {
+        await createNativeDetail(tx, created.id, {
+          amount: body.amount,
+          symbol: body.symbol,
+        });
+      } else if (body.type === 'erc20') {
+        await createErc20Detail(tx, created.id, {
+          amount: body.amount,
+          symbol: body.symbol,
+          tokenContractAddress: body.tokenContractAddress,
+          tokenName: body.tokenName,
+          tokenSymbol: body.tokenSymbol,
+        });
+      }
+
+      if (tokenId !== null) {
+        await recalcAssetBalance(tx, portfolio.id, tokenId);
+      }
+
+      return created.id;
+    },
+    { timeout: 15000 },
+  );
+
+  const full = await findTransactionById(newTxId);
+  if (!full) throw new Error('Transaction not found after creation');
+  return toTransactionDetailDTO(full);
+}
+
+// ---------------------------------------------------------------------------
 // GET list
 // ---------------------------------------------------------------------------
 
