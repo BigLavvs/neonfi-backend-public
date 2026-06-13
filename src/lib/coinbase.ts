@@ -175,6 +175,14 @@ export class CoinbaseClient {
 
     console.log(JSON.stringify({ event: 'coinbase_reconnecting', attempt: this.reconnectAttempts, delayMs: delay }));
 
+    // Notify connected WS clients of the upcoming reconnect gap
+    redis.publish('client_events', JSON.stringify({
+      type: 'reconnect',
+      payload: { retryAfterMs: delay, reason: 'coinbase_reconnecting' },
+    })).catch((e: Error) =>
+      console.error('[coinbase] redis publish client_events error:', e.message),
+    );
+
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this._open();

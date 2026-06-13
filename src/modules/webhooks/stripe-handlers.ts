@@ -11,6 +11,7 @@
 import type Stripe from 'stripe';
 import { stripe } from '../../lib/stripe.js';
 import { prisma } from '../../lib/prisma.js';
+import { redis } from '../../lib/redis.js';
 import {
   upsertSubscriptionFromCheckout,
   applyScheduledDowngrade,
@@ -281,6 +282,9 @@ export async function handleSubscriptionUpdated(event: Stripe.Event): Promise<vo
   }
 
   await prisma.subscription.update({ where: { id: localSub.id }, data: updateData });
+
+  // Notify WS server of plan/status change so connected sockets can be closed if needed
+  await redis.publish('user_events', JSON.stringify({ type: 'plan_changed', userId: localSub.userId }));
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +324,9 @@ export async function handleSubscriptionDeleted(event: Stripe.Event): Promise<vo
       }));
     }
   }
+
+  // Notify WS server so connected sockets are closed on plan change
+  await redis.publish('user_events', JSON.stringify({ type: 'plan_changed', userId: localSub.userId }));
 }
 
 // ---------------------------------------------------------------------------

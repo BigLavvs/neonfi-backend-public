@@ -34,23 +34,24 @@
 // =============================================================================
 
 import { serve } from '@hono/node-server';
+import type { Server as HttpServer } from 'node:http';
 import { config } from './lib/config.js';
 import { app } from './app.js';
 import { startTokenSyncScheduler } from './jobs/token-sync.job.js';
 import { coinbase } from './lib/coinbase.js';
+import { startWsServer } from './ws/server.js';
 
 // --- Start ------------------------------------------------------------------
-// The WS server is intentionally NOT started in Part 1 (see src/ws/server.ts,
-// TODO Stage 10).
 const port = 3000;
-serve({ fetch: app.fetch, port }, (info) => {
+const server = serve({ fetch: app.fetch, port }, (info) => {
   // eslint-disable-next-line no-console
   console.log(`[neonfi-backend] listening on http://localhost:${info.port} (NODE_ENV=${config.NODE_ENV})`);
-});
+}) as unknown as HttpServer;
 
 if (config.NODE_ENV !== 'test') {
   startTokenSyncScheduler();
   coinbase.connect();
+  void startWsServer(server);
 }
 
 export { app };
