@@ -47,6 +47,9 @@ export async function createPortfolioRow(data: {
   walletAddress?: string;
   chainId?: number;
   startingBalance?: string;
+  // retrofit-2 §1.5: manual portfolios seed netDeposit from startingBalance;
+  // connected portfolios omit it and default to 0 via the schema.
+  netDeposit?: string;
 }): Promise<PortfolioWithRelations> {
   return prisma.portfolio.create({ data, ...PORTFOLIO_INCLUDE });
 }

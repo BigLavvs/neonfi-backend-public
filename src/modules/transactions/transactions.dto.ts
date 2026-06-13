@@ -10,8 +10,11 @@ export type TransactionWithAllRelations = Prisma.TransactionGetPayload<{
   };
 }>;
 
-export type TransactionWithTypeDirection = Prisma.TransactionGetPayload<{
-  include: { type: true; direction: true };
+// The list query (retrofit-2) now also pulls the native/erc20 child detail so the
+// list response can surface amount/symbol/usdValue flat per row. nftDetail is NOT
+// included — NFTs have no amount/symbol/usdValue to surface and the join is wasted.
+export type TransactionWithListIncludes = Prisma.TransactionGetPayload<{
+  include: { type: true; direction: true; nativeDetail: true; erc20Detail: true };
 }>;
 
 export interface TransactionListDTO {
@@ -29,6 +32,11 @@ export interface TransactionListDTO {
   to: string | null;
   gasFee: number | null;
   transactionHash: string | null;
+  // amount/symbol/usdValue come from the child detail (native or erc20).
+  // All null for nft type — no balance, no USD value (retrofit-2 §1.7).
+  amount: number | null;
+  symbol: string | null;
+  usdValue: number | null;
   timestamp: string;
   createdAt: string;
 }
@@ -57,7 +65,22 @@ export interface TransactionDetailDTO extends TransactionListDTO {
   detail: NativeDetailDTO | Erc20DetailDTO | NftDetailDTO;
 }
 
-export function toTransactionListDTO(tx: TransactionWithTypeDirection): TransactionListDTO {
+export function toTransactionListDTO(tx: TransactionWithListIncludes): TransactionListDTO {
+  let amount: number | null = null;
+  let symbol: string | null = null;
+  let usdValue: number | null = null;
+
+  if (tx.nativeDetail) {
+    amount = Number(tx.nativeDetail.amount.toString());
+    symbol = tx.nativeDetail.symbol;
+    usdValue = Number(tx.nativeDetail.usdValue.toString());
+  } else if (tx.erc20Detail) {
+    amount = Number(tx.erc20Detail.amount.toString());
+    symbol = tx.erc20Detail.symbol;
+    usdValue = Number(tx.erc20Detail.usdValue.toString());
+  }
+  // For nft transactions: all three remain null.
+
   return {
     id: tx.id,
     portfolioId: tx.portfolioId,
@@ -68,6 +91,9 @@ export function toTransactionListDTO(tx: TransactionWithTypeDirection): Transact
     to: tx.to ?? null,
     gasFee: tx.gasFee !== null ? Number(tx.gasFee.toString()) : null,
     transactionHash: tx.transactionHash ?? null,
+    amount,
+    symbol,
+    usdValue,
     timestamp: tx.timestamp.toISOString(),
     createdAt: tx.createdAt.toISOString(),
   };

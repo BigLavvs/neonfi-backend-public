@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { redis } from '../../lib/redis.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import {
   createTransactionRow,
@@ -23,7 +24,25 @@ import {
   type TransactionDetailDTO,
 } from './transactions.dto.js';
 import type { CreateTransactionBody, UpdateTransactionBody } from './transactions.schemas.js';
-import { recalcAssetBalance } from './recalc.js';
+import { recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
+import { computeUsdValue } from './usd-value.js';
+
+// PnL cache invalidation (retrofit-2 §1.6). Build Guide §4.3/§6.3 mandate the
+// portfolio's Redis PnL cache be invalidated after every mutation commit. The
+// cache itself ships in retrofit-3 (derive.ts GET/SET); wiring the invalidation
+// now means retrofit-3 doesn't have to retrofit every CUD callsite. del on a
+// missing key is a harmless no-op. Run AFTER the $transaction commits and never
+// let a cache failure roll the write back — stale PnL for 5 min is recoverable.
+async function invalidatePnlCache(portfolioId: number): Promise<void> {
+  await redis
+    .del(`portfolio_pnl:${portfolioId}`)
+    .catch((e: Error) =>
+      console.error(
+        `[transactions] cache invalidation failed for portfolio ${portfolioId}:`,
+        e.message,
+      ),
+    );
+}
 
 export class TransactionError extends Error {
   constructor(
@@ -86,6 +105,12 @@ export async function createTransaction(
     tokenId = token.id;
   }
 
+  // USD value at write-time for balance-affecting types (retrofit-2 §1.3)
+  let usdValue: string | null = null;
+  if (body.type === 'native' || body.type === 'erc20') {
+    usdValue = await computeUsdValue(body.symbol, body.amount);
+  }
+
   const newTxId = await prisma.$transaction(
     async (tx) => {
       let created: { id: number };
@@ -115,6 +140,7 @@ export async function createTransaction(
         await createNativeDetail(tx, created.id, {
           amount: body.amount,
           symbol: body.symbol,
+          usdValue: usdValue!,
         });
       } else if (body.type === 'erc20') {
         await createErc20Detail(tx, created.id, {
@@ -123,6 +149,7 @@ export async function createTransaction(
           tokenContractAddress: body.tokenContractAddress,
           tokenName: body.tokenName,
           tokenSymbol: body.tokenSymbol,
+          usdValue: usdValue!,
         });
       } else {
         await createNftDetail(tx, created.id, {
@@ -135,12 +162,15 @@ export async function createTransaction(
 
       if (tokenId !== null) {
         await recalcAssetBalance(tx, portfolio.id, tokenId);
+        await recalcPortfolioNetDeposit(tx, portfolio.id);
       }
 
       return created.id;
     },
     { timeout: 15000 },
   );
+
+  await invalidatePnlCache(portfolio.id);
 
   const full = await findTransactionById(newTxId);
   if (!full) throw new Error('Transaction not found after creation');
@@ -184,6 +214,13 @@ export async function createTransactionFromWebhook(params: {
     tokenId = token.id;
   }
 
+  // USD value at write-time for balance-affecting types (retrofit-2 §1.3).
+  // Webhooks only ever produce native/erc20 transfers (NFTs are handled separately).
+  let usdValue: string | null = null;
+  if (body.type === 'native' || body.type === 'erc20') {
+    usdValue = await computeUsdValue(body.symbol, body.amount);
+  }
+
   const newTxId = await prisma.$transaction(
     async (tx) => {
       // Auto-create Asset if not yet in portfolio — bypasses ASSET_NOT_IN_PORTFOLIO check
@@ -225,6 +262,7 @@ export async function createTransactionFromWebhook(params: {
         await createNativeDetail(tx, created.id, {
           amount: body.amount,
           symbol: body.symbol,
+          usdValue: usdValue!,
         });
       } else if (body.type === 'erc20') {
         await createErc20Detail(tx, created.id, {
@@ -233,17 +271,21 @@ export async function createTransactionFromWebhook(params: {
           tokenContractAddress: body.tokenContractAddress,
           tokenName: body.tokenName,
           tokenSymbol: body.tokenSymbol,
+          usdValue: usdValue!,
         });
       }
 
       if (tokenId !== null) {
         await recalcAssetBalance(tx, portfolio.id, tokenId);
+        await recalcPortfolioNetDeposit(tx, portfolio.id);
       }
 
       return created.id;
     },
     { timeout: 15000 },
   );
+
+  await invalidatePnlCache(portfolio.id);
 
   const full = await findTransactionById(newTxId);
   if (!full) throw new Error('Transaction not found after creation');
@@ -311,6 +353,10 @@ export async function updateTransaction(
   const typeName = existing.type.name;
   const oldSymbol =
     existing.nativeDetail?.symbol ?? existing.erc20Detail?.symbol ?? null;
+  const oldAmount =
+    existing.nativeDetail?.amount.toString() ??
+    existing.erc20Detail?.amount.toString() ??
+    null;
 
   // For native/erc20, resolve old and new tokenIds for recalc
   let oldTokenId: number | null = null;
@@ -350,6 +396,9 @@ export async function updateTransaction(
 
   const balanceAffected =
     body.direction !== undefined || body.amount !== undefined || body.symbol !== undefined;
+  // usdValue must be recomputed whenever amount or symbol changes (retrofit-2 §1.8).
+  // Direction alone does NOT change usdValue — recalc handles the sign flip.
+  const usdAffected = body.amount !== undefined || body.symbol !== undefined;
 
   await prisma.$transaction(
     async (tx) => {
@@ -369,9 +418,16 @@ export async function updateTransaction(
       }
 
       if (typeName === 'native') {
-        const nativeData: { amount?: string; symbol?: string } = {};
+        const nativeData: { amount?: string; symbol?: string; usdValue?: string } = {};
         if (body.amount !== undefined) nativeData.amount = body.amount;
         if (body.symbol !== undefined) nativeData.symbol = body.symbol;
+        if (usdAffected) {
+          const newSymbol = body.symbol ?? oldSymbol ?? '';
+          const newAmount = body.amount ?? oldAmount ?? '0';
+          if (newSymbol) {
+            nativeData.usdValue = await computeUsdValue(newSymbol, newAmount);
+          }
+        }
         if (Object.keys(nativeData).length > 0) {
           await updateNativeDetail(tx, txId, nativeData);
         }
@@ -382,6 +438,7 @@ export async function updateTransaction(
           tokenContractAddress?: string;
           tokenName?: string;
           tokenSymbol?: string;
+          usdValue?: string;
         } = {};
         if (body.amount !== undefined) erc20Data.amount = body.amount;
         if (body.symbol !== undefined) erc20Data.symbol = body.symbol;
@@ -389,6 +446,13 @@ export async function updateTransaction(
           erc20Data.tokenContractAddress = body.tokenContractAddress;
         if (body.tokenName !== undefined) erc20Data.tokenName = body.tokenName;
         if (body.tokenSymbol !== undefined) erc20Data.tokenSymbol = body.tokenSymbol;
+        if (usdAffected) {
+          const newSymbol = body.symbol ?? oldSymbol ?? '';
+          const newAmount = body.amount ?? oldAmount ?? '0';
+          if (newSymbol) {
+            erc20Data.usdValue = await computeUsdValue(newSymbol, newAmount);
+          }
+        }
         if (Object.keys(erc20Data).length > 0) {
           await updateErc20Detail(tx, txId, erc20Data);
         }
@@ -419,10 +483,13 @@ export async function updateTransaction(
         } else if (newTokenId !== null) {
           await recalcAssetBalance(tx, portfolio.id, newTokenId);
         }
+        await recalcPortfolioNetDeposit(tx, portfolio.id);
       }
     },
     { timeout: 15000 },
   );
+
+  await invalidatePnlCache(portfolio.id);
 
   const updated = await findTransactionById(txId);
   if (!updated) throw new Error('Transaction not found after update');
@@ -458,8 +525,11 @@ export async function deleteTransaction(
       await deleteTransactionRow(tx, txId);
       if (tokenId !== null) {
         await recalcAssetBalance(tx, portfolio.id, tokenId);
+        await recalcPortfolioNetDeposit(tx, portfolio.id);
       }
     },
     { timeout: 15000 },
   );
+
+  await invalidatePnlCache(portfolio.id);
 }

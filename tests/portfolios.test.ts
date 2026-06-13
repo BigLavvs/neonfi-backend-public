@@ -857,3 +857,39 @@ it('174: DELETE /portfolios/:id connected with moralisStreamId → deleteStream 
   expect(deleteStreamMock).toHaveBeenCalledTimes(1);
   expect(deleteStreamMock).toHaveBeenCalledWith('mock-stream-123');
 });
+
+// ---------------------------------------------------------------------------
+// 311-312. retrofit-2 — Portfolio.netDeposit seeded on create.
+// ---------------------------------------------------------------------------
+
+it('311: POST manual with startingBalance=5000 → Portfolio.netDeposit = 5000', async () => {
+  const cookies = await registerAndLogin();
+
+  const res = await portPost({ type: 'manual', name: 'Cost Basis', startingBalance: '5000' }, cookies);
+  expect(res.status).toBe(201);
+
+  const json = await res.json() as { data: { portfolio: { id: number; netDeposit: number } } };
+  expect(json.data.portfolio.netDeposit).toBe(5000);
+
+  const db = await prisma.portfolio.findUniqueOrThrow({ where: { id: json.data.portfolio.id } });
+  expect(Number(db.netDeposit.toString())).toBe(5000);
+});
+
+it('312: POST connected → Portfolio.netDeposit = 0 (starts empty, grows via webhooks)', async () => {
+  const cookies = await registerAndLogin();
+  const ethChain = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+
+  const res = await portPost({
+    type: 'connected',
+    name: 'Wallet',
+    walletAddress: '0xAbCdEf1234567890AbCdEf1234567890AbCdEf12',
+    chainId: ethChain.id,
+  }, cookies);
+  expect(res.status).toBe(201);
+
+  const json = await res.json() as { data: { portfolio: { id: number; netDeposit: number } } };
+  expect(json.data.portfolio.netDeposit).toBe(0);
+
+  const db = await prisma.portfolio.findUniqueOrThrow({ where: { id: json.data.portfolio.id } });
+  expect(Number(db.netDeposit.toString())).toBe(0);
+});

@@ -7,6 +7,7 @@
 import { it, beforeAll, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { redis } from '../src/lib/redis.js';
 import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,7 @@ const TEST_FULL_NAME = 'Tx Integration';
 let btcId: number;
 let ethId: number;
 let usdtId: number;
+let linkId: number;
 
 async function authPost(path: string, body: Record<string, unknown>): Promise<Response> {
   return app.request(`${AUTH_BASE}${path}`, {
@@ -135,7 +137,43 @@ async function getAssetBalance(portfolioId: number, tokenId: number): Promise<nu
   return Number(asset.balance.toString());
 }
 
+async function getAssetNetDeposit(portfolioId: number, tokenId: number): Promise<number> {
+  const asset = await prisma.asset.findUniqueOrThrow({
+    where: { portfolioId_tokenId: { portfolioId, tokenId } },
+  });
+  return Number(asset.netDeposit.toString());
+}
+
+async function getPortfolioNetDeposit(portfolioId: number): Promise<number> {
+  const p = await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } });
+  return Number(p.netDeposit.toString());
+}
+
+async function getNativeUsdValue(txId: number): Promise<number> {
+  const d = await prisma.nativeTransactionDetail.findUniqueOrThrow({
+    where: { transactionId: txId },
+  });
+  return Number(d.usdValue.toString());
+}
+
+async function getErc20UsdValue(txId: number): Promise<number> {
+  const d = await prisma.erc20TransactionDetail.findUniqueOrThrow({
+    where: { transactionId: txId },
+  });
+  return Number(d.usdValue.toString());
+}
+
+// computeUsdValue checks Redis `price:<SYMBOL>` (60s, Coinbase WS) before falling
+// back to Token.currentPrice. The WS does not run in tests (only src/index.ts
+// connects it), but clear any stray keys so these assertions are hermetic against
+// the DB-seeded price.
+async function clearPriceCache(...symbols: string[]): Promise<void> {
+  await Promise.all(symbols.map((s) => redis.del(`price:${s}`)));
+}
+
 const BTC_PRICE = 93000;
+const ETH_PRICE = 3200;
+const LINK_PRICE = 14.8;
 const TIMESTAMP = '2026-01-01T00:00:00.000Z';
 
 // ---------------------------------------------------------------------------
@@ -146,6 +184,7 @@ beforeAll(async () => {
   btcId = (await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } })).id;
   ethId = (await prisma.token.findUniqueOrThrow({ where: { symbol: 'ETH' } })).id;
   usdtId = (await prisma.token.findUniqueOrThrow({ where: { symbol: 'USDT' } })).id;
+  linkId = (await prisma.token.findUniqueOrThrow({ where: { symbol: 'LINK' } })).id;
 });
 
 // payment → subscription → asset → portfolio → session → user
@@ -709,4 +748,192 @@ it('224: transaction_direction seed — count=3; names are buy, sell, transfer',
   const rows = await prisma.transactionDirection.findMany({ orderBy: { name: 'asc' } });
   const names = rows.map((r) => r.name);
   expect(names).toEqual(['buy', 'sell', 'transfer']);
+});
+
+// ---------------------------------------------------------------------------
+// 303-310. retrofit-2 — usdValue persistence, netDeposit tracking, list shape,
+// PnL cache invalidation.
+// ---------------------------------------------------------------------------
+
+it('303: POST native buy → NativeTransactionDetail.usdValue = amount × Token.currentPrice', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  const res = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '0.5', symbol: 'BTC', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+  const txId = ((await res.json()) as { data: { transaction: { id: number } } }).data.transaction.id;
+
+  // 0.5 × 93000 = 46500
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(0.5 * BTC_PRICE);
+});
+
+it('304: POST erc20 buy → Erc20TransactionDetail.usdValue = amount × Token.currentPrice', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, linkId);
+  await clearPriceCache('LINK');
+
+  const res = await txPost(
+    portfolioId,
+    {
+      type: 'erc20',
+      direction: 'buy',
+      amount: '10',
+      symbol: 'LINK',
+      tokenContractAddress: '0xLINKContract',
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      timestamp: TIMESTAMP,
+    },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+  const txId = ((await res.json()) as { data: { transaction: { id: number } } }).data.transaction.id;
+
+  // 10 × 14.80 = 148
+  expect(await getErc20UsdValue(txId)).toBeCloseTo(10 * LINK_PRICE);
+});
+
+it('305: POST native buy then sell → Asset.netDeposit = buy.usdValue − sell.usdValue', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '1.0', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+  await txPost(portfolioId, { type: 'native', direction: 'sell', amount: '0.5', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+
+  // balance = 1.0 − 0.5 = 0.5 ; netDeposit = 93000 − 46500 = 46500
+  expect(await getAssetBalance(portfolioId, btcId)).toBeCloseTo(0.5);
+  expect(await getAssetNetDeposit(portfolioId, btcId)).toBeCloseTo(1.0 * BTC_PRICE - 0.5 * BTC_PRICE);
+});
+
+it('306: Portfolio.netDeposit = sum of asset netDeposits after buys/sells', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '1.0', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+  await txPost(portfolioId, { type: 'native', direction: 'sell', amount: '0.5', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+
+  // Only one asset (BTC), so portfolio.netDeposit equals its netDeposit = 46500
+  expect(await getPortfolioNetDeposit(portfolioId)).toBeCloseTo(1.0 * BTC_PRICE - 0.5 * BTC_PRICE);
+  expect(await getAssetNetDeposit(portfolioId, btcId)).toBeCloseTo(
+    await getPortfolioNetDeposit(portfolioId),
+  );
+});
+
+it('307: GET list → each native/erc20 row carries amount, symbol, usdValue', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await addAssetDirectly(portfolioId, linkId);
+  await clearPriceCache('BTC', 'LINK');
+
+  await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '0.5', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+  await txPost(portfolioId, {
+    type: 'erc20',
+    direction: 'buy',
+    amount: '10',
+    symbol: 'LINK',
+    tokenContractAddress: '0xLINKContract',
+    tokenName: 'Chainlink',
+    tokenSymbol: 'LINK',
+    timestamp: TIMESTAMP,
+  }, cookies);
+
+  const res = await txGet(portfolioId, '', cookies);
+  expect(res.status).toBe(200);
+  const json = await res.json() as { data: { transactions: Array<Record<string, unknown>> } };
+  const rows = json.data.transactions;
+  expect(rows).toHaveLength(2);
+
+  const native = rows.find((r) => r.type === 'native')!;
+  expect(native.amount).toBe(0.5);
+  expect(native.symbol).toBe('BTC');
+  expect(native.usdValue).toBeCloseTo(0.5 * BTC_PRICE);
+
+  const erc20 = rows.find((r) => r.type === 'erc20')!;
+  expect(erc20.amount).toBe(10);
+  expect(erc20.symbol).toBe('LINK');
+  expect(erc20.usdValue).toBeCloseTo(10 * LINK_PRICE);
+});
+
+it('308: PATCH amount on native tx → usdValue recomputed (doubles when amount doubles)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  const postRes = await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '0.5', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+  const txId = ((await postRes.json()) as { data: { transaction: { id: number } } }).data.transaction.id;
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(0.5 * BTC_PRICE);
+
+  const patchRes = await txPatch(portfolioId, txId, { amount: '1.0' }, cookies);
+  expect(patchRes.status).toBe(200);
+
+  // usdValue doubles: 46500 → 93000 ; netDeposit follows
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(1.0 * BTC_PRICE);
+  expect(await getAssetNetDeposit(portfolioId, btcId)).toBeCloseTo(1.0 * BTC_PRICE);
+});
+
+it('309: DELETE → asset balance, asset netDeposit, portfolio netDeposit all recompute', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await addAssetDirectly(portfolioId, ethId);
+  await clearPriceCache('BTC', 'ETH');
+
+  // buy 1 BTC (native) + buy 1 ETH (native)
+  const btcRes = await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '1.0', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+  const btcTxId = ((await btcRes.json()) as { data: { transaction: { id: number } } }).data.transaction.id;
+  await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '1.0', symbol: 'ETH', timestamp: TIMESTAMP }, cookies);
+
+  // pre-delete portfolio netDeposit = BTC(93000) + ETH(3200) = 96200
+  expect(await getPortfolioNetDeposit(portfolioId)).toBeCloseTo(BTC_PRICE + ETH_PRICE);
+
+  const delRes = await txDelete(portfolioId, btcTxId, cookies);
+  expect(delRes.status).toBe(200);
+
+  // BTC fully removed; only ETH state remains
+  expect(await getAssetBalance(portfolioId, btcId)).toBeCloseTo(0);
+  expect(await getAssetNetDeposit(portfolioId, btcId)).toBeCloseTo(0);
+  expect(await getAssetBalance(portfolioId, ethId)).toBeCloseTo(1.0);
+  expect(await getAssetNetDeposit(portfolioId, ethId)).toBeCloseTo(ETH_PRICE);
+  expect(await getPortfolioNetDeposit(portfolioId)).toBeCloseTo(ETH_PRICE);
+}, 90000);
+
+it('310: POST → PnL cache invalidated once with key portfolio_pnl:<id>', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  const delSpy = vi.spyOn(redis, 'del');
+  try {
+    const res = await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '0.5', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+    expect(res.status).toBe(201);
+
+    const key = `portfolio_pnl:${portfolioId}`;
+    expect(delSpy).toHaveBeenCalledWith(key);
+    const pnlCalls = delSpy.mock.calls.filter((c) => c[0] === key);
+    expect(pnlCalls).toHaveLength(1);
+  } finally {
+    delSpy.mockRestore();
+  }
 });

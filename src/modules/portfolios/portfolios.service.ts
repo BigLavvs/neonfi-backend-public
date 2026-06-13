@@ -121,11 +121,14 @@ export async function createPortfolio(
   }
 
   // type === 'manual'
+  // retrofit-2 §1.5: seed netDeposit from startingBalance (the user's declared
+  // cost basis). Connected portfolios start at 0 and grow via webhook IN txns.
   const portfolio = await createPortfolioRow({
     userId,
     name: body.name,
     typeId: portfolioType.id,
     startingBalance: body.startingBalance,
+    netDeposit: body.startingBalance ?? '0',
   });
   return await toPortfolioDTO(portfolio);
 }

@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import type { TransactionWithAllRelations, TransactionWithTypeDirection } from './transactions.dto.js';
+import type { TransactionWithAllRelations, TransactionWithListIncludes } from './transactions.dto.js';
 
 type TxClient = Prisma.TransactionClient;
 
@@ -12,9 +12,13 @@ const DETAIL_INCLUDE = {
   nftDetail: true,
 } as const;
 
+// retrofit-2: list now pulls native/erc20 detail so the response surfaces
+// amount/symbol/usdValue flat per row. nftDetail intentionally excluded.
 const LIST_INCLUDE = {
   type: true,
   direction: true,
+  nativeDetail: true,
+  erc20Detail: true,
 } as const;
 
 export interface ListTransactionsFilter {
@@ -52,7 +56,7 @@ export async function findTransactionWithAllInTx(
 export async function listTransactions(
   portfolioId: number,
   filters: ListTransactionsFilter,
-): Promise<TransactionWithTypeDirection[]> {
+): Promise<TransactionWithListIncludes[]> {
   const where = buildWhere(portfolioId, filters.type);
   return prisma.transaction.findMany({
     where,
@@ -60,7 +64,7 @@ export async function listTransactions(
     take: filters.limit,
     skip: filters.offset,
     include: LIST_INCLUDE,
-  }) as Promise<TransactionWithTypeDirection[]>;
+  }) as Promise<TransactionWithListIncludes[]>;
 }
 
 export async function countTransactions(
@@ -91,7 +95,7 @@ export async function createTransactionRow(
 export async function createNativeDetail(
   tx: TxClient,
   transactionId: number,
-  data: { amount: string; symbol: string },
+  data: { amount: string; symbol: string; usdValue: string },
 ): Promise<void> {
   await tx.nativeTransactionDetail.create({ data: { transactionId, ...data } });
 }
@@ -105,6 +109,7 @@ export async function createErc20Detail(
     tokenContractAddress: string;
     tokenName: string;
     tokenSymbol: string;
+    usdValue: string;
   },
 ): Promise<void> {
   await tx.erc20TransactionDetail.create({ data: { transactionId, ...data } });
@@ -140,7 +145,7 @@ export async function updateTransactionBase(
 export async function updateNativeDetail(
   tx: TxClient,
   transactionId: number,
-  data: { amount?: string; symbol?: string },
+  data: { amount?: string; symbol?: string; usdValue?: string },
 ): Promise<void> {
   await tx.nativeTransactionDetail.update({ where: { transactionId }, data });
 }
@@ -154,6 +159,7 @@ export async function updateErc20Detail(
     tokenContractAddress?: string;
     tokenName?: string;
     tokenSymbol?: string;
+    usdValue?: string;
   },
 ): Promise<void> {
   await tx.erc20TransactionDetail.update({ where: { transactionId }, data });

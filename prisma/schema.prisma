@@ -342,6 +342,13 @@ model NativeTransactionDetail {
   transactionId Int         @unique
   amount        Decimal     @db.Decimal(20, 8)
   symbol        String      @db.VarChar(20)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-2): USD
+  // value of the transfer at write-time (amount × price). Implements Option (a)
+  // for USD-at-transaction-time so manual/connected PnL stops being fictional.
+  // MVP simplification: this is the CURRENT price at write-time — historical txns
+  // (and the migration backfill) use current price, NOT the historical price.
+  // PnL is therefore approximate; see src/modules/transactions/usd-value.ts.
+  usdValue      Decimal     @db.Decimal(20, 8)
 
   @@map("native_transaction_detail")
 }
@@ -355,6 +362,11 @@ model Erc20TransactionDetail {
   tokenContractAddress String      @db.VarChar(255)
   tokenName            String      @db.VarChar(255)
   tokenSymbol          String      @db.VarChar(20)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-2): USD
+  // value of the transfer at write-time (amount × price). Same "current price at
+  // write-time" MVP simplification as NativeTransactionDetail.usdValue above; see
+  // src/modules/transactions/usd-value.ts.
+  usdValue             Decimal     @db.Decimal(20, 8)
 
   @@map("erc20_transaction_detail")
 }
