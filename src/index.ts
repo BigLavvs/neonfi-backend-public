@@ -38,6 +38,7 @@ import type { Server as HttpServer } from 'node:http';
 import { config } from './lib/config.js';
 import { app } from './app.js';
 import { startTokenSyncScheduler } from './jobs/token-sync.job.js';
+import { startSnapshotScheduler } from './jobs/snapshot.job.js';
 import { coinbase } from './lib/coinbase.js';
 import { startWsServer } from './ws/server.js';
 
@@ -50,6 +51,7 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
 
 if (config.NODE_ENV !== 'test') {
   startTokenSyncScheduler();
+  startSnapshotScheduler();
   coinbase.connect();
   void startWsServer(server);
 }

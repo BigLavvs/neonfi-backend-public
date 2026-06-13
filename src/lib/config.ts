@@ -78,6 +78,20 @@ const schema = z
       .string()
       .default('0 */6 * * *')
       .refine((v) => cron.validate(v), 'TOKEN_SYNC_CRON must be a valid cron expression'),
+
+    // --- Daily balance snapshot job (Stage 13) ---
+    // NOTE: deliberately NOT z.coerce.boolean() like TOKEN_SYNC_ENABLED above —
+    // z.coerce.boolean() runs Boolean("false") === true, so "false" would NOT
+    // disable. §1.6 requires SNAPSHOT_ENABLED=false to skip cron registration, so
+    // we parse the string explicitly.
+    SNAPSHOT_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    SNAPSHOT_CRON: z
+      .string()
+      .default('0 0 * * *')
+      .refine((v) => cron.validate(v), 'SNAPSHOT_CRON must be a valid cron expression'),
   });
   // DATABASE_URL_TEST and REDIS_URL_TEST are optional. When present and
   // NODE_ENV=test, prisma.ts / redis.ts use them instead of the dev URLs
