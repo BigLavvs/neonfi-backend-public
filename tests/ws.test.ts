@@ -14,7 +14,7 @@ import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
 import { startWsServer, stopWsServer } from '../src/ws/server.js';
-import { cookieValue, clearRedisAuthKeys } from './helpers.js';
+import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Mocks — hoisted so factories can reference them
@@ -85,7 +85,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await prisma.user.deleteMany({ where: { email: { in: [TEST_EMAIL, TEST_EMAIL2] } } });
+  await truncateAllUserData();
   await clearRedisAuthKeys();
   const subsKeys = await redis.keys('subs:*');
   if (subsKeys.length) await redis.del(subsKeys);
@@ -95,7 +95,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await prisma.user.deleteMany({ where: { email: { in: [TEST_EMAIL, TEST_EMAIL2] } } });
+  // No-op: beforeEach already calls truncateAllUserData() for next test's clean state.
+  // A second TRUNCATE here caused PostgreSQL deadlocks under Neon's serverless pooler.
 });
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { cookieValue, clearRedisAuthKeys, seedPayment } from './helpers.js';
+import { cookieValue, clearRedisAuthKeys, seedPayment, truncateAllUserData } from './helpers.js';
 import { config } from '../src/lib/config.js';
 
 // ---------------------------------------------------------------------------
@@ -180,10 +180,7 @@ beforeEach(async () => {
   });
   mockSubscriptionSchedulesCreate.mockResolvedValue({ id: 'sub_sched_test_id' });
   mockSubscriptionSchedulesUpdate.mockResolvedValue({ id: 'sub_sched_test_id' });
-  await prisma.payment.deleteMany();
-  await prisma.subscription.deleteMany();
-  await prisma.session.deleteMany();
-  await prisma.user.deleteMany();
+  await truncateAllUserData();
   await clearRedisAuthKeys();
 });
 

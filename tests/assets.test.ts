@@ -6,7 +6,7 @@
 import { it, beforeAll, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { cookieValue, clearRedisAuthKeys } from './helpers.js';
+import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Email mock
@@ -192,12 +192,7 @@ beforeAll(async () => {
 
 // payment → subscription → asset → portfolio → session → user
 beforeEach(async () => {
-  await prisma.payment.deleteMany();
-  await prisma.subscription.deleteMany();
-  await prisma.asset.deleteMany();
-  await prisma.portfolio.deleteMany();
-  await prisma.session.deleteMany();
-  await prisma.user.deleteMany();
+  await truncateAllUserData();
   await clearRedisAuthKeys();
 });
 

@@ -49,6 +49,18 @@ export async function seedPayment(opts: {
   });
 }
 
+// Truncates all user-data tables in FK-safe order via CASCADE.
+// Faster than chained deleteMany, handles FK order automatically, and resets
+// identity sequences so tests don't accumulate row counts across runs.
+// Lookup tables (auth_provider, plan, chain, token, etc.) are NOT touched.
+export async function truncateAllUserData(): Promise<void> {
+  await prisma.$executeRaw`TRUNCATE TABLE
+    "payment", "subscription", "transaction",
+    "nft", "asset", "portfolio",
+    "session", "user"
+    CASCADE`;
+}
+
 export async function clearRedisAuthKeys(): Promise<void> {
   const patterns = [
     'email_verify:*',

@@ -7,7 +7,7 @@ import { it, beforeEach, afterEach, beforeAll, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
-import { cookieValue, clearRedisAuthKeys } from './helpers.js';
+import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 import type { CoinMarketCapTokenMetadataProvider } from '../src/modules/tokens/sync/coinmarketcap-provider.js';
 
 // ---------------------------------------------------------------------------
@@ -115,15 +115,8 @@ async function createProSubForUser(userId: number): Promise<void> {
   });
 }
 
-async function clearPricesTestData(email = TEST_EMAIL): Promise<void> {
-  // Cascade deletes handle sessions, subscriptions, portfolios → assets/transactions.
-  await prisma.user.deleteMany({ where: { email } });
-}
-
 beforeEach(async () => {
-  // Guard against leftover state from prior failed tests.
-  await clearPricesTestData(TEST_EMAIL);
-  await clearPricesTestData(TEST_EMAIL_PRO);
+  await truncateAllUserData();
   mockFetchPrices.mockReset();
   await clearRedisAuthKeys();
   // Clear rate limit keys
@@ -135,8 +128,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await clearPricesTestData(TEST_EMAIL);
-  await clearPricesTestData(TEST_EMAIL_PRO);
+  await truncateAllUserData();
 });
 
 // ---------------------------------------------------------------------------

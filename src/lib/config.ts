@@ -54,9 +54,10 @@ const schema = z
     MORALIS_API_KEY: z.string().min(1),
     MORALIS_WEBHOOK_SECRET: z.string().min(1),
     COINBASE_WS_URL: z.string().min(1),
-    // Vendor decision is OPEN (Appendix item 2 — Moralis is primary; CMC/CoinRanking
-    // under evaluation). These are OPTIONAL; do not require either.
-    COINMARKETCAP_API_KEY: z.string().optional(),
+    // Stage 12: COINMARKETCAP_API_KEY is now required. Stage 9B's CMC sync is the
+    // authoritative token-catalog source; booting without the key silently disables
+    // price refreshes in a way that's hard to notice in production.
+    COINMARKETCAP_API_KEY: z.string().min(1),
     COINRANKING_API_KEY: z.string().optional(),
 
     // --- Email ---

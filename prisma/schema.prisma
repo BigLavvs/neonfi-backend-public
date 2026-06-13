@@ -241,6 +241,10 @@ model Portfolio {
   chainId         Int? // null for manual portfolios
   startingBalance Decimal?          @db.Decimal(20, 8) // null for wallet-connected
   netDeposit      Decimal           @default(0) @db.Decimal(20, 8)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, Stage 12): Moralis
+  // Streams stream ID for this connected portfolio. Null for manual portfolios and
+  // until the stream is created. Used by deletePortfolio to clean up the stream.
+  moralisStreamId String?           @db.VarChar(255)
 
   // One to Many
   assets          Asset[]
@@ -379,6 +383,17 @@ model Nft {
   collectionName  String?   @db.VarChar(255)
   logoUrl         String?   @db.VarChar(2048)
   chain           String    @db.VarChar(50)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, Stage 12): architecture
+  // rep specifies 7 marketplace fields that the schema docx omits. Same defect pattern
+  // as Session.refreshTokenHash, Transaction.directionId. All nullable — Moralis
+  // returns them when available; DTO returns null otherwise.
+  tokenStandard   String?   @db.VarChar(50)
+  floorPrice      String?   @db.VarChar(50)
+  floorPriceUsd   String?   @db.VarChar(50)
+  lastSale        String?   @db.VarChar(50)
+  lastSaleNote    String?   @db.VarChar(100)
+  rarity          String?   @db.VarChar(100)
+  traits          Json?
 
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt

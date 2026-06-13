@@ -19,6 +19,7 @@
 
 import type { Context } from 'hono';
 import { keccak256 } from 'js-sha3';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
 import { config } from '../../lib/config.js';
@@ -68,6 +69,17 @@ interface MoralisNftTransfer {
   tokenAddress?: string;
   tokenId?: string;
   amount?: string;
+  // Marketplace fields — present when Moralis includes them, absent otherwise
+  tokenName?: string;
+  collectionName?: string;
+  logoUrl?: string;
+  tokenStandard?: string;
+  floorPrice?: string;
+  floorPriceUsd?: string;
+  lastSale?: string;
+  lastSaleNote?: string;
+  rarity?: string;
+  traits?: unknown;
 }
 
 interface MoralisPayload {
@@ -306,6 +318,79 @@ async function processErc20Transfer(
   return anyProcessed ? 'processed' : 'no-op';
 }
 
+async function processNftTransfers(
+  nftTransfers: MoralisNftTransfer[],
+  chainId: number,
+  chainSlug: string,
+): Promise<number> {
+  let processed = 0;
+
+  for (const transfer of nftTransfers) {
+    const fromAddr = (transfer.from ?? '').toLowerCase();
+    const toAddr = (transfer.to ?? '').toLowerCase();
+    const tokenAddress = (transfer.tokenAddress ?? '').toLowerCase();
+    const tokenId = transfer.tokenId ?? '';
+
+    if (!tokenAddress || !tokenId) continue;
+
+    // Check both to (received) and from (sent) directions
+    const candidates: Array<{ addr: string; direction: 'received' | 'sent' }> = [];
+    if (toAddr) candidates.push({ addr: toAddr, direction: 'received' });
+    if (fromAddr && fromAddr !== toAddr) candidates.push({ addr: fromAddr, direction: 'sent' });
+
+    for (const { addr, direction } of candidates) {
+      const portfolio = await findConnectedPortfolio(addr, chainId);
+      if (!portfolio) continue;
+
+      if (direction === 'received') {
+        await prisma.nft.upsert({
+          where: {
+            portfolioId_contractAddress_tokenId: {
+              portfolioId: portfolio.id,
+              contractAddress: tokenAddress,
+              tokenId,
+            },
+          },
+          create: {
+            portfolioId: portfolio.id,
+            contractAddress: tokenAddress,
+            tokenId,
+            name: transfer.tokenName ?? null,
+            collectionName: transfer.collectionName ?? null,
+            logoUrl: transfer.logoUrl ?? null,
+            chain: chainSlug,
+            tokenStandard: transfer.tokenStandard ?? null,
+            floorPrice: transfer.floorPrice ?? null,
+            floorPriceUsd: transfer.floorPriceUsd ?? null,
+            lastSale: transfer.lastSale ?? null,
+            lastSaleNote: transfer.lastSaleNote ?? null,
+            rarity: transfer.rarity ?? null,
+            traits: transfer.traits !== undefined
+              ? (transfer.traits as Prisma.InputJsonValue)
+              : Prisma.DbNull,
+          },
+          update: {
+            // Refresh marketplace data if present in this webhook
+            ...(transfer.floorPrice !== undefined && { floorPrice: transfer.floorPrice }),
+            ...(transfer.floorPriceUsd !== undefined && { floorPriceUsd: transfer.floorPriceUsd }),
+            ...(transfer.lastSale !== undefined && { lastSale: transfer.lastSale }),
+            ...(transfer.lastSaleNote !== undefined && { lastSaleNote: transfer.lastSaleNote }),
+          },
+        });
+        processed++;
+      } else {
+        // Ownership transferred away — remove from portfolio
+        await prisma.nft.deleteMany({
+          where: { portfolioId: portfolio.id, contractAddress: tokenAddress, tokenId },
+        });
+        processed++;
+      }
+    }
+  }
+
+  return processed;
+}
+
 // ---------------------------------------------------------------------------
 // Main webhook handler
 // ---------------------------------------------------------------------------
@@ -348,23 +433,14 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
   const erc20Transfers = payload.erc20Transfers ?? [];
   const nftTransfers = payload.nftTransfers ?? [];
 
-  // If chain is unresolvable, count all non-NFT transfers as skipped
+  // If chain is unresolvable, count all transfers as skipped
   if (!chain) {
     if (moralisChainId) {
       console.log('[moralis]', JSON.stringify({ event: 'moralis_unknown_chain', chainId: moralisChainId }));
     }
-    const skippedCount = txs.length + erc20Transfers.length;
-    const nftCount = nftTransfers.length;
-    if (nftCount > 0) {
-      console.log('[moralis]', JSON.stringify({
-        event: 'moralis_nft_event_deferred',
-        stage: 12,
-        transferCount: nftCount,
-        chainId: moralisChainId,
-      }));
-    }
+    const skippedCount = txs.length + erc20Transfers.length + nftTransfers.length;
     await redis.set(`moralis_event:${eventId}`, '1', 'EX', REDIS_TTL_30_DAYS);
-    return c.json(ok({ received: true, processed: 0, skipped: skippedCount, deferred: nftCount }), 200);
+    return c.json(ok({ received: true, processed: 0, skipped: skippedCount }), 200);
   }
 
   // Block timestamp (fallback to now if not present)
@@ -375,7 +451,6 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
 
   let processed = 0;
   let skipped = 0;
-  let deferred = 0;
 
   try {
     // Process native transfers
@@ -403,15 +478,15 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
       }
     }
 
-    // NFT transfers — deferred to Stage 12
+    // Process NFT transfers — upsert on received, delete on sent
     if (nftTransfers.length > 0) {
-      console.log('[moralis]', JSON.stringify({
-        event: 'moralis_nft_event_deferred',
-        stage: 12,
-        transferCount: nftTransfers.length,
-        chainId: moralisChainId,
-      }));
-      deferred += nftTransfers.length;
+      try {
+        const nftProcessed = await processNftTransfers(nftTransfers, chain.id, chain.slug);
+        processed += nftProcessed;
+      } catch (e) {
+        console.error('[moralis]', JSON.stringify({ event: 'nft_error', count: nftTransfers.length }), e);
+        skipped += nftTransfers.length;
+      }
     }
   } catch (e) {
     // Unrecoverable error — don't set idempotency key so Moralis retries
@@ -422,5 +497,5 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
   // 6. Set idempotency key after all transfers processed
   await redis.set(`moralis_event:${eventId}`, '1', 'EX', REDIS_TTL_30_DAYS);
 
-  return c.json(ok({ received: true, processed, skipped, deferred }), 200);
+  return c.json(ok({ received: true, processed, skipped }), 200);
 }

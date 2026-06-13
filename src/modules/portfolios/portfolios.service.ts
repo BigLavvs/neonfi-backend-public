@@ -1,4 +1,6 @@
 import { prisma } from '../../lib/prisma.js';
+import { config } from '../../lib/config.js';
+import { createStream, deleteStream } from '../../lib/moralis-streams-client.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 import { FREE_TIER_CHAIN_SLUGS } from '../chains/chains.constants.js';
 import {
@@ -90,7 +92,6 @@ export async function createPortfolio(
         { chainSlug: chain.slug },
       );
     }
-    // TODO(Stage 11): Moralis webhook will sync assets/transactions after this row is created.
     const portfolio = await createPortfolioRow({
       userId,
       name: body.name,
@@ -98,6 +99,24 @@ export async function createPortfolio(
       walletAddress: validation.normalized!,
       chainId: chain.id,
     });
+
+    // Register Moralis Stream so webhook events flow to this wallet.
+    // On failure: log and continue — portfolio creation succeeds; stream can be recreated.
+    try {
+      const stream = await createStream({
+        webhookUrl: `${config.API_BASE_URL}/api/v1/webhooks/moralis`,
+        chainId: chain.moralisId,
+        address: validation.normalized!,
+        description: `Neonfi portfolio ${portfolio.id}`,
+      });
+      await prisma.portfolio.update({
+        where: { id: portfolio.id },
+        data: { moralisStreamId: stream.id },
+      });
+    } catch (streamErr) {
+      console.error('[moralis-streams] create stream failed', streamErr);
+    }
+
     return await toPortfolioDTO(portfolio);
   }
 
@@ -155,5 +174,16 @@ export async function deletePortfolioById(userId: number, id: number): Promise<v
   if (!portfolio || portfolio.userId !== userId) {
     throw new PortfolioError(403, 'FORBIDDEN', 'Forbidden');
   }
+
+  // Clean up Moralis Stream before deleting — prevents quota leaks.
+  // On failure: log and continue — portfolio deletion proceeds regardless.
+  if (portfolio.moralisStreamId) {
+    try {
+      await deleteStream(portfolio.moralisStreamId);
+    } catch (streamErr) {
+      console.error('[moralis-streams] delete stream failed', streamErr);
+    }
+  }
+
   await deletePortfolio(id);
 }

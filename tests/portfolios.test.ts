@@ -6,11 +6,17 @@
 import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { cookieValue, clearRedisAuthKeys } from './helpers.js';
+import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
+import * as moralisStreams from '../src/lib/moralis-streams-client.js';
 
 // ---------------------------------------------------------------------------
 // Email mock
 // ---------------------------------------------------------------------------
+
+vi.mock('../src/lib/moralis-streams-client.js', () => ({
+  createStream: vi.fn().mockResolvedValue({ id: 'mock-stream-123' }),
+  deleteStream: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock('../src/modules/email/email.service.js', () => ({
   sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
@@ -135,11 +141,7 @@ async function portDelete(path: string, cookies?: string): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 beforeEach(async () => {
-  await prisma.payment.deleteMany();
-  await prisma.subscription.deleteMany();
-  await prisma.portfolio.deleteMany();
-  await prisma.session.deleteMany();
-  await prisma.user.deleteMany();
+  await truncateAllUserData();
   await clearRedisAuthKeys();
 });
 
@@ -798,4 +800,60 @@ it('172: Connected portfolio Solana — round-trip: case-sensitive address survi
   // Also verify in DB directly — no case change
   const row = await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } });
   expect(row.walletAddress).toBe(solanaAddress);
+});
+
+// ---------------------------------------------------------------------------
+// Moralis stream integration (tests 173–174)
+// ---------------------------------------------------------------------------
+
+it('173: POST /portfolios connected → createStream called once; moralisStreamId persisted in DB', async () => {
+  const createStreamMock = vi.mocked(moralisStreams.createStream);
+  createStreamMock.mockClear();
+
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+
+  const ethChain = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+
+  const res = await portPost(
+    { name: 'Stream Portfolio', type: 'connected', walletAddress: '0xabc1234567890abcdef1234567890abcdef12345', chainId: ethChain.id },
+    cookie,
+  );
+  expect(res.status).toBe(201);
+  const body = await res.json() as { data: { portfolio: { id: number } } };
+  const portfolioId = body.data.portfolio.id;
+
+  expect(createStreamMock).toHaveBeenCalledTimes(1);
+
+  const dbPortfolio = await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } });
+  expect(dbPortfolio.moralisStreamId).toBe('mock-stream-123');
+});
+
+it('174: DELETE /portfolios/:id connected with moralisStreamId → deleteStream called with stored streamId', async () => {
+  const deleteStreamMock = vi.mocked(moralisStreams.deleteStream);
+  deleteStreamMock.mockClear();
+
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+
+  const ethChain = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+
+  // Create connected portfolio (stream registered)
+  const createRes = await portPost(
+    { name: 'Stream Delete Test', type: 'connected', walletAddress: '0xdead1234567890abcdef1234567890abcdef1234', chainId: ethChain.id },
+    cookie,
+  );
+  expect(createRes.status).toBe(201);
+  const body = await createRes.json() as { data: { portfolio: { id: number } } };
+  const portfolioId = body.data.portfolio.id;
+
+  deleteStreamMock.mockClear(); // reset after create (no deleteStream called on create)
+
+  const delRes = await portDelete(`/${portfolioId}`, cookie);
+  expect(delRes.status).toBe(200);
+
+  expect(deleteStreamMock).toHaveBeenCalledTimes(1);
+  expect(deleteStreamMock).toHaveBeenCalledWith('mock-stream-123');
 });

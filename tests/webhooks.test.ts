@@ -9,7 +9,7 @@ import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
-import { clearRedisAuthKeys } from './helpers.js';
+import { clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Stripe mock
@@ -165,10 +165,7 @@ beforeEach(async () => {
     current_period_start: 1748678400,
     current_period_end: 1751356800,
   });
-  await prisma.payment.deleteMany();
-  await prisma.subscription.deleteMany();
-  await prisma.session.deleteMany();
-  await prisma.user.deleteMany();
+  await truncateAllUserData();
   await clearRedisAuthKeys();
   const stripeKeys = await redis.keys('stripe_event:*');
   if (stripeKeys.length > 0) await redis.del(stripeKeys as string[]);

@@ -23,6 +23,7 @@ import { portfoliosRouter } from './modules/portfolios/portfolios.controller.js'
 import { assetsRouter } from './modules/assets/assets.controller.js';
 import { transactionsRouter } from './modules/transactions/transactions.controller.js';
 import { pricesRouter } from './modules/prices/prices.controller.js';
+import { nftsRouter } from './modules/nfts/nfts.controller.js';
 import { wsHealthHandler } from './ws/health.js';
 
 export function createApp(): Hono {
@@ -50,6 +51,7 @@ export function createApp(): Hono {
   api.route('/portfolios', portfoliosRouter);
   api.route('/portfolios/:portfolioId/assets', assetsRouter);
   api.route('/portfolios/:portfolioId/transactions', transactionsRouter);
+  api.route('/portfolios/:portfolioId/nfts', nftsRouter);
   api.route('/prices', pricesRouter);
   app.route('/api/v1', api);
 

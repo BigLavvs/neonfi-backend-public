@@ -6,7 +6,7 @@
 import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
-import { cookieValue, clearRedisAuthKeys, seedPayment } from './helpers.js';
+import { cookieValue, clearRedisAuthKeys, seedPayment, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Email mock — prevents real Resend calls during tests
@@ -87,10 +87,7 @@ async function payGet(path: string, cookies?: string): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 beforeEach(async () => {
-  await prisma.payment.deleteMany();
-  await prisma.subscription.deleteMany();
-  await prisma.session.deleteMany();
-  await prisma.user.deleteMany();
+  await truncateAllUserData();
   await clearRedisAuthKeys();
 });
 

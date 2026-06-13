@@ -11,7 +11,7 @@ import { describe, it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
-import { cookieValue, cookieMaxAge, clearRedisAuthKeys } from './helpers.js';
+import { cookieValue, cookieMaxAge, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Google OAuth mocks — hoisted so the factory runs before module loads
@@ -97,10 +97,7 @@ async function loginTestUser(): Promise<Response> {
 
 beforeEach(async () => {
   // Delete in FK-safe order: payment → subscription → session → user
-  await prisma.payment.deleteMany();
-  await prisma.subscription.deleteMany();
-  await prisma.session.deleteMany();
-  await prisma.user.deleteMany();
+  await truncateAllUserData();
   await clearRedisAuthKeys();
   vi.clearAllMocks();
 });

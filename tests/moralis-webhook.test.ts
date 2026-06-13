@@ -9,6 +9,7 @@ import { keccak256 } from 'js-sha3';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
+import { truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Email mock
@@ -108,7 +109,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   // Cleanup DB state from prior tests
-  await prisma.user.deleteMany({ where: { email: MORALIS_TEST_EMAIL } });
+  await truncateAllUserData();
   await clearMoralisRedisKeys();
 
   // Seed a connected portfolio on Ethereum for tests that need it
@@ -369,12 +370,10 @@ it('277: ERC-20 transfer for known token, Asset does not exist yet → Asset aut
 });
 
 // ---------------------------------------------------------------------------
-// NFT deferral (test 278)
+// NFT upsert (test 278)
 // ---------------------------------------------------------------------------
 
-it('278: NFT transfer event → 200 with deferred count; no Transaction/Asset writes', async () => {
-  const nftsBefore = await prisma.nft.count({ where: { portfolioId } });
-
+it('278: NFT transfer IN → 200 processed=1; Nft row upserted; no Transaction/Asset writes', async () => {
   const payload = makePayload(
     {
       nftTransfers: [
@@ -385,6 +384,10 @@ it('278: NFT transfer event → 200 with deferred count; no Transaction/Asset wr
           tokenAddress: '0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d',
           tokenId: '1234',
           amount: '1',
+          tokenName: 'Bored Ape #1234',
+          collectionName: 'BoredApeYachtClub',
+          tokenContractType: 'ERC721',
+          image: 'https://example.com/ape.png',
         },
       ],
     },
@@ -393,14 +396,16 @@ it('278: NFT transfer event → 200 with deferred count; no Transaction/Asset wr
   const res = await postWebhook(payload, sign(payload));
   expect(res.status).toBe(200);
   const json = await res.json();
-  expect(json.data.deferred).toBe(1);
-  expect(json.data.processed).toBe(0);
+  expect(json.data.processed).toBe(1);
 
-  // No Nft table writes
-  const nftsAfter = await prisma.nft.count({ where: { portfolioId } });
-  expect(nftsAfter).toBe(nftsBefore);
+  // Nft row upserted
+  const nft = await prisma.nft.findFirst({
+    where: { portfolioId, tokenId: '1234', contractAddress: '0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d' },
+  });
+  expect(nft).not.toBeNull();
+  expect(nft!.name).toBe('Bored Ape #1234');
 
-  // No Transaction writes either
+  // No Transaction writes
   const txCount = await prisma.transaction.count({ where: { portfolioId } });
   expect(txCount).toBe(0);
 });
@@ -428,7 +433,6 @@ it('279: wallet address does not match any portfolio → 200 with all zero count
   const json = await res.json();
   expect(json.data.processed).toBe(0);
   expect(json.data.skipped).toBe(0);
-  expect(json.data.deferred).toBe(0);
 
   const txCount = await prisma.transaction.count({ where: { portfolioId } });
   expect(txCount).toBe(0);
@@ -480,4 +484,123 @@ it('280: multiple transfers in single payload (native + erc20) → 200, counts r
   // Idempotency key set exactly once
   const key = await redis.get(`moralis_event:stream-280_${ETH_MORALIS_ID}_test`);
   expect(key).toBe('1');
+});
+
+// ---------------------------------------------------------------------------
+// NFT OUT, null marketplace fields, idempotency (tests 291–293)
+// ---------------------------------------------------------------------------
+
+it('291: NFT transfer OUT → Nft row deleted', async () => {
+  // First upsert an NFT row via IN transfer
+  const inPayload = makePayload(
+    {
+      nftTransfers: [
+        {
+          transactionHash: '0xhash291-setup',
+          from: OTHER_ADDRESS,
+          to: WALLET_ADDRESS,
+          tokenAddress: '0xdeadbeef00000000000000000000000000000001',
+          tokenId: '9001',
+          amount: '1',
+          tokenName: 'Test NFT #9001',
+          collectionName: 'TestCollection',
+          tokenContractType: 'ERC721',
+        },
+      ],
+    },
+    'stream-291-setup',
+  );
+  await postWebhook(inPayload, sign(inPayload));
+
+  const countBefore = await prisma.nft.count({
+    where: { portfolioId, tokenId: '9001', contractAddress: '0xdeadbeef00000000000000000000000000000001' },
+  });
+  expect(countBefore).toBe(1);
+
+  // Now send OUT transfer
+  const outPayload = makePayload(
+    {
+      nftTransfers: [
+        {
+          transactionHash: '0xhash291-out',
+          from: WALLET_ADDRESS,
+          to: OTHER_ADDRESS,
+          tokenAddress: '0xdeadbeef00000000000000000000000000000001',
+          tokenId: '9001',
+          amount: '1',
+        },
+      ],
+    },
+    'stream-291-out',
+  );
+  const res = await postWebhook(outPayload, sign(outPayload));
+  expect(res.status).toBe(200);
+  const json = await res.json();
+  expect(json.data.processed).toBe(1);
+
+  const countAfter = await prisma.nft.count({
+    where: { portfolioId, tokenId: '9001', contractAddress: '0xdeadbeef00000000000000000000000000000001' },
+  });
+  expect(countAfter).toBe(0);
+});
+
+it('292: NFT transfer IN with no marketplace fields → Nft row has null marketplace columns', async () => {
+  const payload = makePayload(
+    {
+      nftTransfers: [
+        {
+          transactionHash: '0xhash292',
+          from: OTHER_ADDRESS,
+          to: WALLET_ADDRESS,
+          tokenAddress: '0xdeadbeef00000000000000000000000000000002',
+          tokenId: '7777',
+          amount: '1',
+          // No tokenName, collectionName, tokenContractType, floorPrice, traits, etc.
+        },
+      ],
+    },
+    'stream-292',
+  );
+  const res = await postWebhook(payload, sign(payload));
+  expect(res.status).toBe(200);
+  const json = await res.json();
+  expect(json.data.processed).toBe(1);
+
+  const nft = await prisma.nft.findFirst({
+    where: { portfolioId, tokenId: '7777', contractAddress: '0xdeadbeef00000000000000000000000000000002' },
+  });
+  expect(nft).not.toBeNull();
+  expect(nft!.name).toBeNull();
+  expect(nft!.collectionName).toBeNull();
+  expect(nft!.tokenStandard).toBeNull();
+  expect(nft!.floorPrice).toBeNull();
+  expect(nft!.traits).toBeNull();
+});
+
+it('293: NFT transfer IN sent twice (idempotency) → exactly one Nft row', async () => {
+  const nftTransfer = {
+    transactionHash: '0xhash293',
+    from: OTHER_ADDRESS,
+    to: WALLET_ADDRESS,
+    tokenAddress: '0xdeadbeef00000000000000000000000000000003',
+    tokenId: '4242',
+    amount: '1',
+    tokenName: 'Dup NFT #4242',
+    collectionName: 'DupCollection',
+    tokenContractType: 'ERC721',
+  };
+
+  const payload1 = makePayload({ nftTransfers: [nftTransfer] }, 'stream-293-first');
+  const payload2 = makePayload({ nftTransfers: [nftTransfer] }, 'stream-293-second');
+
+  const res1 = await postWebhook(payload1, sign(payload1));
+  expect(res1.status).toBe(200);
+
+  const res2 = await postWebhook(payload2, sign(payload2));
+  expect(res2.status).toBe(200);
+
+  const count = await prisma.nft.count({
+    where: { portfolioId, tokenId: '4242', contractAddress: '0xdeadbeef00000000000000000000000000000003' },
+  });
+  expect(count).toBe(1);
 });
