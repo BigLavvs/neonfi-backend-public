@@ -250,9 +250,9 @@ it('326: GET /summary happy path — all 9 fields populated with correct values'
   expect(d.totalDeposits).toBeCloseTo(80000, 2);
   expect(d.totalWithdrawals).toBeCloseTo(5000, 2);
   expect(d.pnl7dValue).toBeCloseTo(8000, 2); // 93000 − 85000
-  expect(d.pnl7d).toBeCloseTo((8000 / 85000) * 100, 4); // ≈ 9.41
+  expect(d.pnl7d).toBe(9.41); // (8000/85000)*100 = 9.41176… → 2dp on the wire (retrofit-4)
   expect(d.pnl30dValue).toBeCloseTo(23000, 2); // 93000 − 70000
-  expect(d.pnl30d).toBeCloseTo((23000 / 70000) * 100, 4); // ≈ 32.86
+  expect(d.pnl30d).toBe(32.86); // (23000/70000)*100 = 32.85714… → 2dp (retrofit-4)
 });
 
 it('327: GET /summary with no historical snapshots → pnl7d/30d fields all 0, allTime still populated', async () => {
@@ -354,14 +354,13 @@ it('331: GET /holdings happy path — assets DESC by value, correct percentages,
     };
   };
   const assets = json.data.assets;
-  const total = 93000 + 6400; // 99400
 
   expect(json.data.portfolioId).toBe(portfolioId);
   expect(assets.map((a) => a.symbol)).toEqual(['BTC', 'ETH']); // DESC by value
   expect(assets[0]!.value).toBeCloseTo(93000, 2);
   expect(assets[1]!.value).toBeCloseTo(6400, 2);
-  expect(assets[0]!.portfolioPercentage).toBeCloseTo((93000 / total) * 100, 4); // ≈ 93.56
-  expect(assets[1]!.portfolioPercentage).toBeCloseTo((6400 / total) * 100, 4); // ≈ 6.44
+  expect(assets[0]!.portfolioPercentage).toBe(93.56); // 93000/99400*100 = 93.56136… → 2dp (retrofit-4)
+  expect(assets[1]!.portfolioPercentage).toBe(6.44); // 6400/99400*100 = 6.44080… → 2dp (retrofit-4)
   for (const a of assets) {
     expect(Object.keys(a).sort()).toEqual(['portfolioPercentage', 'symbol', 'value'].sort());
   }
@@ -483,4 +482,45 @@ it('337: cache invalidation end-to-end — POST transaction evicts analytics_sum
 
   // 3. analytics_summary key is gone — proves portfolioDerivedCacheKeys wiring
   expect(await redis.exists(`analytics_summary:${portfolioId}`)).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// 338 — retrofit-4: numeric outputs are rounded to 2dp on the wire
+// ---------------------------------------------------------------------------
+
+it('338: rounding is applied — equal-value holdings each 33.33 exactly, summary pct at 2dp', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSub(userId);
+  const usdtId = (await prisma.token.findUniqueOrThrow({ where: { symbol: 'USDT' } })).id;
+
+  // Three assets of EQUAL USD value (9300 each): BTC 0.1×93000, ETH 2.90625×3200,
+  // USDT 9300×1. totalValue = 27900 → each share = 9300/27900 = 33.3333…% which the
+  // round helper must clamp to exactly 33.33 (a raw float would be 33.33333…).
+  const portfolioId = await createManualPortfolio(userId, 'P', 27900);
+  await seedAsset(portfolioId, btcId, 0.1);
+  await seedAsset(portfolioId, ethId, 2.90625);
+  await seedAsset(portfolioId, usdtId, 9300);
+
+  const holdings = await aGet(portfolioId, '/holdings', cookies);
+  expect(holdings.status).toBe(200);
+  const hd = (
+    (await holdings.json()) as {
+      data: { assets: Array<{ symbol: string; value: number; portfolioPercentage: number }> };
+    }
+  ).data;
+
+  expect(hd.assets).toHaveLength(3);
+  for (const a of hd.assets) {
+    expect(a.portfolioPercentage).toBe(33.33); // exact 2dp — proves round() is wired
+    expect(a.value).toBe(9300);
+  }
+
+  // Summary: seed a 7d-ago snapshot of 27000 → pnl7d = (900/27000)*100 = 3.3333…%,
+  // which must land on the wire as exactly 3.33 (its own 2dp-rounded value).
+  await seedSnapshot(portfolioId, userId, ymdDaysAgo(7), 27000);
+  const summary = await aGet(portfolioId, '/summary', cookies);
+  expect(summary.status).toBe(200);
+  const sd = ((await summary.json()) as { data: Record<string, number> }).data;
+  expect(sd.pnl7d).toBe(3.33);
 });

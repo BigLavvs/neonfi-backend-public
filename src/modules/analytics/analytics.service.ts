@@ -28,6 +28,18 @@ import type { SummaryDTO, PerformanceDTO, HoldingsDTO } from './analytics.dto.js
 
 const CACHE_TTL_S = 300;
 
+/**
+ * Round a derived analytics metric to a fixed wire scale. These values are JS-float
+ * derivations (Number(decimal) + arithmetic) that carry representation noise
+ * (e.g. 16.250000000000004); 2dp matches the architecture reps and hands the frontend
+ * clean numbers to format. `dp` is the single knob — bump the default to 3 for finer
+ * percentage granularity (Idowu's call).
+ */
+function round(n: number, dp = 2): number {
+  const f = 10 ** dp;
+  return Math.round(n * f) / f;
+}
+
 // Mirrors derive.ts's GET/parse/return-or-recompute pattern: a Redis miss or a
 // malformed payload falls through to a fresh compute, and a SET failure logs but
 // never blocks the read.
@@ -79,14 +91,14 @@ async function buildSummary(portfolioId: number): Promise<SummaryDTO> {
 
   return {
     portfolioId,
-    allTimePnlPct: derived.pnlAllTime,
-    allTimePnlValue: derived.pnlAllTimeValue,
-    totalDeposits,
-    totalWithdrawals,
-    pnl7d,
-    pnl7dValue,
-    pnl30d,
-    pnl30dValue,
+    allTimePnlPct: round(derived.pnlAllTime),
+    allTimePnlValue: round(derived.pnlAllTimeValue),
+    totalDeposits: round(totalDeposits),
+    totalWithdrawals: round(totalWithdrawals),
+    pnl7d: round(pnl7d),
+    pnl7dValue: round(pnl7dValue),
+    pnl30d: round(pnl30d),
+    pnl30dValue: round(pnl30dValue),
   };
 }
 
@@ -96,7 +108,7 @@ async function buildPerformance(portfolioId: number): Promise<PerformanceDTO> {
     portfolioId,
     snapshots: snapshots.map((s) => ({
       date: s.snapshotDate.toISOString().slice(0, 10),
-      value: Number(s.value.toString()),
+      value: round(Number(s.value.toString())),
     })),
   };
 }
@@ -117,7 +129,12 @@ async function buildHoldings(portfolio: PortfolioWithRelations): Promise<Holding
       const portfolioPercentage = totalValue > 0 ? (value / totalValue) * 100 : 0;
       return { symbol: a.symbol, value, portfolioPercentage };
     })
-    .sort((a, b) => b.value - a.value);
+    .sort((a, b) => b.value - a.value)
+    .map((a) => ({
+      symbol: a.symbol,
+      value: round(a.value),
+      portfolioPercentage: round(a.portfolioPercentage),
+    }));
 
   return { portfolioId: portfolio.id, assets: items };
 }

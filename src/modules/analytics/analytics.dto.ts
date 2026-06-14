@@ -5,6 +5,9 @@
 // directly: performance.snapshots[].value → AreaChart points, .date → labels;
 // holdings.assets[].portfolioPercentage → DonutChart segment value.
 //
+// All numeric outputs are rounded to 2 decimal places on the wire (retrofit-4); see
+// `analytics.service.ts` `round`.
+//
 // Frontend-derived fields are deliberately NOT here (Stage 14 §1.3):
 //   - allTimePnlPositive — a CSS-class boolean the performance +page.ts derives from
 //     allTimePnlValue >= 0; not an API field.
@@ -32,6 +35,6 @@ export interface PerformanceDTO {
 export interface HoldingsDTO {
   portfolioId: number;
   // Sorted by `value` DESC, zero-balance assets filtered out. `value` is USD;
-  // `portfolioPercentage` is 0-100 unrounded (frontend rounds for display).
+  // `portfolioPercentage` is 0-100, rounded to 2dp (retrofit-4).
   assets: Array<{ symbol: string; value: number; portfolioPercentage: number }>;
 }
