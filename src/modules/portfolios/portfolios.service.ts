@@ -190,3 +190,14 @@ export async function deletePortfolioById(userId: number, id: number): Promise<v
 
   await deletePortfolio(id);
 }
+
+/**
+ * Returns the minimal {id, userId} pair for every portfolio in the system.
+ * Used ONLY by the daily snapshot job (src/jobs/snapshot.job.ts). The job filters
+ * Pro plans per-user via getEffectivePlan, so this returns everything and lets the
+ * caller decide. Exposed as a service so the snapshot module doesn't query the
+ * Portfolio table directly (module isolation rule — architecture line 1262-1263).
+ */
+export async function listAllPortfolioIdsForJobs(): Promise<Array<{ id: number; userId: number }>> {
+  return prisma.portfolio.findMany({ select: { id: true, userId: true } });
+}

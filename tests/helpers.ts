@@ -53,12 +53,19 @@ export async function seedPayment(opts: {
 // Faster than chained deleteMany, handles FK order automatically, and resets
 // identity sequences so tests don't accumulate row counts across runs.
 // Lookup tables (auth_provider, plan, chain, token, etc.) are NOT touched.
+//
+// Also flushes the derived-PnL cache (retrofit-3): derive.ts caches by
+// `portfolio_pnl:<portfolioId>` with a 5-min TTL, but TRUNCATE resets the portfolio
+// identity sequence so IDs repeat across tests. Without this flush, test B reading
+// portfolio #1's derived fields could get test A's stale cached values.
 export async function truncateAllUserData(): Promise<void> {
   await prisma.$executeRaw`TRUNCATE TABLE
     "payment", "subscription", "transaction",
     "nft", "asset", "portfolio",
     "session", "user"
     CASCADE`;
+  const pnlKeys = await redis.keys('portfolio_pnl:*');
+  if (pnlKeys.length > 0) await redis.del(pnlKeys);
 }
 
 export async function clearRedisAuthKeys(): Promise<void> {

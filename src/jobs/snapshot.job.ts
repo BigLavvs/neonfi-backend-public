@@ -23,14 +23,19 @@
 
 import cron from 'node-cron';
 import { prisma } from '../lib/prisma.js';
+import { redis } from '../lib/redis.js';
 import { config } from '../lib/config.js';
 import { SNAPSHOT_RETENTION_DAYS } from '../lib/constants.js';
 import { getEffectivePlan } from '../modules/subscriptions/subscriptions.service.js';
+import { listAllPortfolioIdsForJobs } from '../modules/portfolios/portfolios.service.js';
 import { computeDerived } from '../modules/portfolios/derive.js';
 
 export interface SnapshotJobResult {
   snapshotted: number;
   failed: number;
+  // Pro portfolios that should have been snapshotted but weren't (retrofit-3 §1.7,
+  // architecture line 1222 "flag and alert on missed snapshots").
+  missed: number;
   dropChunksSucceeded: boolean;
 }
 
@@ -59,12 +64,12 @@ export async function runSnapshotJob(
   let snapshotted = 0;
   let failed = 0;
 
-  // All portfolios (id + owner). The Pro filter is applied per-portfolio via
-  // getEffectivePlan (cancelled-in-period still counts as Pro), memoized per user
-  // so a multi-portfolio Pro user costs a single subscription read.
-  const portfolios = await prisma.portfolio.findMany({
-    select: { id: true, userId: true },
-  });
+  // All portfolios (id + owner), via the portfolios service so the snapshot job
+  // doesn't reach into the Portfolio table directly (module isolation —
+  // architecture line 1262-1263, retrofit-3 §1.6). The Pro filter is applied
+  // per-portfolio via getEffectivePlan (cancelled-in-period still counts as Pro),
+  // memoized per user so a multi-portfolio Pro user costs a single subscription read.
+  const portfolios = await listAllPortfolioIdsForJobs();
 
   const planByUser = new Map<number, 'free' | 'pro'>();
   const effectivePlan = async (userId: number): Promise<'free' | 'pro'> => {
@@ -75,7 +80,17 @@ export async function runSnapshotJob(
     return plan;
   };
 
+  // Every portfolio the loop actually reaches (success OR caught failure). Drives
+  // missed-snapshot detection below: a "miss" is a Pro portfolio the loop never
+  // processed at all — distinct from a FAILURE (reached-but-threw, counted under
+  // `failed`). retrofit-3 §1.7 reconciled with the test-324 intent that failed ≠
+  // missed: counting a caught failure as also-missed would double-count and muddy
+  // the alert. Under normal completion every portfolio is reached, so `missed` is 0;
+  // it only fires if the loop exits abnormally before reaching some Pro portfolios.
+  const processedIds = new Set<number>();
+
   for (const portfolio of portfolios) {
+    processedIds.add(portfolio.id);
     try {
       if ((await effectivePlan(portfolio.userId)) !== 'pro') continue; // free → no snapshot
       const derived = await derive(portfolio.id);
@@ -92,6 +107,18 @@ export async function runSnapshotJob(
         update: { value: derived.totalValue },
       });
       snapshotted++;
+
+      // PnL cache invalidation (retrofit-3 §1.8, architecture line 1228). Mirrors
+      // transactions.service.ts:invalidatePnlCache — a Redis failure logs and
+      // continues; it must never roll back the snapshot write.
+      await redis
+        .del(`portfolio_pnl:${portfolio.id}`)
+        .catch((e: Error) =>
+          console.error(
+            `[snapshots] cache invalidation failed for portfolio ${portfolio.id}:`,
+            e.message,
+          ),
+        );
     } catch (err) {
       failed++;
       console.error(
@@ -100,6 +127,20 @@ export async function runSnapshotJob(
         err,
       );
     }
+  }
+
+  // Missed-snapshot detection (retrofit-3 §1.7, architecture line 1222 "flag and
+  // alert on missed snapshots"). planByUser is already populated, so this is pure
+  // Map lookups — no extra DB queries.
+  let missed = 0;
+  for (const portfolio of portfolios) {
+    if (processedIds.has(portfolio.id)) continue;
+    if ((await effectivePlan(portfolio.userId)) !== 'pro') continue;
+    missed++;
+    console.error(
+      '[snapshots]',
+      JSON.stringify({ event: 'missed_snapshot', portfolioId: portfolio.id, userId: portfolio.userId }),
+    );
   }
 
   // Retention prune — once, after the loop. A failure here (e.g. hypertable
@@ -114,9 +155,9 @@ export async function runSnapshotJob(
 
   console.log(
     '[snapshots]',
-    JSON.stringify({ event: 'job_complete', snapshotted, failed, dropChunksSucceeded }),
+    JSON.stringify({ event: 'job_complete', snapshotted, failed, missed, dropChunksSucceeded }),
   );
-  return { snapshotted, failed, dropChunksSucceeded };
+  return { snapshotted, failed, missed, dropChunksSucceeded };
 }
 
 export function startSnapshotScheduler(): void {

@@ -7,10 +7,12 @@
 // tests). computeDerived is injectable so a single portfolio can be forced to fail
 // in isolation (test 299), mirroring token-sync's mock-provider injection.
 //
-// Tests 296–301.
+// Tests 296–301 (Stage 13 job) + 321–325 (retrofit-3: derive cache, real
+// pnlAllTime, missed detection, cache invalidation).
 
-import { it, beforeEach, afterAll, expect } from 'vitest';
+import { it, beforeEach, afterAll, expect, vi } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
+import { redis } from '../src/lib/redis.js';
 import { truncateAllUserData } from './helpers.js';
 import { runSnapshotJob, RETENTION_SQL } from '../src/jobs/snapshot.job.js';
 import { computeDerived } from '../src/modules/portfolios/derive.js';
@@ -268,4 +270,101 @@ it('301: a Pro user with 3 portfolios produces 3 snapshot rows in one run, all d
   expect(valueByPortfolio.get(p1)!).toBeCloseTo(e1);
   expect(valueByPortfolio.get(p2)!).toBeCloseTo(e2);
   expect(valueByPortfolio.get(p3)!).toBeCloseTo(e3);
+});
+
+// ---------------------------------------------------------------------------
+// 321-325. retrofit-3 — derive.ts cache + pnlAllTime + missed detection + cache
+// invalidation.
+// ---------------------------------------------------------------------------
+
+it('321: derive.ts cache HIT — pre-populated portfolio_pnl:<id> is returned without DB recompute', async () => {
+  const userId = await createUser('snap.321@neonfi.test');
+  const portfolioId = await createManualPortfolio(userId, 'P321');
+  // Portfolio has NO assets, so a real compute would yield totalValue 0. Inject a
+  // sentinel that only the cached version could have.
+  const cachedPayload = {
+    totalValue: 9999.99,
+    pnlAllTime: 42,
+    pnlAllTimeValue: 1234.56,
+    pnl24h: 0, pnl24hValue: 0, pnl7d: 0, pnl7dValue: 0, pnl30d: 0, pnl30dValue: 0,
+  };
+  await redis.set(`portfolio_pnl:${portfolioId}`, JSON.stringify(cachedPayload), 'EX', 300);
+
+  const result = await computeDerived(portfolioId);
+  expect(result.totalValue).toBe(9999.99); // sentinel → came from cache, not DB
+  expect(result.pnlAllTime).toBe(42);
+  expect(result.pnlAllTimeValue).toBe(1234.56);
+});
+
+it('322: derive.ts cache MISS — computeDerived writes the computed JSON to portfolio_pnl:<id>', async () => {
+  const userId = await createUser('snap.322@neonfi.test');
+  const portfolioId = await createManualPortfolio(userId, 'P322');
+  await seedBtcAsset(portfolioId, 1);
+
+  await redis.del(`portfolio_pnl:${portfolioId}`); // ensure miss
+  const result = await computeDerived(portfolioId);
+
+  const raw = await redis.get(`portfolio_pnl:${portfolioId}`);
+  expect(raw).not.toBeNull();
+  const parsed = JSON.parse(raw!) as { totalValue: number };
+  expect(parsed.totalValue).toBeCloseTo(result.totalValue);
+  expect(result.totalValue).toBeGreaterThan(0);
+});
+
+it('323: derive.ts pnlAllTime — netDeposit=10000, totalValue=12500 → pnlAllTimeValue=2500, pnlAllTime=25', async () => {
+  const userId = await createUser('snap.323@neonfi.test');
+  const portfolioId = await createManualPortfolio(userId, 'P323');
+  // USDT at price 1.00 → balance 12500 gives totalValue exactly 12500.
+  const usdt = await prisma.token.findUniqueOrThrow({ where: { symbol: 'USDT' } });
+  await prisma.asset.create({ data: { portfolioId, tokenId: usdt.id, balance: '12500' } });
+  await prisma.portfolio.update({ where: { id: portfolioId }, data: { netDeposit: '10000' } });
+
+  await redis.del(`portfolio_pnl:${portfolioId}`); // force compute
+  const result = await computeDerived(portfolioId);
+
+  expect(result.totalValue).toBeCloseTo(12500);
+  expect(result.pnlAllTimeValue).toBeCloseTo(2500);
+  expect(result.pnlAllTime).toBeCloseTo(25);
+});
+
+it('324: snapshot.job missed detection — 2 Pro portfolios, one throws → snapshotted=1, failed=1, missed=0', async () => {
+  const userId = await createUser('snap.324@neonfi.test');
+  await createProSub(userId);
+  const p1 = await createManualPortfolio(userId, 'P1');
+  const p2 = await createManualPortfolio(userId, 'P2');
+  await seedBtcAsset(p1, 1);
+  await seedBtcAsset(p2, 1);
+
+  // p2 throws during derive; the failure is caught → counted under `failed`, NOT
+  // `missed`. `missed` only counts Pro portfolios the loop never reached.
+  const throwingDerive = async (portfolioId: number) => {
+    if (portfolioId === p2) throw new Error('simulated computeDerived failure');
+    return computeDerived(portfolioId);
+  };
+
+  const result = await runSnapshotJob(throwingDerive);
+
+  expect(result.snapshotted).toBe(1);
+  expect(result.failed).toBe(1);
+  expect(typeof result.missed).toBe('number');
+  expect(result.missed).toBe(0);
+});
+
+it('325: snapshot.job PnL cache invalidation — redis.del called with portfolio_pnl:<id> per snapshotted portfolio', async () => {
+  const userId = await createUser('snap.325@neonfi.test');
+  await createProSub(userId);
+  const p1 = await createManualPortfolio(userId, 'P1');
+  const p2 = await createManualPortfolio(userId, 'P2');
+  await seedBtcAsset(p1, 1);
+  await seedBtcAsset(p2, 1);
+
+  const delSpy = vi.spyOn(redis, 'del');
+  try {
+    const result = await runSnapshotJob();
+    expect(result.snapshotted).toBe(2);
+    expect(delSpy).toHaveBeenCalledWith(`portfolio_pnl:${p1}`);
+    expect(delSpy).toHaveBeenCalledWith(`portfolio_pnl:${p2}`);
+  } finally {
+    delSpy.mockRestore();
+  }
 });
