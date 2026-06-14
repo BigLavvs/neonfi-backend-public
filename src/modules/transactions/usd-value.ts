@@ -8,10 +8,13 @@
 //   3. No price available: 0 + warn. Better than failing — connected portfolios in
 //      particular can have webhooks arrive faster than tokens get seeded.
 //
-// MVP simplification (LOCKED, retrofit-2 §1.2/§1.3): this is the CURRENT price at
-// write-time. Historical transactions get the current price too, so PnL is
-// approximate. A follow-up retrofit could backfill from CMC historical data if
-// accuracy matters; out of scope here.
+// Price basis (UPDATED retrofit-7): manual buy/sell pass the user-entered
+// `priceAtTime` override → usdValue = amount × priceAtTime (accurate cost basis,
+// skips the Redis/DB lookup). Webhook/connected transactions omit it and keep the
+// CURRENT price at write-time (priceAtTime stays null). For current-price rows PnL
+// is still approximate — historical rows used current price — and a follow-up could
+// backfill from CMC historical data if accuracy matters; out of scope here. This
+// reverses the retrofit-2 "current price for all" simplification for manual txns only.
 //
 // Cross-module note: this helper queries the Token table directly (cross-module).
 // Deliberate exception — it's a one-line price read with no domain logic; routing
@@ -22,7 +25,20 @@
 import { redis } from '../../lib/redis.js';
 import { prisma } from '../../lib/prisma.js';
 
-export async function computeUsdValue(symbol: string, amount: string): Promise<string> {
+export async function computeUsdValue(
+  symbol: string,
+  amount: string,
+  priceAtTime?: string,
+): Promise<string> {
+  // Manual override (retrofit-7): a valid non-negative decimal priceAtTime drives
+  // usdValue directly and skips the Redis/DB price lookup entirely.
+  if (priceAtTime !== undefined) {
+    const overridePrice = Number(priceAtTime);
+    if (Number.isFinite(overridePrice) && overridePrice >= 0) {
+      return (Number(amount) * overridePrice).toFixed(8);
+    }
+  }
+
   const cached = await redis.get(`price:${symbol}`);
   let price: number | null = null;
 

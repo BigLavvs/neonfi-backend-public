@@ -37,6 +37,8 @@ export interface TransactionListDTO {
   amount: number | null;
   symbol: string | null;
   usdValue: number | null;
+  // retrofit-7: free-text user note (null for webhook/connected or when omitted).
+  notes: string | null;
   timestamp: string;
   createdAt: string;
 }
@@ -44,6 +46,8 @@ export interface TransactionListDTO {
 export interface NativeDetailDTO {
   amount: number;
   symbol: string;
+  // retrofit-7: user-entered price that drove usdValue; null for current-price rows.
+  priceAtTime: number | null;
 }
 
 export interface Erc20DetailDTO {
@@ -52,6 +56,8 @@ export interface Erc20DetailDTO {
   tokenContractAddress: string;
   tokenName: string;
   tokenSymbol: string;
+  // retrofit-7: user-entered price that drove usdValue; null for current-price rows.
+  priceAtTime: number | null;
 }
 
 export interface NftDetailDTO {
@@ -94,6 +100,7 @@ export function toTransactionListDTO(tx: TransactionWithListIncludes): Transacti
     amount,
     symbol,
     usdValue,
+    notes: tx.notes ?? null,
     timestamp: tx.timestamp.toISOString(),
     createdAt: tx.createdAt.toISOString(),
   };
@@ -107,6 +114,10 @@ export function toTransactionDetailDTO(tx: TransactionWithAllRelations): Transac
     detail = {
       amount: Number(tx.nativeDetail.amount.toString()),
       symbol: tx.nativeDetail.symbol,
+      priceAtTime:
+        tx.nativeDetail.priceAtTime !== null
+          ? Number(tx.nativeDetail.priceAtTime.toString())
+          : null,
     };
   } else if (tx.type.name === 'erc20' && tx.erc20Detail) {
     detail = {
@@ -115,6 +126,10 @@ export function toTransactionDetailDTO(tx: TransactionWithAllRelations): Transac
       tokenContractAddress: tx.erc20Detail.tokenContractAddress,
       tokenName: tx.erc20Detail.tokenName,
       tokenSymbol: tx.erc20Detail.tokenSymbol,
+      priceAtTime:
+        tx.erc20Detail.priceAtTime !== null
+          ? Number(tx.erc20Detail.priceAtTime.toString())
+          : null,
     };
   } else if (tx.type.name === 'nft' && tx.nftDetail) {
     detail = {

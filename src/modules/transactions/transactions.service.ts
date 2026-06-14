@@ -143,10 +143,12 @@ export async function createTransaction(
     tokenId = token.id;
   }
 
-  // USD value at write-time for balance-affecting types (retrofit-2 §1.3)
+  // USD value at write-time for balance-affecting types (retrofit-2 §1.3). retrofit-7:
+  // a user-entered priceAtTime (native/erc20 only) overrides the current price so
+  // manual cost basis is accurate; otherwise the current-price path is unchanged.
   let usdValue: string | null = null;
   if (body.type === 'native' || body.type === 'erc20') {
-    usdValue = await computeUsdValue(body.symbol, body.amount);
+    usdValue = await computeUsdValue(body.symbol, body.amount, body.priceAtTime);
   }
 
   const newTxId = await prisma.$transaction(
@@ -162,6 +164,7 @@ export async function createTransaction(
           gasFee: body.gasFee ?? null,
           transactionHash: body.transactionHash,
           timestamp: new Date(body.timestamp),
+          notes: body.notes ?? null,
         });
       } catch (e) {
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
@@ -179,6 +182,7 @@ export async function createTransaction(
           amount: body.amount,
           symbol: body.symbol,
           usdValue: usdValue!,
+          priceAtTime: body.priceAtTime ?? null,
         });
       } else if (body.type === 'erc20') {
         await createErc20Detail(tx, created.id, {
@@ -188,6 +192,7 @@ export async function createTransaction(
           tokenName: body.tokenName,
           tokenSymbol: body.tokenSymbol,
           usdValue: usdValue!,
+          priceAtTime: body.priceAtTime ?? null,
         });
       } else {
         await createNftDetail(tx, created.id, {
@@ -434,9 +439,11 @@ export async function updateTransaction(
 
   const balanceAffected =
     body.direction !== undefined || body.amount !== undefined || body.symbol !== undefined;
-  // usdValue must be recomputed whenever amount or symbol changes (retrofit-2 §1.8).
-  // Direction alone does NOT change usdValue — recalc handles the sign flip.
-  const usdAffected = body.amount !== undefined || body.symbol !== undefined;
+  // usdValue must be recomputed whenever amount, symbol, or the entered price changes
+  // (retrofit-2 §1.8; retrofit-7 adds priceAtTime). Direction alone does NOT change
+  // usdValue — recalc handles the sign flip.
+  const usdAffected =
+    body.amount !== undefined || body.symbol !== undefined || body.priceAtTime !== undefined;
 
   await prisma.$transaction(
     async (tx) => {
@@ -446,6 +453,7 @@ export async function updateTransaction(
       if (body.to !== undefined) baseData.to = body.to;
       if (body.gasFee !== undefined) baseData.gasFee = body.gasFee;
       if (body.timestamp !== undefined) baseData.timestamp = new Date(body.timestamp);
+      if (body.notes !== undefined) baseData.notes = body.notes;
 
       if (Object.keys(baseData).length > 0) {
         await updateTransactionBase(
@@ -456,14 +464,21 @@ export async function updateTransaction(
       }
 
       if (typeName === 'native') {
-        const nativeData: { amount?: string; symbol?: string; usdValue?: string } = {};
+        const nativeData: { amount?: string; symbol?: string; usdValue?: string; priceAtTime?: string } = {};
         if (body.amount !== undefined) nativeData.amount = body.amount;
         if (body.symbol !== undefined) nativeData.symbol = body.symbol;
+        if (body.priceAtTime !== undefined) nativeData.priceAtTime = body.priceAtTime;
         if (usdAffected) {
           const newSymbol = body.symbol ?? oldSymbol ?? '';
           const newAmount = body.amount ?? oldAmount ?? '0';
           if (newSymbol) {
-            nativeData.usdValue = await computeUsdValue(newSymbol, newAmount);
+            // retrofit-7: new entered price if given, else the stored priceAtTime, else
+            // (undefined) current price.
+            nativeData.usdValue = await computeUsdValue(
+              newSymbol,
+              newAmount,
+              body.priceAtTime ?? existing.nativeDetail?.priceAtTime?.toString(),
+            );
           }
         }
         if (Object.keys(nativeData).length > 0) {
@@ -477,6 +492,7 @@ export async function updateTransaction(
           tokenName?: string;
           tokenSymbol?: string;
           usdValue?: string;
+          priceAtTime?: string;
         } = {};
         if (body.amount !== undefined) erc20Data.amount = body.amount;
         if (body.symbol !== undefined) erc20Data.symbol = body.symbol;
@@ -484,11 +500,18 @@ export async function updateTransaction(
           erc20Data.tokenContractAddress = body.tokenContractAddress;
         if (body.tokenName !== undefined) erc20Data.tokenName = body.tokenName;
         if (body.tokenSymbol !== undefined) erc20Data.tokenSymbol = body.tokenSymbol;
+        if (body.priceAtTime !== undefined) erc20Data.priceAtTime = body.priceAtTime;
         if (usdAffected) {
           const newSymbol = body.symbol ?? oldSymbol ?? '';
           const newAmount = body.amount ?? oldAmount ?? '0';
           if (newSymbol) {
-            erc20Data.usdValue = await computeUsdValue(newSymbol, newAmount);
+            // retrofit-7: new entered price if given, else the stored priceAtTime, else
+            // (undefined) current price.
+            erc20Data.usdValue = await computeUsdValue(
+              newSymbol,
+              newAmount,
+              body.priceAtTime ?? existing.erc20Detail?.priceAtTime?.toString(),
+            );
           }
         }
         if (Object.keys(erc20Data).length > 0) {
@@ -511,7 +534,12 @@ export async function updateTransaction(
         }
       }
 
-      if (balanceAffected && (typeName === 'native' || typeName === 'erc20')) {
+      // retrofit-7: recalc when balance OR usdValue changed. Pre-retrofit-7 usdAffected
+      // (amount/symbol) was always a subset of balanceAffected, so netDeposit followed
+      // for free. priceAtTime now changes usdValue WITHOUT changing balance, so a
+      // priceAtTime-only edit must still trigger the netDeposit recalc — otherwise
+      // Asset/Portfolio.netDeposit (= Σ usdValue) goes stale and PnL is wrong.
+      if ((balanceAffected || usdAffected) && (typeName === 'native' || typeName === 'erc20')) {
         if (oldTokenId !== null && newTokenId !== null && oldTokenId !== newTokenId) {
           // Symbol changed — recalc both old and new token's balances
           await recalcAssetBalance(tx, portfolio.id, oldTokenId);

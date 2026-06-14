@@ -11,6 +11,8 @@ const commonFields = {
   from: z.string().max(255).nullable().optional(),
   to: z.string().max(255).nullable().optional(),
   gasFee: decimalStr.nullable().optional(),
+  // retrofit-7: optional free-text note (frontend AddTransactionModal). On all types.
+  notes: z.string().max(2000).nullable().optional(),
 };
 
 const NativeTransactionSchema = z
@@ -18,6 +20,8 @@ const NativeTransactionSchema = z
     type: z.literal('native'),
     amount: decimalStr,
     symbol: z.string().min(1).max(20),
+    // retrofit-7: user-entered price override → drives usdValue (manual cost basis).
+    priceAtTime: decimalStr.optional(),
     ...commonFields,
   })
   .strict();
@@ -30,6 +34,8 @@ const Erc20TransactionSchema = z
     tokenContractAddress: z.string().min(1).max(255),
     tokenName: z.string().min(1).max(255),
     tokenSymbol: z.string().min(1).max(20),
+    // retrofit-7: user-entered price override → drives usdValue (manual cost basis).
+    priceAtTime: decimalStr.optional(),
     ...commonFields,
   })
   .strict();
@@ -71,6 +77,9 @@ export const UpdateTransactionBodySchema = z
     nftName: z.string().max(255).nullable().optional(),
     nftTokenId: z.string().max(255).optional(),
     collectionName: z.string().max(255).nullable().optional(),
+    // retrofit-7: priceAtTime override (native/erc20 only) + free-text note.
+    priceAtTime: decimalStr.optional(),
+    notes: z.string().max(2000).nullable().optional(),
   })
   .strict();
 

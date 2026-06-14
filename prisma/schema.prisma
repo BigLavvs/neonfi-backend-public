@@ -325,6 +325,10 @@ model Transaction {
   gasFee          Decimal?                 @db.Decimal(20, 8)
   transactionHash String?                  @unique @db.VarChar(255)
   timestamp       DateTime
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-7): free-text
+  // user note attached to a manually-logged transaction (frontend AddTransactionModal).
+  // Optional; null for webhook/connected transactions.
+  notes           String?                  @db.VarChar(2000)
 
   // Child detail records
   nativeDetail    NativeTransactionDetail?
@@ -368,6 +372,10 @@ model NativeTransactionDetail {
   // (and the migration backfill) use current price, NOT the historical price.
   // PnL is therefore approximate; see src/modules/transactions/usd-value.ts.
   usdValue      Decimal     @db.Decimal(20, 8)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-7): user-entered
+  // price at tx time; drives usdValue for manual entries. Null for webhook/connected
+  // (current price). Reverses the retrofit-2 "current price" simplification for manual txns.
+  priceAtTime   Decimal?    @db.Decimal(20, 8)
 
   @@map("native_transaction_detail")
 }
@@ -386,6 +394,10 @@ model Erc20TransactionDetail {
   // write-time" MVP simplification as NativeTransactionDetail.usdValue above; see
   // src/modules/transactions/usd-value.ts.
   usdValue             Decimal     @db.Decimal(20, 8)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-7): user-entered
+  // price at tx time; drives usdValue for manual entries. Null for webhook/connected
+  // (current price). Reverses the retrofit-2 "current price" simplification for manual txns.
+  priceAtTime          Decimal?    @db.Decimal(20, 8)
 
   @@map("erc20_transaction_detail")
 }

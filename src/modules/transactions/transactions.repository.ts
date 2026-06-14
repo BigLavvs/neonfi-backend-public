@@ -83,6 +83,7 @@ interface CreateTransactionData {
   gasFee?: string | null;
   transactionHash?: string;
   timestamp: Date;
+  notes?: string | null; // retrofit-7
 }
 
 export async function createTransactionRow(
@@ -95,7 +96,7 @@ export async function createTransactionRow(
 export async function createNativeDetail(
   tx: TxClient,
   transactionId: number,
-  data: { amount: string; symbol: string; usdValue: string },
+  data: { amount: string; symbol: string; usdValue: string; priceAtTime?: string | null },
 ): Promise<void> {
   await tx.nativeTransactionDetail.create({ data: { transactionId, ...data } });
 }
@@ -110,6 +111,7 @@ export async function createErc20Detail(
     tokenName: string;
     tokenSymbol: string;
     usdValue: string;
+    priceAtTime?: string | null;
   },
 ): Promise<void> {
   await tx.erc20TransactionDetail.create({ data: { transactionId, ...data } });
@@ -137,6 +139,7 @@ export async function updateTransactionBase(
     to?: string | null;
     gasFee?: string | null;
     timestamp?: Date;
+    notes?: string | null; // retrofit-7
   },
 ): Promise<void> {
   await tx.transaction.update({ where: { id }, data });
@@ -145,7 +148,7 @@ export async function updateTransactionBase(
 export async function updateNativeDetail(
   tx: TxClient,
   transactionId: number,
-  data: { amount?: string; symbol?: string; usdValue?: string },
+  data: { amount?: string; symbol?: string; usdValue?: string; priceAtTime?: string },
 ): Promise<void> {
   await tx.nativeTransactionDetail.update({ where: { transactionId }, data });
 }
@@ -160,6 +163,7 @@ export async function updateErc20Detail(
     tokenName?: string;
     tokenSymbol?: string;
     usdValue?: string;
+    priceAtTime?: string;
   },
 ): Promise<void> {
   await tx.erc20TransactionDetail.update({ where: { transactionId }, data });

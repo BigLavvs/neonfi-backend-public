@@ -942,3 +942,185 @@ it('310: POST → PnL cache invalidated once with key portfolio_pnl:<id>', async
     delSpy.mockRestore();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 311-316. retrofit-7 — user-entered priceAtTime drives usdValue for manual
+// buy/sell (accurate cost basis), + transaction notes. priceAtTime is OPTIONAL:
+// omitting it keeps the retrofit-2 current-price path. Webhook/connected unchanged.
+// ---------------------------------------------------------------------------
+
+it('311: POST native buy with priceAtTime → usdValue = amount × priceAtTime (NOT current price); netDeposit follows', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  // priceAtTime (30000) deliberately differs from current BTC_PRICE (93000) to prove
+  // the entered price — not the current price — drives usdValue.
+  const res = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '1', symbol: 'BTC', priceAtTime: '30000', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+  const json = (await res.json()) as {
+    data: { transaction: { id: number; detail: Record<string, unknown> } };
+  };
+  const txId = json.data.transaction.id;
+
+  // usdValue = 1 × 30000 = 30000 (entered price), NOT 1 × 93000.
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(30000);
+  expect(await getNativeUsdValue(txId)).not.toBeCloseTo(BTC_PRICE);
+  // accurate cost basis flows into netDeposit/PnL
+  expect(await getAssetNetDeposit(portfolioId, btcId)).toBeCloseTo(30000);
+  expect(await getPortfolioNetDeposit(portfolioId)).toBeCloseTo(30000);
+  // priceAtTime surfaced on the detail DTO
+  expect(json.data.transaction.detail.priceAtTime).toBe(30000);
+});
+
+it('312: POST native buy WITHOUT priceAtTime → usdValue = current price (back-compat); detail.priceAtTime null', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  const res = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '0.5', symbol: 'BTC', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+  const json = (await res.json()) as {
+    data: { transaction: { id: number; detail: Record<string, unknown> } };
+  };
+  const txId = json.data.transaction.id;
+
+  // current-price path intact: 0.5 × 93000 = 46500
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(0.5 * BTC_PRICE);
+  // no override entered → priceAtTime persisted as null
+  expect(json.data.transaction.detail.priceAtTime).toBeNull();
+});
+
+it('313: POST erc20 buy with priceAtTime → usdValue = amount × priceAtTime; detail.priceAtTime surfaced', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, linkId);
+  await clearPriceCache('LINK');
+
+  const res = await txPost(
+    portfolioId,
+    {
+      type: 'erc20',
+      direction: 'buy',
+      amount: '10',
+      symbol: 'LINK',
+      tokenContractAddress: '0xLINKContract',
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      priceAtTime: '20',
+      timestamp: TIMESTAMP,
+    },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+  const json = (await res.json()) as {
+    data: { transaction: { id: number; detail: Record<string, unknown> } };
+  };
+  const txId = json.data.transaction.id;
+
+  // 10 × 20 = 200 (entered), NOT 10 × 14.80 (current)
+  expect(await getErc20UsdValue(txId)).toBeCloseTo(200);
+  expect(await getErc20UsdValue(txId)).not.toBeCloseTo(10 * LINK_PRICE);
+  expect(json.data.transaction.detail.priceAtTime).toBe(20);
+  expect(await getAssetNetDeposit(portfolioId, linkId)).toBeCloseTo(200);
+});
+
+it('314: notes persists → surfaced on the detail DTO (POST) and the list DTO (GET)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  const postRes = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '0.5', symbol: 'BTC', notes: 'DCA tranche #3', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(postRes.status).toBe(201);
+  const postJson = (await postRes.json()) as { data: { transaction: Record<string, unknown> } };
+  // notes on the detail (POST) response
+  expect(postJson.data.transaction.notes).toBe('DCA tranche #3');
+
+  // notes on the list response
+  const listRes = await txGet(portfolioId, '', cookies);
+  expect(listRes.status).toBe(200);
+  const listJson = (await listRes.json()) as {
+    data: { transactions: Array<Record<string, unknown>> };
+  };
+  expect(listJson.data.transactions).toHaveLength(1);
+  expect(listJson.data.transactions[0].notes).toBe('DCA tranche #3');
+});
+
+it('315: PATCH priceAtTime → usdValue recomputed and netDeposit follows; detail.priceAtTime updated', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  // Logged WITHOUT priceAtTime → current price 93000.
+  const postRes = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '1', symbol: 'BTC', timestamp: TIMESTAMP },
+    cookies,
+  );
+  const txId = ((await postRes.json()) as { data: { transaction: { id: number } } }).data.transaction.id;
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(BTC_PRICE);
+  expect(await getAssetNetDeposit(portfolioId, btcId)).toBeCloseTo(BTC_PRICE);
+
+  // Correct the entered price → usdValue recomputes to 1 × 25000, and netDeposit
+  // must follow even though amount (and thus balance) is unchanged.
+  const patchRes = await txPatch(portfolioId, txId, { priceAtTime: '25000' }, cookies);
+  expect(patchRes.status).toBe(200);
+  const patchJson = (await patchRes.json()) as { data: { transaction: { detail: Record<string, unknown> } } };
+
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(25000);
+  expect(await getAssetNetDeposit(portfolioId, btcId)).toBeCloseTo(25000);
+  expect(await getPortfolioNetDeposit(portfolioId)).toBeCloseTo(25000);
+  expect(patchJson.data.transaction.detail.priceAtTime).toBe(25000);
+});
+
+it('316: PATCH amount on a tx with a stored priceAtTime → recompute keeps the entered price; PATCH notes updates note', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  // Logged WITH priceAtTime 30000 and a note.
+  const postRes = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '1', symbol: 'BTC', priceAtTime: '30000', notes: 'first', timestamp: TIMESTAMP },
+    cookies,
+  );
+  const txId = ((await postRes.json()) as { data: { transaction: { id: number } } }).data.transaction.id;
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(30000);
+
+  // PATCH amount only (no new priceAtTime) → recompute uses the STORED priceAtTime
+  // (30000), NOT current price: 2 × 30000 = 60000.
+  const patchAmt = await txPatch(portfolioId, txId, { amount: '2' }, cookies);
+  expect(patchAmt.status).toBe(200);
+  expect(await getNativeUsdValue(txId)).toBeCloseTo(60000);
+  expect(await getNativeUsdValue(txId)).not.toBeCloseTo(2 * BTC_PRICE);
+  expect(await getAssetNetDeposit(portfolioId, btcId)).toBeCloseTo(60000);
+
+  // PATCH notes → updated and surfaced.
+  const patchNotes = await txPatch(portfolioId, txId, { notes: 'second' }, cookies);
+  expect(patchNotes.status).toBe(200);
+  const detail = await prisma.transaction.findUniqueOrThrow({ where: { id: txId } });
+  expect(detail.notes).toBe('second');
+});
