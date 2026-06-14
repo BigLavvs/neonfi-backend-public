@@ -29,16 +29,20 @@ import {
   findSessionById,
   findSessionByRefreshHash,
   revokeSession,
+  revokeAllSessionsForUser,
   findActiveSessionsByUser,
+  updatePassword,
   type UserDTO,
   type UserWithRelations,
 } from '../users/users.repository.js';
-import { sendWelcomeEmail, sendVerificationEmail } from '../email/email.service.js';
+import { sendWelcomeEmail, sendVerificationEmail, sendPasswordResetEmail } from '../email/email.service.js';
 import type {
   RegisterBody,
   LoginBody,
   VerifyEmailBody,
   ResendVerificationBody,
+  PasswordResetRequestBody,
+  PasswordResetConfirmBody,
 } from './auth.schemas.js';
 
 // ---------------------------------------------------------------------------
@@ -278,6 +282,70 @@ export async function resendVerification(body: ResendVerificationBody): Promise<
       console.error('[auth] resendVerification post-rate-limit failed', e instanceof Error ? e.message : e);
     }
   })();
+}
+
+// ---------------------------------------------------------------------------
+// requestPasswordReset — email-auth users only; mirrors resendVerification
+// (rate-limit first, enumeration-uniform 200, fire-and-forget email). [retrofit-6]
+// ---------------------------------------------------------------------------
+
+export async function requestPasswordReset(body: PasswordResetRequestBody): Promise<void> {
+  // Rate-limit FIRST so the 429 leaks nothing: set before the existence check.
+  // SET NX returns "OK" on first call, null if the key already exists.
+  const rateLimitKey = `reset_request:${body.email}`;
+  const set = await redis.set(rateLimitKey, '1', 'EX', 60, 'NX');
+  if (!set) {
+    throw new AuthError(429, 'TOO_MANY_REQUESTS', 'Please wait before requesting another password reset');
+  }
+
+  // Uniform 200 regardless of outcome — no enumeration. Only email-auth accounts
+  // can reset a password; Google-only users (authProvider 'google') get nothing.
+  const user = await findUserByEmail(body.email);
+  if (!user || user.authProvider.name !== 'email') {
+    return;
+  }
+
+  void (async () => {
+    try {
+      const token = makeVerificationToken();
+      await redis.set(`password_reset:${token}`, String(user.id), 'EX', 3600);
+      const resetUrl = `${config.APP_BASE_URL}/reset-password?token=${token}`;
+      // Dev-only — see A11 note in register(); never log the token in production.
+      if (!isProduction) {
+        console.log(`[auth] password reset URL for ${user.email}: ${resetUrl}`);
+      }
+      await sendPasswordResetEmail({ to: user.email, fullName: user.fullName, resetUrl });
+    } catch (e) {
+      console.error('[auth] requestPasswordReset post-rate-limit failed', e instanceof Error ? e.message : e);
+    }
+  })();
+}
+
+// ---------------------------------------------------------------------------
+// confirmPasswordReset — single-use token → set new password → revoke ALL
+// sessions. No auto-login; the frontend sends the user to login. [retrofit-6]
+// ---------------------------------------------------------------------------
+
+export async function confirmPasswordReset(body: PasswordResetConfirmBody): Promise<void> {
+  // Atomic single-use: GETDEL returns the value and deletes the key in one op.
+  const userIdStr = await redis.getdel(`password_reset:${body.token}`);
+  if (!userIdStr) {
+    throw new AuthError(400, 'INVALID_RESET_TOKEN', 'Password reset token is invalid or has expired');
+  }
+
+  const userId = parseInt(userIdStr, 10);
+  const user = await findUserById(userId);
+  // Defensive: the request flow only issues tokens for email accounts, but
+  // re-check here so a stale token can never set a password on a Google account.
+  if (!user || user.authProvider.name !== 'email') {
+    throw new AuthError(400, 'INVALID_RESET_TOKEN', 'Password reset token is invalid or has expired');
+  }
+
+  const passwordHash = await hashPassword(body.password);
+  await updatePassword(userId, passwordHash);
+
+  // Revoke every live session so a reset locks out any attacker session.
+  await revokeAllSessionsForUser(userId);
 }
 
 // ---------------------------------------------------------------------------

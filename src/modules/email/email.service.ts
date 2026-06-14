@@ -106,6 +106,26 @@ export async function sendVerificationEmail(opts: {
   });
 }
 
+export async function sendPasswordResetEmail(opts: {
+  to: string;
+  fullName: string;
+  resetUrl: string;
+}): Promise<void> {
+  await send({
+    to: opts.to,
+    template: 'password_reset',
+    subject: 'Reset your Neonfi password',
+    html: `
+      <p>Hi ${opts.fullName},</p>
+      <p>We received a request to reset your password. Click the link below to choose a new one:</p>
+      <p><a href="${opts.resetUrl}">${opts.resetUrl}</a></p>
+      <p>This link expires in 1 hour. If you didn't request this, you can safely ignore this email.</p>
+    `,
+    text:
+      `Hi ${opts.fullName},\n\nWe received a request to reset your password. Visit the link below to choose a new one:\n${opts.resetUrl}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.`,
+  });
+}
+
 export async function sendSubscriptionConfirmationEmail(opts: {
   to: string;
   fullName: string;

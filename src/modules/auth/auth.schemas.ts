@@ -33,6 +33,18 @@ export const ResendVerificationSchema = z.object({
   email: z.string().email('Invalid email address').transform((e) => e.toLowerCase()),
 });
 
+// retrofit-6: password reset (email-auth users only). Tokens live in Redis
+// (mirror email_verify), not the DB. Request schema lowercases the email like
+// the others; confirm reuses passwordSchema so weak passwords → WEAK_PASSWORD.
+export const PasswordResetRequestSchema = z.object({
+  email: z.string().email('Invalid email address').transform((e) => e.toLowerCase()),
+});
+
+export const PasswordResetConfirmSchema = z.object({
+  token: z.string().min(1, 'Token is required'),
+  password: passwordSchema,
+});
+
 export const SessionIdParamSchema = z.object({
   id: z.coerce.number().int().positive(),
 });
@@ -41,3 +53,5 @@ export type RegisterBody = z.infer<typeof RegisterSchema>;
 export type LoginBody = z.infer<typeof LoginSchema>;
 export type VerifyEmailBody = z.infer<typeof VerifyEmailSchema>;
 export type ResendVerificationBody = z.infer<typeof ResendVerificationSchema>;
+export type PasswordResetRequestBody = z.infer<typeof PasswordResetRequestSchema>;
+export type PasswordResetConfirmBody = z.infer<typeof PasswordResetConfirmSchema>;

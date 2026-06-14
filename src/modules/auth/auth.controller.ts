@@ -28,6 +28,8 @@ import {
   logout,
   verifyEmail,
   resendVerification,
+  requestPasswordReset,
+  confirmPasswordReset,
   refresh,
   googleOAuthInit,
   handleGoogleCallback,
@@ -40,6 +42,8 @@ import {
   LoginSchema,
   VerifyEmailSchema,
   ResendVerificationSchema,
+  PasswordResetRequestSchema,
+  PasswordResetConfirmSchema,
 } from './auth.schemas.js';
 import type { ZodSchema } from 'zod';
 
@@ -154,6 +158,36 @@ router.post('/resend-verification', validate(ResendVerificationSchema), async (c
   try {
     const body = c.req.valid('json') as ReturnType<typeof ResendVerificationSchema.parse>;
     await resendVerification(body);
+    return c.json(ok({ ok: true }), 200);
+  } catch (e) {
+    return handleError(e, c);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /auth/password-reset — request a reset link (retrofit-6).
+// Always 200 (except 429 rate-limit); no token/cookie returned.
+// ---------------------------------------------------------------------------
+
+router.post('/password-reset', validate(PasswordResetRequestSchema), async (c) => {
+  try {
+    const body = c.req.valid('json') as ReturnType<typeof PasswordResetRequestSchema.parse>;
+    await requestPasswordReset(body);
+    return c.json(ok({ ok: true }), 200);
+  } catch (e) {
+    return handleError(e, c);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /auth/password-reset/confirm — set the new password (retrofit-6).
+// No auto-login; no cookies returned. Revokes all of the user's sessions.
+// ---------------------------------------------------------------------------
+
+router.post('/password-reset/confirm', validate(PasswordResetConfirmSchema), async (c) => {
+  try {
+    const body = c.req.valid('json') as ReturnType<typeof PasswordResetConfirmSchema.parse>;
+    await confirmPasswordReset(body);
     return c.json(ok({ ok: true }), 200);
   } catch (e) {
     return handleError(e, c);

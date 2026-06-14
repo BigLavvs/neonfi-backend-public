@@ -11,6 +11,7 @@ import { describe, it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
+import { sendPasswordResetEmail } from '../src/modules/email/email.service.js';
 import { cookieValue, cookieMaxAge, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ vi.mock('google-auth-library', () => ({
 vi.mock('../src/modules/email/email.service.js', () => ({
   sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
+  sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
   sendSubscriptionConfirmationEmail: vi.fn().mockResolvedValue(undefined),
   sendUpgradeEmail: vi.fn().mockResolvedValue(undefined),
   sendDowngradeScheduledEmail: vi.fn().mockResolvedValue(undefined),
@@ -99,6 +101,11 @@ beforeEach(async () => {
   // Delete in FK-safe order: payment → subscription → session → user
   await truncateAllUserData();
   await clearRedisAuthKeys();
+  // retrofit-6: clearRedisAuthKeys doesn't cover the password-reset keys.
+  const resetKeys = (
+    await Promise.all([redis.keys('password_reset:*'), redis.keys('reset_request:*')])
+  ).flat();
+  if (resetKeys.length > 0) await redis.del(resetKeys);
   vi.clearAllMocks();
 });
 
@@ -854,4 +861,166 @@ it('33: GET /auth/ws-token issues ticket stored in Redis as userId:sessionId', a
 it('34: GET /auth/ws-token without auth returns 401', async () => {
   const res = await get('/ws-token');
   expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// Password reset (retrofit-6)
+// ---------------------------------------------------------------------------
+
+const NEW_PASSWORD = 'NewPass5678';
+
+async function readResetToken(): Promise<string> {
+  const keys = await redis.keys('password_reset:*');
+  expect(keys).toHaveLength(1);
+  return keys[0]!.replace('password_reset:', '');
+}
+
+// ---------------------------------------------------------------------------
+// 35. Request — email user → 200, token stored in Redis, email sent
+// ---------------------------------------------------------------------------
+
+it('35: password-reset request for an email user returns 200, stores token, sends email', async () => {
+  await registerTestUser();
+  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+
+  const res = await post('/password-reset', { email: TEST_EMAIL });
+  expect(res.status).toBe(200);
+  const json = await res.json() as { data: { ok: boolean } };
+  expect(json.data.ok).toBe(true);
+
+  // No token/cookie leaked in the response
+  expect(cookieValue(res, 'session')).toBeUndefined();
+
+  // Token stored in Redis, mapped to the user id (FIFO: SET is enqueued before our KEYS)
+  const token = await readResetToken();
+  const stored = await redis.get(`password_reset:${token}`);
+  expect(stored).toBe(String(dbUser.id));
+
+  // Email dispatched (fire-and-forget runs after the SET resolves)
+  await vi.waitFor(() => {
+    expect(vi.mocked(sendPasswordResetEmail)).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 36. Request — nonexistent email → 200, no token, no email (uniform)
+// ---------------------------------------------------------------------------
+
+it('36: password-reset request for a nonexistent email returns 200 with no token or email', async () => {
+  const res = await post('/password-reset', { email: 'nobody@neonfi.test' });
+  expect(res.status).toBe(200);
+
+  const keys = await redis.keys('password_reset:*');
+  expect(keys).toHaveLength(0);
+  expect(vi.mocked(sendPasswordResetEmail)).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 37. Request — Google-only user → 200, no token (can't reset a password)
+// ---------------------------------------------------------------------------
+
+it('37: password-reset request for a Google-only account returns 200 with no token', async () => {
+  const [googleProvider, verifiedStatus] = await Promise.all([
+    prisma.authProvider.findUniqueOrThrow({ where: { name: 'google' } }),
+    prisma.onboardingStatus.findUniqueOrThrow({ where: { name: 'verified' } }),
+  ]);
+  await prisma.user.create({
+    data: {
+      email: GOOGLE_EMAIL,
+      passwordHash: null,
+      fullName: 'Google User',
+      authProviderId: googleProvider.id,
+      onboardingStatusId: verifiedStatus.id,
+    },
+  });
+
+  const res = await post('/password-reset', { email: GOOGLE_EMAIL });
+  expect(res.status).toBe(200);
+
+  const keys = await redis.keys('password_reset:*');
+  expect(keys).toHaveLength(0);
+  expect(vi.mocked(sendPasswordResetEmail)).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 38. Request — twice within 60s → 2nd returns 429 (rate-limit first)
+// ---------------------------------------------------------------------------
+
+it('38: a second password-reset request within 60s returns 429 TOO_MANY_REQUESTS', async () => {
+  await registerTestUser();
+
+  const first = await post('/password-reset', { email: TEST_EMAIL });
+  expect(first.status).toBe(200);
+
+  const second = await post('/password-reset', { email: TEST_EMAIL });
+  expect(second.status).toBe(429);
+  const json = await second.json() as { error: { code: string } };
+  expect(json.error.code).toBe('TOO_MANY_REQUESTS');
+});
+
+// ---------------------------------------------------------------------------
+// 39. Confirm — full cycle: new password works, old fails, single-use, sessions revoked
+// ---------------------------------------------------------------------------
+
+it('39: password-reset confirm sets the new password, revokes sessions, is single-use', async () => {
+  await registerTestUser();
+  // An active session that the reset must lock out
+  const loginRes = await loginTestUser();
+  expect(loginRes.status).toBe(200);
+  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  const priorSession = await prisma.session.findFirstOrThrow({ where: { userId: dbUser.id } });
+
+  // Request + grab the token
+  await post('/password-reset', { email: TEST_EMAIL });
+  const token = await readResetToken();
+
+  // Confirm with a strong new password
+  const confirmRes = await post('/password-reset/confirm', { token, password: NEW_PASSWORD });
+  expect(confirmRes.status).toBe(200);
+  const confirmJson = await confirmRes.json() as { data: { ok: boolean } };
+  expect(confirmJson.data.ok).toBe(true);
+
+  // No auto-login — no cookies returned
+  expect(cookieValue(confirmRes, 'session')).toBeUndefined();
+  expect(cookieValue(confirmRes, 'refresh')).toBeUndefined();
+
+  // Prior session revoked
+  const revoked = await prisma.session.findUniqueOrThrow({ where: { id: priorSession.id } });
+  expect(revoked.revokedAt).not.toBeNull();
+
+  // Token is single-use — replay is rejected
+  const replay = await post('/password-reset/confirm', { token, password: NEW_PASSWORD });
+  expect(replay.status).toBe(400);
+  const replayJson = await replay.json() as { error: { code: string } };
+  expect(replayJson.error.code).toBe('INVALID_RESET_TOKEN');
+
+  // Old password no longer works
+  const oldLogin = await post('/login', { email: TEST_EMAIL, password: TEST_PASSWORD });
+  expect(oldLogin.status).toBe(401);
+
+  // New password works
+  const newLogin = await post('/login', { email: TEST_EMAIL, password: NEW_PASSWORD });
+  expect(newLogin.status).toBe(200);
+});
+
+// ---------------------------------------------------------------------------
+// 40. Confirm — invalid/expired token → 400 INVALID_RESET_TOKEN
+// ---------------------------------------------------------------------------
+
+it('40: password-reset confirm with an invalid token returns 400 INVALID_RESET_TOKEN', async () => {
+  const res = await post('/password-reset/confirm', { token: 'notarealtoken', password: NEW_PASSWORD });
+  expect(res.status).toBe(400);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('INVALID_RESET_TOKEN');
+});
+
+// ---------------------------------------------------------------------------
+// 41. Confirm — weak password → 400 WEAK_PASSWORD (validation before token check)
+// ---------------------------------------------------------------------------
+
+it('41: password-reset confirm with a weak password returns 400 WEAK_PASSWORD', async () => {
+  const res = await post('/password-reset/confirm', { token: 'anytoken', password: 'short1' });
+  expect(res.status).toBe(400);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('WEAK_PASSWORD');
 });

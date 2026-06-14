@@ -120,6 +120,17 @@ export async function updateUserOnboardingStatus(
   });
 }
 
+// retrofit-6: set a new bcrypt password hash (password-reset confirm flow).
+export async function updatePassword(
+  userId: number,
+  passwordHash: string,
+): Promise<void> {
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Session queries
 // ---------------------------------------------------------------------------
@@ -149,6 +160,15 @@ export async function findSessionByRefreshHash(
 export async function revokeSession(id: number): Promise<void> {
   await prisma.session.update({
     where: { id },
+    data: { revokedAt: new Date() },
+  });
+}
+
+// retrofit-6: bulk-revoke every live session for a user. Used by the
+// password-reset confirm flow so a reset locks out any attacker session.
+export async function revokeAllSessionsForUser(userId: number): Promise<void> {
+  await prisma.session.updateMany({
+    where: { userId, revokedAt: null },
     data: { revokedAt: new Date() },
   });
 }
