@@ -17,6 +17,7 @@ import { truncateAllUserData } from './helpers.js';
 import { runSnapshotJob, RETENTION_SQL } from '../src/jobs/snapshot.job.js';
 import { computeDerived } from '../src/modules/portfolios/derive.js';
 import { SNAPSHOT_RETENTION_DAYS } from '../src/lib/constants.js';
+import { portfolioDerivedCacheKeys } from '../src/lib/portfolio-cache-keys.js';
 
 // ---------------------------------------------------------------------------
 // Seeding helpers (direct Prisma — the job reads the DB, not HTTP)
@@ -350,7 +351,7 @@ it('324: snapshot.job missed detection — 2 Pro portfolios, one throws → snap
   expect(result.missed).toBe(0);
 });
 
-it('325: snapshot.job PnL cache invalidation — redis.del called with portfolio_pnl:<id> per snapshotted portfolio', async () => {
+it('325: snapshot.job PnL cache invalidation — redis.del called with portfolioDerivedCacheKeys per snapshotted portfolio', async () => {
   const userId = await createUser('snap.325@neonfi.test');
   await createProSub(userId);
   const p1 = await createManualPortfolio(userId, 'P1');
@@ -362,8 +363,10 @@ it('325: snapshot.job PnL cache invalidation — redis.del called with portfolio
   try {
     const result = await runSnapshotJob();
     expect(result.snapshotted).toBe(2);
-    expect(delSpy).toHaveBeenCalledWith(`portfolio_pnl:${p1}`);
-    expect(delSpy).toHaveBeenCalledWith(`portfolio_pnl:${p2}`);
+    // Stage 14: the per-upsert hook deletes the full derived-cache key set (PnL +
+    // 3 analytics keys) in one variadic redis.del call, once per portfolio.
+    expect(delSpy).toHaveBeenCalledWith(...portfolioDerivedCacheKeys(p1));
+    expect(delSpy).toHaveBeenCalledWith(...portfolioDerivedCacheKeys(p2));
   } finally {
     delSpy.mockRestore();
   }

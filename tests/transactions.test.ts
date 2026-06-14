@@ -9,6 +9,7 @@ import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
 import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
+import { portfolioDerivedCacheKeys } from '../src/lib/portfolio-cache-keys.js';
 
 // ---------------------------------------------------------------------------
 // Email mock
@@ -929,9 +930,13 @@ it('310: POST → PnL cache invalidated once with key portfolio_pnl:<id>', async
     const res = await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '0.5', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
     expect(res.status).toBe(201);
 
+    // Stage 14: invalidatePnlCache now deletes the full derived-cache key set
+    // (portfolio_pnl + 3 analytics keys) in one variadic redis.del call. Assert the
+    // call carries the exact key set, and that exactly one del call includes the
+    // portfolio_pnl key (still strong signal — not loosened to "called at least once").
     const key = `portfolio_pnl:${portfolioId}`;
-    expect(delSpy).toHaveBeenCalledWith(key);
-    const pnlCalls = delSpy.mock.calls.filter((c) => c[0] === key);
+    expect(delSpy).toHaveBeenCalledWith(...portfolioDerivedCacheKeys(portfolioId));
+    const pnlCalls = delSpy.mock.calls.filter((c) => c.includes(key));
     expect(pnlCalls).toHaveLength(1);
   } finally {
     delSpy.mockRestore();

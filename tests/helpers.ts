@@ -54,18 +54,26 @@ export async function seedPayment(opts: {
 // identity sequences so tests don't accumulate row counts across runs.
 // Lookup tables (auth_provider, plan, chain, token, etc.) are NOT touched.
 //
-// Also flushes the derived-PnL cache (retrofit-3): derive.ts caches by
-// `portfolio_pnl:<portfolioId>` with a 5-min TTL, but TRUNCATE resets the portfolio
-// identity sequence so IDs repeat across tests. Without this flush, test B reading
-// portfolio #1's derived fields could get test A's stale cached values.
+// Also flushes the derived-PnL/analytics caches (retrofit-3; extended Stage 14):
+// derive.ts caches by `portfolio_pnl:<portfolioId>` and the analytics module caches
+// by `analytics_{summary,performance,holdings}:<portfolioId>`, all 5-min TTL. TRUNCATE
+// resets the portfolio identity sequence so IDs repeat across tests — without this
+// flush, test B reading portfolio #1 could get test A's stale cached values.
 export async function truncateAllUserData(): Promise<void> {
   await prisma.$executeRaw`TRUNCATE TABLE
     "payment", "subscription", "transaction",
     "nft", "asset", "portfolio",
     "session", "user"
     CASCADE`;
-  const pnlKeys = await redis.keys('portfolio_pnl:*');
-  if (pnlKeys.length > 0) await redis.del(pnlKeys);
+  const derivedKeys = (
+    await Promise.all([
+      redis.keys('portfolio_pnl:*'),
+      redis.keys('analytics_summary:*'),
+      redis.keys('analytics_performance:*'),
+      redis.keys('analytics_holdings:*'),
+    ])
+  ).flat();
+  if (derivedKeys.length > 0) await redis.del(derivedKeys);
 }
 
 export async function clearRedisAuthKeys(): Promise<void> {

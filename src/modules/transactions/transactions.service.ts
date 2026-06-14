@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
+import { portfolioDerivedCacheKeys } from '../../lib/portfolio-cache-keys.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import {
   createTransactionRow,
@@ -27,21 +28,58 @@ import type { CreateTransactionBody, UpdateTransactionBody } from './transaction
 import { recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
 import { computeUsdValue } from './usd-value.js';
 
-// PnL cache invalidation (retrofit-2 §1.6). Build Guide §4.3/§6.3 mandate the
-// portfolio's Redis PnL cache be invalidated after every mutation commit. The
-// cache itself ships in retrofit-3 (derive.ts GET/SET); wiring the invalidation
-// now means retrofit-3 doesn't have to retrofit every CUD callsite. del on a
-// missing key is a harmless no-op. Run AFTER the $transaction commits and never
-// let a cache failure roll the write back — stale PnL for 5 min is recoverable.
+// PnL/analytics cache invalidation (retrofit-2 §1.6; extended Stage 14 §1.9). Build
+// Guide §4.3/§6.3 mandate the portfolio's derived Redis caches be invalidated after
+// every mutation commit. Stage 14 widened the set from the single portfolio_pnl key
+// to the full portfolioDerivedCacheKeys list (PnL + 3 analytics keys) so a single
+// source stays in sync across every CUD callsite. del on a missing key is a harmless
+// no-op. Run AFTER the $transaction commits and never let a cache failure roll the
+// write back — stale derived data for 5 min is recoverable.
 async function invalidatePnlCache(portfolioId: number): Promise<void> {
+  const keys = portfolioDerivedCacheKeys(portfolioId);
   await redis
-    .del(`portfolio_pnl:${portfolioId}`)
+    .del(...keys)
     .catch((e: Error) =>
       console.error(
         `[transactions] cache invalidation failed for portfolio ${portfolioId}:`,
         e.message,
       ),
     );
+}
+
+/**
+ * Stage 14 (§1.7): total USD deposits (sum of `buy` usdValue across native + erc20)
+ * and total USD withdrawals (sum of `sell`). NFT transactions don't carry a usdValue
+ * and never contribute. Used by the analytics summary endpoint. Aggregates run as a
+ * single round-trip of four parallel _sum queries.
+ */
+export async function getDepositWithdrawalTotals(
+  portfolioId: number,
+): Promise<{ totalDeposits: number; totalWithdrawals: number }> {
+  const [nativeBuys, nativeSells, erc20Buys, erc20Sells] = await Promise.all([
+    prisma.nativeTransactionDetail.aggregate({
+      where: { transaction: { portfolioId, direction: { name: 'buy' } } },
+      _sum: { usdValue: true },
+    }),
+    prisma.nativeTransactionDetail.aggregate({
+      where: { transaction: { portfolioId, direction: { name: 'sell' } } },
+      _sum: { usdValue: true },
+    }),
+    prisma.erc20TransactionDetail.aggregate({
+      where: { transaction: { portfolioId, direction: { name: 'buy' } } },
+      _sum: { usdValue: true },
+    }),
+    prisma.erc20TransactionDetail.aggregate({
+      where: { transaction: { portfolioId, direction: { name: 'sell' } } },
+      _sum: { usdValue: true },
+    }),
+  ]);
+  const toNum = (d: { _sum: { usdValue: Prisma.Decimal | null } }): number =>
+    d._sum.usdValue ? Number(d._sum.usdValue.toString()) : 0;
+  return {
+    totalDeposits: toNum(nativeBuys) + toNum(erc20Buys),
+    totalWithdrawals: toNum(nativeSells) + toNum(erc20Sells),
+  };
 }
 
 export class TransactionError extends Error {

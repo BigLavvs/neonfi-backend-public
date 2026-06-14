@@ -29,6 +29,7 @@ import { SNAPSHOT_RETENTION_DAYS } from '../lib/constants.js';
 import { getEffectivePlan } from '../modules/subscriptions/subscriptions.service.js';
 import { listAllPortfolioIdsForJobs } from '../modules/portfolios/portfolios.service.js';
 import { computeDerived } from '../modules/portfolios/derive.js';
+import { portfolioDerivedCacheKeys } from '../lib/portfolio-cache-keys.js';
 
 export interface SnapshotJobResult {
   snapshotted: number;
@@ -108,11 +109,14 @@ export async function runSnapshotJob(
       });
       snapshotted++;
 
-      // PnL cache invalidation (retrofit-3 §1.8, architecture line 1228). Mirrors
-      // transactions.service.ts:invalidatePnlCache — a Redis failure logs and
-      // continues; it must never roll back the snapshot write.
+      // PnL/analytics cache invalidation (retrofit-3 §1.8, architecture line 1228;
+      // extended Stage 14 §1.9). Mirrors transactions.service.ts:invalidatePnlCache —
+      // deletes the full portfolioDerivedCacheKeys set so a fresh snapshot also evicts
+      // the stale analytics_* caches. A Redis failure logs and continues; it must
+      // never roll back the snapshot write.
+      const keys = portfolioDerivedCacheKeys(portfolio.id);
       await redis
-        .del(`portfolio_pnl:${portfolio.id}`)
+        .del(...keys)
         .catch((e: Error) =>
           console.error(
             `[snapshots] cache invalidation failed for portfolio ${portfolio.id}:`,
