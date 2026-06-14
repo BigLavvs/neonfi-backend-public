@@ -34,6 +34,10 @@ export interface UserDTO {
   plan: string | null;
   billingCycle: string | null;
   newsletterSubscribed: boolean;
+  // retrofit-5: notification/display preferences (settings Preferences tab).
+  priceAlertsEnabled: boolean;
+  pushEnabled: boolean;
+  baseCurrency: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -67,6 +71,9 @@ export async function toUserDTO(user: UserWithRelations): Promise<UserDTO> {
     plan,
     billingCycle,
     newsletterSubscribed: user.newsletterSubscribed,
+    priceAlertsEnabled: user.priceAlertsEnabled,
+    pushEnabled: user.pushEnabled,
+    baseCurrency: user.baseCurrency,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
@@ -186,6 +193,10 @@ export async function updateProfile(
     displayName?: string | null;
     avatarUrl?: string | null;
     newsletterSubscribed?: boolean;
+    // retrofit-5: preference fields, written by updatePreferences (PATCH /users/preferences).
+    priceAlertsEnabled?: boolean;
+    pushEnabled?: boolean;
+    baseCurrency?: string;
   },
 ): Promise<UserWithRelations> {
   return prisma.user.update({
@@ -193,4 +204,16 @@ export async function updateProfile(
     data,
     ...USER_INCLUDE,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Account deletion (retrofit-5)
+// ---------------------------------------------------------------------------
+
+// Hard-deletes the user row. DB cascades remove sessions/portfolios/subscription/
+// snapshots; Payment.userId and Payment.subscriptionId are SetNull, so payment
+// history survives with both FKs null (accounting). Any active Stripe subscription
+// must be cancelled by the caller BEFORE this (see users.service.deleteMe).
+export async function deleteUser(userId: number): Promise<void> {
+  await prisma.user.delete({ where: { id: userId } });
 }

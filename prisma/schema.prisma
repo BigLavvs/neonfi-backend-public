@@ -46,6 +46,15 @@ model User {
   onboardingStatus     OnboardingStatus  @relation("UserOnboardingStatus", fields: [onboardingStatusId], references: [id])
   onboardingStatusId   Int
   newsletterSubscribed Boolean           @default(false)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-5): the
+  // settings Preferences tab persists notification/display preferences the docx
+  // never defined. priceAlertsEnabled gates price-alert notifications, pushEnabled
+  // gates push delivery, and baseCurrency is the user's display currency (ISO-4217,
+  // matches the frontend selector: USD|EUR|GBP|JPY|NGN). Surfaced on GET /users/me
+  // and written by PATCH /users/preferences.
+  priceAlertsEnabled   Boolean           @default(true)
+  pushEnabled          Boolean           @default(false)
+  baseCurrency         String            @default("USD") @db.VarChar(3)
 
   // One to One
   subscription         Subscription?
@@ -175,8 +184,18 @@ model Payment {
   // Schema:179–181 / Build Guide Stage 4). No column/semantic divergence.
   user                  User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   userId                Int?
-  subscription          Subscription  @relation(fields: [subscriptionId], references: [id])
-  subscriptionId        Int
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-5): the
+  // docx writes subscriptionId as a required FK with default Restrict, which makes
+  // deleting a user impossible — the user→Subscription cascade (line 109) would be
+  // blocked by any Payment still referencing that Subscription. Account deletion
+  // (DELETE /users/me) must hard-delete the user while preserving payment history
+  // for accounting. So, mirroring the Payment.user SetNull above, subscriptionId is
+  // optional + SetNull: after the user and subscription rows are gone, the payment
+  // row survives with userId=null AND subscriptionId=null, retaining
+  // stripePaymentIntentId/amount/currency/status/createdAt. The Stage 4 webhook
+  // write path always supplies subscriptionId, so nullability changes no write.
+  subscription          Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  subscriptionId        Int?
   stripePaymentIntentId String        @unique @db.VarChar(255)
   amount                Int // in smallest currency unit e.g. cents
   currency              String        @db.VarChar(3)

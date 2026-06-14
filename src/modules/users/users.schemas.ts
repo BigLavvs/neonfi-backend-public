@@ -32,3 +32,21 @@ export const PatchMeSchema = z
   .strict(); // unknown fields → 400 VALIDATION_ERROR
 
 export type PatchMeBody = z.infer<typeof PatchMeSchema>;
+
+// ---------------------------------------------------------------------------
+// PatchPreferencesSchema — PATCH /users/preferences (settings Preferences tab).
+// Dedicated to notification/display preferences; kept separate from PatchMeSchema
+// (profile) because the frontend calls a distinct /users/preferences endpoint.
+// baseCurrency enum matches the frontend settings currency selector.
+// ---------------------------------------------------------------------------
+
+export const PatchPreferencesSchema = z
+  .object({
+    newsletterSubscribed: z.boolean().optional(),
+    priceAlertsEnabled: z.boolean().optional(),
+    pushEnabled: z.boolean().optional(),
+    baseCurrency: z.enum(['USD', 'EUR', 'GBP', 'JPY', 'NGN']).optional(),
+  })
+  .strict(); // unknown fields → 400 VALIDATION_ERROR
+
+export type PatchPreferencesBody = z.infer<typeof PatchPreferencesSchema>;

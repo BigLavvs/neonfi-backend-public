@@ -7,7 +7,9 @@ export type PaymentWithStatus = Prisma.PaymentGetPayload<{
 export interface PaymentDTO {
   id: number;
   userId: number | null;
-  subscriptionId: number;
+  // retrofit-5: nullable now that Payment.subscriptionId is SetNull (mirrors userId).
+  // An orphaned payment kept after account deletion has subscriptionId = null.
+  subscriptionId: number | null;
   stripePaymentIntentId: string;
   amount: number;
   currency: string;

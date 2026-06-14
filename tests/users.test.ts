@@ -8,7 +8,26 @@ import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
-import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
+import { cookieValue, cookieMaxAge, clearRedisAuthKeys, seedPayment, truncateAllUserData } from './helpers.js';
+
+// ---------------------------------------------------------------------------
+// Stripe mock — retrofit-5: DELETE /users/me cancels an active Pro sub at Stripe
+// (via the subscriptions service). Same hoisted-mock pattern as subscriptions.test.ts.
+// ---------------------------------------------------------------------------
+
+const { mockSubscriptionsUpdate } = vi.hoisted(() => ({
+  mockSubscriptionsUpdate: vi.fn(),
+}));
+
+vi.mock('stripe', () => {
+  const Stripe = vi.fn().mockImplementation(() => ({
+    checkout: { sessions: { create: vi.fn() } },
+    subscriptions: { update: mockSubscriptionsUpdate, retrieve: vi.fn() },
+    subscriptionSchedules: { create: vi.fn(), update: vi.fn() },
+    refunds: { create: vi.fn() },
+  }));
+  return { default: Stripe };
+});
 
 // ---------------------------------------------------------------------------
 // Email mock — prevents real Resend calls during tests
@@ -73,6 +92,13 @@ async function patch(
       ...(cookies ? { Cookie: cookies } : {}),
     },
     body: JSON.stringify(body),
+  });
+}
+
+async function del(path: string, cookies?: string): Promise<Response> {
+  return app.request(`${USERS_BASE}${path}`, {
+    method: 'DELETE',
+    headers: { ...(cookies ? { Cookie: cookies } : {}) },
   });
 }
 
@@ -462,4 +488,183 @@ it('52: GET /users/me with cancelled-but-in-period Pro → plan: pro (effectivel
   const json = await res.json() as { data: { user: Record<string, unknown> } };
   expect(json.data.user.plan).toBe('pro');
   expect(json.data.user.billingCycle).toBe('monthly');
+});
+
+// ---------------------------------------------------------------------------
+// 53. DELETE /users/me — hard delete: cascades remove user data, payment history
+//     survives with null FKs (delta A), cookies cleared, old cookie → 401.
+// ---------------------------------------------------------------------------
+
+it('53: DELETE /users/me deletes account + cascades, preserves payment with null FKs, clears cookies', async () => {
+  const sessionCookie = await registerAndLogin();
+  const user = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+
+  // Seed a (free) subscription + a succeeded payment + a portfolio + sessions exist.
+  // Free plan → getEffectivePlan returns 'free' → no Stripe call (isolates the
+  // cascade/payment-survival assertion from the Pro-cancel path tested in 54).
+  const [freePlan, activeStatus, manualType] = await Promise.all([
+    prisma.plan.findUniqueOrThrow({ where: { name: 'free' } }),
+    prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'active' } }),
+    prisma.portfolioType.findUniqueOrThrow({ where: { name: 'manual' } }),
+  ]);
+  const sub = await prisma.subscription.create({
+    data: { userId: user.id, planId: freePlan.id, statusId: activeStatus.id },
+  });
+  const payment = await seedPayment({ userId: user.id, subscriptionId: sub.id, status: 'succeeded' });
+  const portfolio = await prisma.portfolio.create({
+    data: { userId: user.id, name: 'My Portfolio', typeId: manualType.id },
+  });
+  expect(await prisma.session.count({ where: { userId: user.id } })).toBeGreaterThan(0);
+
+  const res = await del('/me', sessionCookie);
+  expect(res.status).toBe(200);
+  const json = await res.json() as { data: { deleted: boolean } };
+  expect(json.data.deleted).toBe(true);
+
+  // User + cascading children gone
+  expect(await prisma.user.findUnique({ where: { id: user.id } })).toBeNull();
+  expect(await prisma.portfolio.findUnique({ where: { id: portfolio.id } })).toBeNull();
+  expect(await prisma.subscription.findUnique({ where: { id: sub.id } })).toBeNull();
+  expect(await prisma.session.count({ where: { userId: user.id } })).toBe(0);
+
+  // Payment history SURVIVES with both FKs null (delta A — proves Restrict no longer bites)
+  const survived = await prisma.payment.findUnique({ where: { id: payment.id } });
+  expect(survived).not.toBeNull();
+  expect(survived!.userId).toBeNull();
+  expect(survived!.subscriptionId).toBeNull();
+  expect(survived!.stripePaymentIntentId).toBe(payment.stripePaymentIntentId);
+  expect(survived!.amount).toBe(payment.amount);
+
+  // Cookies cleared (Set-Cookie with Max-Age=0 for both session and refresh)
+  expect(cookieMaxAge(res, 'session')).toBe(0);
+  expect(cookieMaxAge(res, 'refresh')).toBe(0);
+
+  // Old session cookie no longer authenticates (session row cascade-deleted) → 401
+  const followUp = await get('/me', sessionCookie);
+  expect(followUp.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// 54. DELETE /users/me with an effectively-active Pro sub → Stripe cancel first.
+// ---------------------------------------------------------------------------
+
+it('54: DELETE /users/me with active Pro subscription cancels at Stripe before deleting', async () => {
+  mockSubscriptionsUpdate.mockReset();
+  mockSubscriptionsUpdate.mockResolvedValue({});
+
+  const sessionCookie = await registerAndLogin();
+  const user = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+
+  const [proPlan, monthly, activeStatus] = await Promise.all([
+    prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } }),
+    prisma.billingCycle.findUniqueOrThrow({ where: { name: 'monthly' } }),
+    prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'active' } }),
+  ]);
+  await prisma.subscription.create({
+    data: {
+      userId: user.id,
+      planId: proPlan.id,
+      billingCycleId: monthly.id,
+      statusId: activeStatus.id,
+      stripeCustomerId: 'cus_test',
+      stripeSubscriptionId: 'sub_test_del',
+      currentPeriodStart: new Date('2026-06-01T00:00:00Z'),
+      currentPeriodEnd: new Date('2026-07-01T00:00:00Z'),
+    },
+  });
+
+  const res = await del('/me', sessionCookie);
+  expect(res.status).toBe(200);
+
+  // Stripe cancel invoked (cancel_at_period_end) before the row is deleted
+  expect(mockSubscriptionsUpdate).toHaveBeenCalledWith('sub_test_del', { cancel_at_period_end: true });
+
+  // User deleted
+  expect(await prisma.user.findUnique({ where: { id: user.id } })).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// 55. DELETE /users/me — no auth → 401
+// ---------------------------------------------------------------------------
+
+it('55: DELETE /users/me without auth returns 401', async () => {
+  const res = await del('/me');
+  expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// 56. PATCH /users/preferences — defaults on GET, then each field updates + GET reflects.
+// ---------------------------------------------------------------------------
+
+it('56: PATCH /users/preferences updates all preference fields; GET /users/me reflects them', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  // Defaults surfaced on GET /users/me
+  const before = await get('/me', sessionCookie);
+  const beforeJson = await before.json() as { data: { user: Record<string, unknown> } };
+  expect(beforeJson.data.user.priceAlertsEnabled).toBe(true);
+  expect(beforeJson.data.user.pushEnabled).toBe(false);
+  expect(beforeJson.data.user.baseCurrency).toBe('USD');
+
+  const res = await patch(
+    '/preferences',
+    { newsletterSubscribed: true, priceAlertsEnabled: false, pushEnabled: true, baseCurrency: 'EUR' },
+    sessionCookie,
+  );
+  expect(res.status).toBe(200);
+  const json = await res.json() as { data: { user: Record<string, unknown> } };
+  expect(json.data.user.newsletterSubscribed).toBe(true);
+  expect(json.data.user.priceAlertsEnabled).toBe(false);
+  expect(json.data.user.pushEnabled).toBe(true);
+  expect(json.data.user.baseCurrency).toBe('EUR');
+
+  // GET reflects the persisted values
+  const getRes = await get('/me', sessionCookie);
+  const getJson = await getRes.json() as { data: { user: Record<string, unknown> } };
+  expect(getJson.data.user.priceAlertsEnabled).toBe(false);
+  expect(getJson.data.user.pushEnabled).toBe(true);
+  expect(getJson.data.user.baseCurrency).toBe('EUR');
+
+  // DB matches
+  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  expect(dbUser.priceAlertsEnabled).toBe(false);
+  expect(dbUser.pushEnabled).toBe(true);
+  expect(dbUser.baseCurrency).toBe('EUR');
+});
+
+// ---------------------------------------------------------------------------
+// 57. PATCH /users/preferences — unknown field → 400 (.strict())
+// ---------------------------------------------------------------------------
+
+it('57: PATCH /users/preferences with unknown field returns 400 VALIDATION_ERROR', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  const res = await patch('/preferences', { darkMode: true }, sessionCookie);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('VALIDATION_ERROR');
+});
+
+// ---------------------------------------------------------------------------
+// 58. PATCH /users/preferences — invalid baseCurrency → 400
+// ---------------------------------------------------------------------------
+
+it('58: PATCH /users/preferences rejects an unsupported baseCurrency', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  const res = await patch('/preferences', { baseCurrency: 'CAD' }, sessionCookie);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('VALIDATION_ERROR');
+});
+
+// ---------------------------------------------------------------------------
+// 59. PATCH /users/preferences — no auth → 401
+// ---------------------------------------------------------------------------
+
+it('59: PATCH /users/preferences without auth returns 401', async () => {
+  const res = await patch('/preferences', { pushEnabled: true });
+  expect(res.status).toBe(401);
 });
