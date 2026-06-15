@@ -91,6 +91,7 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
         (cur.quote.USD.market_cap ?? 0) > (best.quote.USD.market_cap ?? 0) ? cur : best,
       );
       const usd = entry.quote.USD;
+      if (usd?.price == null) continue; // CMC returned no price for this symbol — skip, don't crash the batch
       out.set(symbol, {
         symbol,
         currentPrice: usd.price.toFixed(8),
@@ -122,6 +123,7 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
         (cur.quote.USD.market_cap ?? 0) > (best.quote.USD.market_cap ?? 0) ? cur : best,
       );
       const usd = entry.quote.USD;
+      if (usd?.price == null) continue; // CMC returned no price for this symbol — skip, don't emit a null price
       out.set(symbol, { price: usd.price, change24h: usd.percent_change_24h });
     }
     return out;

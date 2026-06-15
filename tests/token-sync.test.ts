@@ -266,3 +266,64 @@ it('302: 60-symbol fetchMetadata makes 2 batches and returns all 60 symbols', as
     vi.unstubAllGlobals();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 303. Null CMC price — fetchMetadata skips the bad symbol, keeps the rest (retrofit-14)
+// ---------------------------------------------------------------------------
+
+it('303: fetchMetadata with a null-price symbol skips it and returns the others (no throw)', async () => {
+  // BTC has a real price, NULLCOIN comes back with quote.USD.price = null —
+  // the unguarded path would throw on null.toFixed(8) and sink the whole batch.
+  const fetchMock = vi.fn(async () => ({
+    ok: true,
+    json: async () => ({
+      data: {
+        BTC: [{ cmc_rank: 1, quote: { USD: { price: 93000, percent_change_24h: 1.5, market_cap: 1_850_000_000_000 } } }],
+        NULLCOIN: [{ cmc_rank: null, quote: { USD: { price: null, percent_change_24h: 0, market_cap: null } } }],
+      },
+    }),
+  } as Response));
+  vi.stubGlobal('fetch', fetchMock);
+
+  try {
+    const provider = new CoinMarketCapTokenMetadataProvider('test-key');
+    const result = await provider.fetchMetadata(['BTC', 'NULLCOIN']);
+
+    expect(result.has('BTC')).toBe(true);
+    expect(result.get('BTC')!.currentPrice).toBe('93000.00000000');
+    // The null-price symbol is absent — skipped, not crashed.
+    expect(result.has('NULLCOIN')).toBe(false);
+    expect(result.size).toBe(1);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 304. Null CMC price — fetchPrices skips the bad symbol, keeps the rest (retrofit-14)
+// ---------------------------------------------------------------------------
+
+it('304: fetchPrices with a null-price symbol skips it and returns the others (no null emitted)', async () => {
+  const fetchMock = vi.fn(async () => ({
+    ok: true,
+    json: async () => ({
+      data: {
+        BTC: [{ cmc_rank: 1, quote: { USD: { price: 93000, percent_change_24h: 1.5, market_cap: 1_850_000_000_000 } } }],
+        NULLCOIN: [{ cmc_rank: null, quote: { USD: { price: null, percent_change_24h: 0, market_cap: null } } }],
+      },
+    }),
+  } as Response));
+  vi.stubGlobal('fetch', fetchMock);
+
+  try {
+    const provider = new CoinMarketCapTokenMetadataProvider('test-key');
+    const result = await provider.fetchPrices(['BTC', 'NULLCOIN']);
+
+    expect(result.has('BTC')).toBe(true);
+    expect(result.get('BTC')!.price).toBe(93000);
+    expect(result.has('NULLCOIN')).toBe(false);
+    expect(result.size).toBe(1);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
