@@ -13,13 +13,13 @@
 import WebSocket from 'ws';
 import { redis } from './redis.js';
 import { config } from './config.js';
+import { recordTick } from './price-resolver.js';
 
 // Build Guide §6.4 — locked constants, do not promote to env vars
 const PING_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 5_000;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
 const RECONNECT_ALERT_AFTER_ATTEMPTS = 5;
-const PRICE_TTL_S = 60;
 
 type ClientState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
@@ -27,6 +27,10 @@ export class CoinbaseClient {
   private ws: WebSocket | null = null;
   private state: ClientState = 'disconnected';
   private subscriptions: Map<string, number> = new Map();
+  // Breadth coverage (retrofit-16): catalog products subscribed at boot on the
+  // lighter `ticker_batch` channel (~5s). Separate from the ref-counted
+  // real-time `ticker` subscriptions a Pro client actively watches.
+  private coverageProducts: Set<string> = new Set();
   private reconnectAttempts = 0;
   private pingTimer: ReturnType<typeof setTimeout> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
@@ -79,6 +83,10 @@ export class CoinbaseClient {
     for (const [symbol] of this.subscriptions) {
       this._sendSubscribe(symbol);
     }
+    // Resubscribe the breadth coverage set on the batched channel
+    if (this.coverageProducts.size) {
+      this._sendBatchSubscribe([...this.coverageProducts]);
+    }
   }
 
   private _onMessage(raw: WebSocket.RawData): void {
@@ -98,20 +106,20 @@ export class CoinbaseClient {
       case 'ticker': {
         const productId = msg['product_id'] as string | undefined;
         if (!productId) break;
-        const symbol = productId.split('-')[0]!.toUpperCase();
+        const [base, quote] = productId.split('-');
+        if (!base) break;
+        const symbol = base.toUpperCase();
         const rawPrice = msg['price'] as string | undefined;
         if (!rawPrice) break;
         const price = parseFloat(rawPrice);
         // Coinbase Advanced Trade uses price_percent_chg_24h; fallback to 0
         const rawChange = msg['price_percent_chg_24h'] as string | undefined;
         const change24h = rawChange ? parseFloat(rawChange) : 0;
-        const payload = JSON.stringify({ price, change24h, timestamp: Date.now() });
 
-        redis.set(`price:${symbol}`, payload, 'EX', PRICE_TTL_S).catch((e: Error) =>
-          console.error(`[coinbase] redis set price:${symbol} error:`, e.message),
-        );
-        redis.publish(`price:${symbol}`, payload).catch((e: Error) =>
-          console.error(`[coinbase] redis publish price:${symbol} error:`, e.message),
+        // retrofit-16: write the per-exchange key and let the resolver own the
+        // canonical `price:<SYMBOL>` key + channel (no longer written here).
+        recordTick(symbol, 'coinbase', price, change24h, (quote ?? 'USD').toUpperCase()).catch(
+          (e: Error) => console.error(`[coinbase] recordTick ${symbol} error:`, e.message),
         );
         break;
       }
@@ -224,6 +232,71 @@ export class CoinbaseClient {
       channels: ['ticker'],
     }));
   }
+
+  /**
+   * Breadth coverage (retrofit-16): subscribe a set of Coinbase-listed catalog
+   * symbols on the lighter `ticker_batch` channel (~5s) so the canonical cache
+   * carries true-USD prices beyond just the symbols Pro clients actively watch.
+   * Pass the intersection of the catalog with Coinbase's product list so we
+   * don't generate dead-product subscribe errors. Resubscribed on reconnect.
+   */
+  subscribeForCoverage(symbols: string[]): void {
+    const fresh: string[] = [];
+    for (const sym of symbols) {
+      const product = `${sym.toUpperCase()}-USD`;
+      if (!this.coverageProducts.has(product)) {
+        this.coverageProducts.add(product);
+        fresh.push(product);
+      }
+    }
+    if (fresh.length && this.state === 'connected') {
+      this._sendBatchSubscribe(fresh);
+    }
+  }
+
+  private _sendBatchSubscribe(productIds: string[]): void {
+    if (!this.ws || productIds.length === 0) return;
+    // Chunk to keep each subscribe frame well under Coinbase's payload limit.
+    const CHUNK = 100;
+    for (let i = 0; i < productIds.length; i += CHUNK) {
+      this.ws.send(JSON.stringify({
+        type: 'subscribe',
+        product_ids: productIds.slice(i, i + CHUNK),
+        channels: ['ticker_batch'],
+      }));
+    }
+  }
 }
 
 export const coinbase = new CoinbaseClient();
+
+/**
+ * Best-effort fetch of Coinbase's online USD products (public REST, no key) so
+ * boot can intersect the catalog with what Coinbase actually lists before
+ * subscribing breadth coverage — avoiding dead-product subscribe errors.
+ * Returns the set of base symbols (uppercased); empty set on any failure.
+ */
+export async function fetchCoinbaseUsdBaseSymbols(): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const res = await fetch('https://api.exchange.coinbase.com/products', {
+      headers: { 'User-Agent': 'neonfi-backend' },
+    });
+    if (!res.ok) return out;
+    const products = (await res.json()) as Array<{
+      base_currency?: string;
+      quote_currency?: string;
+      status?: string;
+      trading_disabled?: boolean;
+    }>;
+    for (const p of products) {
+      if (p.quote_currency !== 'USD') continue;
+      if (p.status && p.status !== 'online') continue;
+      if (p.trading_disabled) continue;
+      if (p.base_currency) out.add(p.base_currency.toUpperCase());
+    }
+  } catch {
+    // best-effort — boot continues on Coinbase real-time + Binance + Kraken
+  }
+  return out;
+}

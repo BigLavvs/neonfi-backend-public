@@ -39,7 +39,10 @@ import { config } from './lib/config.js';
 import { app } from './app.js';
 import { startTokenSyncScheduler } from './jobs/token-sync.job.js';
 import { startSnapshotScheduler } from './jobs/snapshot.job.js';
-import { coinbase } from './lib/coinbase.js';
+import { coinbase, fetchCoinbaseUsdBaseSymbols } from './lib/coinbase.js';
+import { binance } from './lib/binance.js';
+import { kraken } from './lib/kraken.js';
+import { loadCatalogSymbols, getCatalogSymbols, getKrakenCoverage } from './lib/price-symbols.js';
 import { startWsServer } from './ws/server.js';
 
 // --- Start ------------------------------------------------------------------
@@ -54,6 +57,53 @@ if (config.NODE_ENV !== 'test') {
   startSnapshotScheduler();
   coinbase.connect();
   void startWsServer(server);
+  void startPriceFeeds();
+}
+
+// --- Multi-exchange price ingestion boot (retrofit-16) ------------------------
+// Build the normalization working set from the Token table, then connect the
+// per-exchange feeds and subscribe each to its coverage set. Every feed is
+// wrapped so a single one failing to connect never blocks boot or the others.
+// The resolver (price-resolver.ts) owns the canonical `price:<SYMBOL>` write.
+async function startPriceFeeds(): Promise<void> {
+  try {
+    await loadCatalogSymbols();
+  } catch (e) {
+    console.error('[neonfi-backend] failed to load price catalog; price feeds limited', e);
+    return;
+  }
+
+  // Coinbase breadth coverage (best-effort): intersect the catalog with
+  // Coinbase's listed USD products so we don't subscribe dead products.
+  try {
+    const coinbaseListed = await fetchCoinbaseUsdBaseSymbols();
+    if (coinbaseListed.size > 0) {
+      const coverage = [...getCatalogSymbols()].filter((s) => coinbaseListed.has(s));
+      coinbase.subscribeForCoverage(coverage);
+    }
+  } catch (e) {
+    console.error('[neonfi-backend] coinbase coverage subscribe failed', e);
+  }
+
+  // Binance — one all-market stream covers the whole catalog. Region-gated by
+  // server egress IP; BINANCE_ENABLED=false degrades to Coinbase + Kraken.
+  try {
+    if (config.BINANCE_ENABLED) {
+      binance.connect();
+    } else {
+      console.log('[neonfi-backend] BINANCE_ENABLED=false — skipping Binance feed');
+    }
+  } catch (e) {
+    console.error('[neonfi-backend] binance connect failed', e);
+  }
+
+  // Kraken — no all-market stream; subscribe the top-N catalog USD pairs by rank.
+  try {
+    kraken.connect();
+    kraken.subscribe(getKrakenCoverage());
+  } catch (e) {
+    console.error('[neonfi-backend] kraken connect failed', e);
+  }
 }
 
 // --- Graceful shutdown (A19) -------------------------------------------------
@@ -80,6 +130,18 @@ async function shutdown(signal: string): Promise<void> {
     coinbase.disconnect();
   } catch (e) {
     console.error('[neonfi-backend] coinbase disconnect error:', e);
+  }
+
+  try {
+    binance.disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] binance disconnect error:', e);
+  }
+
+  try {
+    kraken.disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] kraken disconnect error:', e);
   }
 
   try {

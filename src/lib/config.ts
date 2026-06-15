@@ -54,6 +54,22 @@ const schema = z
     MORALIS_API_KEY: z.string().min(1),
     MORALIS_WEBHOOK_SECRET: z.string().min(1),
     COINBASE_WS_URL: z.string().min(1),
+
+    // --- Multi-exchange price ingestion (retrofit-16) ---
+    // Binance market data is reachable only from permitted SERVER egress regions
+    // (not per-user). Set BINANCE_ENABLED=false on a Binance-blocked host so the
+    // app degrades to Coinbase + Kraken instead of spamming reconnect errors.
+    // NOTE: explicit transform, NOT z.coerce.boolean() — Boolean("false")===true,
+    // so coercion would never disable it (same gotcha as TOKEN_SYNC_ENABLED).
+    BINANCE_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    // Overridable for tests; defaulted to the verified production URLs.
+    // Binance all-market 24h ticker firehose (one stream covers the catalog).
+    BINANCE_WS_URL: z.string().min(1).default('wss://stream.binance.com:9443/ws/!ticker@arr'),
+    // Kraken WebSocket v2 (public market data).
+    KRAKEN_WS_URL: z.string().min(1).default('wss://ws.kraken.com/v2'),
     // Stage 12: COINMARKETCAP_API_KEY is now required. Stage 9B's CMC sync is the
     // authoritative token-catalog source; booting without the key silently disables
     // price refreshes in a way that's hard to notice in production.
