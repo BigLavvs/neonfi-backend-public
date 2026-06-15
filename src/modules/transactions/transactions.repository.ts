@@ -74,6 +74,26 @@ export async function countTransactions(
   return prisma.transaction.count({ where: buildWhere(portfolioId, typeFilter) });
 }
 
+// retrofit-13: cross-portfolio reads for the dashboard Overview aggregate. Ownership
+// is enforced via the Transaction → Portfolio relation filter (`portfolio: { userId }`),
+// so these span EVERY portfolio the user owns in a single round-trip — no per-portfolio
+// fan-out. Mirrors listTransactions/countTransactions but scopes by owner, not portfolio.
+export async function listRecentTransactionsForUser(
+  userId: number,
+  limit: number,
+): Promise<TransactionWithListIncludes[]> {
+  return prisma.transaction.findMany({
+    where: { portfolio: { userId } },
+    orderBy: { timestamp: 'desc' },
+    take: limit,
+    include: LIST_INCLUDE,
+  }) as Promise<TransactionWithListIncludes[]>;
+}
+
+export async function countTransactionsForUser(userId: number): Promise<number> {
+  return prisma.transaction.count({ where: { portfolio: { userId } } });
+}
+
 interface CreateTransactionData {
   portfolioId: number;
   typeId: number;

@@ -26,6 +26,7 @@ import { pricesRouter } from './modules/prices/prices.controller.js';
 import { nftsRouter } from './modules/nfts/nfts.controller.js';
 import { snapshotsRouter } from './modules/snapshots/snapshots.controller.js';
 import { analyticsRouter } from './modules/analytics/analytics.controller.js';
+import { overviewRouter } from './modules/overview/overview.controller.js';
 import { wsHealthHandler } from './ws/health.js';
 
 export function createApp(): Hono {
@@ -57,6 +58,7 @@ export function createApp(): Hono {
   api.route('/portfolios/:portfolioId/snapshots', snapshotsRouter);
   api.route('/prices', pricesRouter);
   api.route('/analytics', analyticsRouter);
+  api.route('/overview', overviewRouter);
   app.route('/api/v1', api);
 
   // WebSocket health — not under /api/v1 (Coolify polls externally, like /health)

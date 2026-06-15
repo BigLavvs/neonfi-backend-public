@@ -19,6 +19,8 @@ import {
   deleteTransactionRow,
   listTransactions,
   countTransactions,
+  listRecentTransactionsForUser,
+  countTransactionsForUser,
   type ListTransactionsFilter,
 } from './transactions.repository.js';
 import {
@@ -566,6 +568,27 @@ export async function listPortfolioTransactions(
     transactions: transactions.map(toTransactionListDTO),
     meta: { limit: filters.limit, offset: filters.offset, total },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Cross-portfolio reads (retrofit-13) — for the Overview module
+// ---------------------------------------------------------------------------
+
+// Thin wrappers over the owner-scoped repository queries. The Overview module reads
+// transaction data only through this service surface (module isolation, mirroring how
+// analytics.service composes other modules). Rows are mapped with the existing
+// toTransactionListDTO so the Overview's recentTransactions shape matches the per-
+// portfolio list exactly.
+export async function listRecentUserTransactions(
+  userId: number,
+  limit: number,
+): Promise<TransactionListDTO[]> {
+  const rows = await listRecentTransactionsForUser(userId, limit);
+  return rows.map(toTransactionListDTO);
+}
+
+export function countUserTransactions(userId: number): Promise<number> {
+  return countTransactionsForUser(userId);
 }
 
 // ---------------------------------------------------------------------------
