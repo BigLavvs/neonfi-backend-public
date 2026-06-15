@@ -84,3 +84,23 @@ export const UpdateTransactionBodySchema = z
   .strict();
 
 export type UpdateTransactionBody = z.infer<typeof UpdateTransactionBodySchema>;
+
+// retrofit-10 (C4b): cross-portfolio transfer. Moves `amount` of `symbol` from the
+// source portfolio (the URL :portfolioId) to `destPortfolioId` as a paired sell+buy.
+// Both portfolios must be manual and owned by the caller; dest must differ from source.
+// Manual transfer legs are always `native` (the Token catalog carries no contract
+// address — same constraint as seedAcquisitionInTx), so no token-contract fields here.
+export const TransferBodySchema = z
+  .object({
+    destPortfolioId: z.number().int().positive(),
+    symbol: z.string().min(1).max(20),
+    amount: decimalStr,
+    timestamp: z
+      .string()
+      .datetime({ message: 'timestamp must be an ISO 8601 datetime string' })
+      .optional(),
+    notes: z.string().max(2000).nullable().optional(),
+  })
+  .strict();
+
+export type TransferBody = z.infer<typeof TransferBodySchema>;

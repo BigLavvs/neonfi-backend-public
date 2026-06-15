@@ -78,6 +78,26 @@ async function seedPortfolio(userId: number, type: 'connected' | 'manual'): Prom
   return p.id;
 }
 
+// Create a user row directly (no HTTP register/login, no bcrypt) — for fixtures like
+// a "different owner" portfolio where we never authenticate as the user. Far lighter
+// than registerAndLogin, which matters under the slow Neon dev DB.
+async function seedUserDirect(email: string): Promise<number> {
+  const [authProvider, onboarding] = await Promise.all([
+    prisma.authProvider.findUniqueOrThrow({ where: { name: 'email' } }),
+    prisma.onboardingStatus.findUniqueOrThrow({ where: { name: 'complete' } }),
+  ]);
+  const u = await prisma.user.create({
+    data: {
+      email,
+      passwordHash: 'x',
+      fullName: 'Other User',
+      authProviderId: authProvider.id,
+      onboardingStatusId: onboarding.id,
+    },
+  });
+  return u.id;
+}
+
 async function addAssetDirectly(
   portfolioId: number,
   tokenId: number,
@@ -128,6 +148,22 @@ function txDelete(portfolioId: number, txId: number, cookies?: string): Promise<
   return app.request(`${txBase(portfolioId)}/${txId}`, {
     method: 'DELETE',
     headers: { ...(cookies ? { Cookie: cookies } : {}) },
+  });
+}
+
+// retrofit-10: POST /portfolios/:portfolioId/transactions/transfer (source = URL id).
+function txTransfer(
+  portfolioId: number,
+  body: Record<string, unknown>,
+  cookies?: string,
+): Promise<Response> {
+  return app.request(`${txBase(portfolioId)}/transfer`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(cookies ? { Cookie: cookies } : {}),
+    },
+    body: JSON.stringify(body),
   });
 }
 
@@ -1123,4 +1159,259 @@ it('316: PATCH amount on a tx with a stored priceAtTime → recompute keeps the 
   expect(patchNotes.status).toBe(200);
   const detail = await prisma.transaction.findUniqueOrThrow({ where: { id: txId } });
   expect(detail.notes).toBe('second');
+});
+
+// ---------------------------------------------------------------------------
+// 317-322. retrofit-10 (C4b) — cross-portfolio transfer. A move between two of the
+// user's MANUAL portfolios is a PAIRED transaction: a `sell` leg in the source + a
+// `buy` leg in the dest, sharing a transferGroupId. The dest inherits the source's
+// per-unit cost basis (both legs use usdValue = amount × netDeposit/balance) so total
+// basis is conserved and the move creates no fake PnL. recalc.ts is reused unchanged.
+// ---------------------------------------------------------------------------
+
+it('317: POST transfer → paired sell/buy legs share transferGroupId; balances + basis move; total cost basis conserved (no fake PnL)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const source = await seedPortfolio(userId, 'manual');
+  const dest = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(source, btcId);
+  await clearPriceCache('BTC');
+
+  // Seed source: 2 BTC at entered price 30000 → balance 2, netDeposit 60000.
+  const buyRes = await txPost(
+    source,
+    { type: 'native', direction: 'buy', amount: '2', symbol: 'BTC', priceAtTime: '30000', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(buyRes.status).toBe(201);
+  expect(await getAssetBalance(source, btcId)).toBeCloseTo(2);
+  expect(await getAssetNetDeposit(source, btcId)).toBeCloseTo(60000);
+
+  // Transfer 1 BTC source → dest.
+  const res = await txTransfer(
+    source,
+    { destPortfolioId: dest, symbol: 'BTC', amount: '1', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+  const t = ((await res.json()) as {
+    data: {
+      transfer: {
+        transferGroupId: string;
+        source: { id: number; portfolioId: number; direction: string; transferGroupId: string | null };
+        dest: { id: number; portfolioId: number; direction: string; transferGroupId: string | null };
+      };
+    };
+  }).data.transfer;
+
+  // Two legs, same transferGroupId; sell in source, buy in dest.
+  expect(typeof t.transferGroupId).toBe('string');
+  expect(t.source.transferGroupId).toBe(t.transferGroupId);
+  expect(t.dest.transferGroupId).toBe(t.transferGroupId);
+  expect(t.source.direction).toBe('sell');
+  expect(t.dest.direction).toBe('buy');
+  expect(t.source.portfolioId).toBe(source);
+  expect(t.dest.portfolioId).toBe(dest);
+
+  // Per-unit basis (30000) carried onto BOTH legs.
+  expect(await getNativeUsdValue(t.source.id)).toBeCloseTo(30000);
+  expect(await getNativeUsdValue(t.dest.id)).toBeCloseTo(30000);
+
+  // Balances moved: source 2→1, dest 0→1.
+  expect(await getAssetBalance(source, btcId)).toBeCloseTo(1);
+  expect(await getAssetBalance(dest, btcId)).toBeCloseTo(1);
+
+  // Cost basis carried: source 60000→30000, dest 0→30000 (asset + portfolio level).
+  expect(await getAssetNetDeposit(source, btcId)).toBeCloseTo(30000);
+  expect(await getAssetNetDeposit(dest, btcId)).toBeCloseTo(30000);
+  expect(await getPortfolioNetDeposit(source)).toBeCloseTo(30000);
+  expect(await getPortfolioNetDeposit(dest)).toBeCloseTo(30000);
+
+  // Total basis conserved (60000) → no fake PnL created by the move.
+  const totalBasis =
+    (await getAssetNetDeposit(source, btcId)) + (await getAssetNetDeposit(dest, btcId));
+  expect(totalBasis).toBeCloseTo(60000);
+
+  // Exactly two legs for this group.
+  expect(
+    await prisma.transaction.count({ where: { transferGroupId: t.transferGroupId } }),
+  ).toBe(2);
+});
+
+it('318: POST transfer with amount > balance → 400 INSUFFICIENT_BALANCE; nothing written', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const source = await seedPortfolio(userId, 'manual');
+  const dest = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(source, btcId);
+  await clearPriceCache('BTC');
+  await txPost(
+    source,
+    { type: 'native', direction: 'buy', amount: '2', symbol: 'BTC', priceAtTime: '30000', timestamp: TIMESTAMP },
+    cookies,
+  );
+  const before = await prisma.transaction.count();
+
+  const res = await txTransfer(
+    source,
+    { destPortfolioId: dest, symbol: 'BTC', amount: '5', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(400);
+  expect(((await res.json()) as { error: { code: string } }).error.code).toBe('INSUFFICIENT_BALANCE');
+
+  // Atomic failure: no new tx rows, source balance untouched, dest asset never created.
+  expect(await prisma.transaction.count()).toBe(before);
+  expect(await getAssetBalance(source, btcId)).toBeCloseTo(2);
+  expect(
+    await prisma.asset.findUnique({
+      where: { portfolioId_tokenId: { portfolioId: dest, tokenId: btcId } },
+    }),
+  ).toBeNull();
+});
+
+it('319: transfer rejects bad dest — not found (403), not owned (403), connected (400), same-as-source (400)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const source = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(source, btcId);
+  await clearPriceCache('BTC');
+  await txPost(
+    source,
+    { type: 'native', direction: 'buy', amount: '2', symbol: 'BTC', priceAtTime: '30000', timestamp: TIMESTAMP },
+    cookies,
+  );
+
+  // dest not found
+  const r1 = await txTransfer(source, { destPortfolioId: 99999999, symbol: 'BTC', amount: '1' }, cookies);
+  expect(r1.status).toBe(403);
+  expect(((await r1.json()) as { error: { code: string } }).error.code).toBe('DEST_NOT_FOUND');
+
+  // dest owned by a different user (created directly — we never auth as them)
+  const otherUserId = await seedUserDirect('other.tx@neonfi.test');
+  const otherPortfolio = await seedPortfolio(otherUserId, 'manual');
+  const r2 = await txTransfer(source, { destPortfolioId: otherPortfolio, symbol: 'BTC', amount: '1' }, cookies);
+  expect(r2.status).toBe(403);
+  expect(((await r2.json()) as { error: { code: string } }).error.code).toBe('DEST_NOT_FOUND');
+
+  // dest is connected
+  const connectedDest = await seedPortfolio(userId, 'connected');
+  const r3 = await txTransfer(source, { destPortfolioId: connectedDest, symbol: 'BTC', amount: '1' }, cookies);
+  expect(r3.status).toBe(400);
+  expect(((await r3.json()) as { error: { code: string } }).error.code).toBe('INVALID_TRANSFER_TARGET');
+
+  // dest === source
+  const r4 = await txTransfer(source, { destPortfolioId: source, symbol: 'BTC', amount: '1' }, cookies);
+  expect(r4.status).toBe(400);
+  expect(((await r4.json()) as { error: { code: string } }).error.code).toBe('INVALID_TRANSFER_TARGET');
+
+  // No legs were written through any of the rejected attempts.
+  expect(await prisma.transaction.count({ where: { transferGroupId: { not: null } } })).toBe(0);
+});
+
+it('320: transfer from a CONNECTED source → 403 CONNECTED_PORTFOLIO_READ_ONLY', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const connectedSource = await seedPortfolio(userId, 'connected');
+  const dest = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(connectedSource, btcId, '2');
+
+  const res = await txTransfer(
+    connectedSource,
+    { destPortfolioId: dest, symbol: 'BTC', amount: '1' },
+    cookies,
+  );
+  expect(res.status).toBe(403);
+  expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+    'CONNECTED_PORTFOLIO_READ_ONLY',
+  );
+});
+
+it('321: DELETE one transfer leg → BOTH legs removed; both portfolios recalced; both caches cleared', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const source = await seedPortfolio(userId, 'manual');
+  const dest = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(source, btcId);
+  await clearPriceCache('BTC');
+  await txPost(
+    source,
+    { type: 'native', direction: 'buy', amount: '2', symbol: 'BTC', priceAtTime: '30000', timestamp: TIMESTAMP },
+    cookies,
+  );
+
+  const tRes = await txTransfer(
+    source,
+    { destPortfolioId: dest, symbol: 'BTC', amount: '1', timestamp: TIMESTAMP },
+    cookies,
+  );
+  const t = ((await tRes.json()) as {
+    data: { transfer: { transferGroupId: string; dest: { id: number } } };
+  }).data.transfer;
+  expect(
+    await prisma.transaction.count({ where: { transferGroupId: t.transferGroupId } }),
+  ).toBe(2);
+
+  // Prime both portfolios' derived caches so we can prove both get cleared.
+  await redis.set(portfolioDerivedCacheKeys(source)[0], 'x');
+  await redis.set(portfolioDerivedCacheKeys(dest)[0], 'x');
+
+  // Delete the DEST leg through the DEST portfolio (owner-gated). Both legs must vanish.
+  const delRes = await txDelete(dest, t.dest.id, cookies);
+  expect(delRes.status).toBe(200);
+
+  expect(
+    await prisma.transaction.count({ where: { transferGroupId: t.transferGroupId } }),
+  ).toBe(0);
+
+  // Source reverts to 2 BTC / 60000; dest back to 0 / 0.
+  expect(await getAssetBalance(source, btcId)).toBeCloseTo(2);
+  expect(await getAssetNetDeposit(source, btcId)).toBeCloseTo(60000);
+  expect(await getPortfolioNetDeposit(source)).toBeCloseTo(60000);
+  expect(await getAssetBalance(dest, btcId)).toBeCloseTo(0);
+  expect(await getAssetNetDeposit(dest, btcId)).toBeCloseTo(0);
+  expect(await getPortfolioNetDeposit(dest)).toBeCloseTo(0);
+
+  // Both portfolios' caches cleared.
+  expect(await redis.get(portfolioDerivedCacheKeys(source)[0])).toBeNull();
+  expect(await redis.get(portfolioDerivedCacheKeys(dest)[0])).toBeNull();
+});
+
+it('322: TransactionListDTO surfaces transferGroupId — set on transfer legs, null for ordinary txns', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const source = await seedPortfolio(userId, 'manual');
+  const dest = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(source, btcId);
+  await clearPriceCache('BTC');
+
+  // Ordinary buy → transferGroupId null on the response DTO.
+  const buyRes = await txPost(
+    source,
+    { type: 'native', direction: 'buy', amount: '2', symbol: 'BTC', priceAtTime: '30000', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(
+    ((await buyRes.json()) as { data: { transaction: { transferGroupId: string | null } } }).data
+      .transaction.transferGroupId,
+  ).toBeNull();
+
+  // Transfer → both legs carry the same non-null transferGroupId.
+  const tRes = await txTransfer(
+    source,
+    { destPortfolioId: dest, symbol: 'BTC', amount: '1', timestamp: TIMESTAMP },
+    cookies,
+  );
+  const groupId = ((await tRes.json()) as { data: { transfer: { transferGroupId: string } } }).data
+    .transfer.transferGroupId;
+
+  // Source's list has the ordinary buy (null) AND the transfer sell leg (groupId).
+  const listRes = await txGet(source, '', cookies);
+  const txns = ((await listRes.json()) as {
+    data: { transactions: Array<{ direction: string; transferGroupId: string | null }> };
+  }).data.transactions;
+  const sellLeg = txns.find((x) => x.direction === 'sell');
+  const ordinaryBuy = txns.find((x) => x.direction === 'buy');
+  expect(sellLeg?.transferGroupId).toBe(groupId);
+  expect(ordinaryBuy?.transferGroupId).toBeNull();
 });

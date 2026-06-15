@@ -39,6 +39,10 @@ export interface TransactionListDTO {
   usdValue: number | null;
   // retrofit-7: free-text user note (null for webhook/connected or when omitted).
   notes: string | null;
+  // retrofit-10: shared id linking the two legs of a cross-portfolio transfer (the
+  // source `sell` + dest `buy`). Null for ordinary transactions. Lets the frontend
+  // group/label the pair as a single transfer.
+  transferGroupId: string | null;
   timestamp: string;
   createdAt: string;
 }
@@ -101,6 +105,7 @@ export function toTransactionListDTO(tx: TransactionWithListIncludes): Transacti
     symbol,
     usdValue,
     notes: tx.notes ?? null,
+    transferGroupId: tx.transferGroupId ?? null,
     timestamp: tx.timestamp.toISOString(),
     createdAt: tx.createdAt.toISOString(),
   };

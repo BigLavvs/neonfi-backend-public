@@ -7,12 +7,17 @@ import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import {
   TransactionError,
   createTransaction,
+  createCrossPortfolioTransfer,
   listPortfolioTransactions,
   getPortfolioTransaction,
   updateTransaction,
   deleteTransaction,
 } from './transactions.service.js';
-import { CreateTransactionBodySchema, UpdateTransactionBodySchema } from './transactions.schemas.js';
+import {
+  CreateTransactionBodySchema,
+  UpdateTransactionBodySchema,
+  TransferBodySchema,
+} from './transactions.schemas.js';
 
 type TxEnv = AuthEnv & { Variables: { portfolio: PortfolioWithRelations } };
 
@@ -60,6 +65,34 @@ router.post('', async (c) => {
   } catch (e) {
     if (e instanceof TransactionError) {
       return c.json(err(e.code, e.message), e.statusCode as 400 | 403 | 409);
+    }
+    throw e;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /portfolios/:portfolioId/transactions/transfer (retrofit-10 / C4b)
+// ---------------------------------------------------------------------------
+// Cross-portfolio transfer: the URL :portfolioId is the SOURCE; the body names the
+// dest. Distinct literal path — no conflict with POST '' or the '/:id' routes.
+
+router.post('/transfer', async (c) => {
+  const rawBody = await c.req.json().catch(() => null);
+  if (rawBody === null) {
+    return c.json(err('VALIDATION_ERROR', 'Request body required'), 400);
+  }
+  const parsed = TransferBodySchema.safeParse(rawBody);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return c.json(err('VALIDATION_ERROR', issue?.message ?? 'Validation failed'), 400);
+  }
+  const portfolio = c.get('portfolio'); // SOURCE
+  try {
+    const transfer = await createCrossPortfolioTransfer(portfolio, parsed.data);
+    return c.json(ok({ transfer }), 201);
+  } catch (e) {
+    if (e instanceof TransactionError) {
+      return c.json(err(e.code, e.message), e.statusCode as 400 | 403);
     }
     throw e;
   }

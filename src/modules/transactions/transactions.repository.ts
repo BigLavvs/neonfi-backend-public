@@ -84,6 +84,7 @@ interface CreateTransactionData {
   transactionHash?: string;
   timestamp: Date;
   notes?: string | null; // retrofit-7
+  transferGroupId?: string | null; // retrofit-10: links the two legs of a transfer
 }
 
 export async function createTransactionRow(

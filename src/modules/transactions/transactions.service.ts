@@ -1,8 +1,11 @@
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
 import { portfolioDerivedCacheKeys } from '../../lib/portfolio-cache-keys.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
+import { findPortfolioById } from '../portfolios/portfolios.repository.js';
+import { findAssetByPortfolioToken } from '../assets/assets.repository.js';
 import {
   createTransactionRow,
   createNativeDetail,
@@ -24,7 +27,11 @@ import {
   type TransactionListDTO,
   type TransactionDetailDTO,
 } from './transactions.dto.js';
-import type { CreateTransactionBody, UpdateTransactionBody } from './transactions.schemas.js';
+import type {
+  CreateTransactionBody,
+  UpdateTransactionBody,
+  TransferBody,
+} from './transactions.schemas.js';
 import { recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
 import { computeUsdValue } from './usd-value.js';
 
@@ -385,6 +392,165 @@ export async function seedAcquisitionInTx(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-portfolio transfer (retrofit-10 / C4b)
+// ---------------------------------------------------------------------------
+
+// Moves `amount` of a token between two of the user's MANUAL portfolios as a paired
+// transaction: a `sell` leg in the source and a `buy` leg in the dest, sharing a
+// `transferGroupId`. The dest INHERITS the source's per-unit cost basis — both legs
+// use the same usdValue = amount × (sourceAsset.netDeposit / sourceAsset.balance) —
+// so the source loses exactly that basis and the dest gains it. Total cost basis is
+// conserved across the two portfolios and the move creates NO fake PnL (Idowu's
+// choice). recalc.ts is reused unchanged: a `sell` drops balance+netDeposit, a `buy`
+// raises them. The existing `transfer` direction stays a no-op (address-transfer
+// sub-mode is out of scope). Manual legs are `native` only (mirrors seedAcquisitionInTx
+// — the Token catalog has no contract address for an erc20 detail).
+export async function createCrossPortfolioTransfer(
+  source: PortfolioWithRelations,
+  body: TransferBody,
+): Promise<{
+  transferGroupId: string;
+  source: TransactionDetailDTO;
+  dest: TransactionDetailDTO;
+}> {
+  // 1. Source must be a manual portfolio (connected portfolios are webhook-only).
+  assertManualPortfolio(source);
+
+  // 2. Resolve + validate dest: must exist, be owned by the same user, be manual, and
+  //    differ from the source. Not-found / not-owned collapse to one 403 (don't leak
+  //    the existence of other users' portfolios); same-id and connected-dest are 400.
+  const dest = await findPortfolioById(body.destPortfolioId);
+  if (!dest || dest.userId !== source.userId) {
+    throw new TransactionError(403, 'DEST_NOT_FOUND', 'Destination portfolio not found or access denied');
+  }
+  if (dest.id === source.id) {
+    throw new TransactionError(
+      400,
+      'INVALID_TRANSFER_TARGET',
+      'Cannot transfer to the same portfolio',
+    );
+  }
+  if (dest.type.name === 'connected') {
+    throw new TransactionError(
+      400,
+      'INVALID_TRANSFER_TARGET',
+      'Destination must be a manual portfolio',
+    );
+  }
+
+  // 3. Resolve token by symbol.
+  const token = await prisma.token.findUnique({ where: { symbol: body.symbol } });
+  if (!token) {
+    throw new TransactionError(400, 'UNKNOWN_TOKEN_SYMBOL', `Unknown token symbol: ${body.symbol}`);
+  }
+
+  // 4. Source asset must exist and hold enough balance.
+  const sourceAsset = await findAssetByPortfolioToken(source.id, token.id);
+  const balance = sourceAsset ? Number(sourceAsset.balance.toString()) : 0;
+  const amount = Number(body.amount);
+  if (!sourceAsset || balance < amount) {
+    throw new TransactionError(
+      400,
+      'INSUFFICIENT_BALANCE',
+      'Source portfolio has insufficient balance for this transfer',
+    );
+  }
+
+  // 5. Cost-basis carry: per-unit basis = netDeposit / balance (guard balance > 0).
+  //    usdValue = amount × netDeposit / balance, computed with .toFixed(8) so the
+  //    conserved-basis invariant is exact at the persisted precision. Both legs use
+  //    this same usdValue → basis conserved, no fake PnL (§8.2).
+  const netDeposit = Number(sourceAsset.netDeposit.toString());
+  const usdValue = balance > 0 ? ((amount * netDeposit) / balance).toFixed(8) : '0.00000000';
+
+  // 6. Static seed rows resolved via the global prisma client (low in-tx query count),
+  //    like seedAcquisitionInTx / createTransactionFromWebhook; the legs + details +
+  //    recalcs are written via the tx client so both portfolios commit atomically.
+  const [nativeType, sellDir, buyDir] = await Promise.all([
+    prisma.transactionType.findUniqueOrThrow({ where: { name: 'native' } }),
+    prisma.transactionDirection.findUniqueOrThrow({ where: { name: 'sell' } }),
+    prisma.transactionDirection.findUniqueOrThrow({ where: { name: 'buy' } }),
+  ]);
+
+  const transferGroupId = randomUUID();
+  const ts = body.timestamp ? new Date(body.timestamp) : new Date();
+  const notes = body.notes ?? null;
+
+  const { sourceTxId, destTxId } = await prisma.$transaction(
+    async (tx) => {
+      // Ensure the dest asset exists — mirror the webhook auto-create. The dest
+      // plan-rank is intentionally NOT re-checked: the user already holds this token
+      // in the source portfolio, so the transfer adds no NEW distinct holding to gate.
+      const destAsset = await tx.asset.findUnique({
+        where: { portfolioId_tokenId: { portfolioId: dest.id, tokenId: token.id } },
+      });
+      if (!destAsset) {
+        await tx.asset.create({
+          data: { portfolioId: dest.id, tokenId: token.id, balance: '0', netDeposit: '0' },
+        });
+      }
+
+      // Source leg: `sell` (drops source balance + netDeposit).
+      const sourceLeg = await createTransactionRow(tx, {
+        portfolioId: source.id,
+        typeId: nativeType.id,
+        directionId: sellDir.id,
+        timestamp: ts,
+        notes,
+        transferGroupId,
+      });
+      await createNativeDetail(tx, sourceLeg.id, {
+        amount: body.amount,
+        symbol: body.symbol,
+        usdValue,
+        priceAtTime: null,
+      });
+
+      // Dest leg: `buy` (raises dest balance + netDeposit) with the SAME usdValue.
+      const destLeg = await createTransactionRow(tx, {
+        portfolioId: dest.id,
+        typeId: nativeType.id,
+        directionId: buyDir.id,
+        timestamp: ts,
+        notes,
+        transferGroupId,
+      });
+      await createNativeDetail(tx, destLeg.id, {
+        amount: body.amount,
+        symbol: body.symbol,
+        usdValue,
+        priceAtTime: null,
+      });
+
+      // Recalc both portfolios (asset balance/netDeposit, then portfolio netDeposit).
+      await recalcAssetBalance(tx, source.id, token.id);
+      await recalcPortfolioNetDeposit(tx, source.id);
+      await recalcAssetBalance(tx, dest.id, token.id);
+      await recalcPortfolioNetDeposit(tx, dest.id);
+
+      return { sourceTxId: sourceLeg.id, destTxId: destLeg.id };
+    },
+    { timeout: 15000 },
+  );
+
+  // 7. Invalidate derived caches for BOTH portfolios after commit.
+  await invalidatePnlCache(source.id);
+  await invalidatePnlCache(dest.id);
+
+  // 8. Return both leg DTOs.
+  const [sourceFull, destFull] = await Promise.all([
+    findTransactionById(sourceTxId),
+    findTransactionById(destTxId),
+  ]);
+  if (!sourceFull || !destFull) throw new Error('Transfer legs not found after creation');
+  return {
+    transferGroupId,
+    source: toTransactionDetailDTO(sourceFull),
+    dest: toTransactionDetailDTO(destFull),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // GET list
 // ---------------------------------------------------------------------------
 
@@ -624,6 +790,53 @@ export async function deleteTransaction(
   const existing = await findTransactionById(txId);
   if (!existing || existing.portfolioId !== portfolio.id) {
     throw new TransactionError(404, 'TRANSACTION_NOT_FOUND', 'Transaction not found');
+  }
+
+  // retrofit-10 (C4b): a transfer is a PAIR of legs sharing a transferGroupId. Deleting
+  // either leg must remove BOTH and recalc BOTH portfolios — otherwise one side keeps a
+  // dangling sell/buy and balances/netDeposit desync. Both legs belong to the same user
+  // (transfers only happen between the user's own manual portfolios), so the source-
+  // portfolio ownership middleware that gated this request already authorizes deleting
+  // the dest leg too.
+  if (existing.transferGroupId !== null) {
+    const legs = await prisma.transaction.findMany({
+      where: { transferGroupId: existing.transferGroupId },
+      include: { nativeDetail: true, erc20Detail: true },
+    });
+
+    // Resolve the (portfolioId, tokenId) pairs to recalc and the distinct portfolios.
+    // Legs are native, but read the symbol from either detail defensively.
+    const recalcTargets: Array<{ portfolioId: number; tokenId: number }> = [];
+    const portfolioIds = new Set<number>();
+    for (const leg of legs) {
+      portfolioIds.add(leg.portfolioId);
+      const legSymbol = leg.nativeDetail?.symbol ?? leg.erc20Detail?.symbol ?? null;
+      if (legSymbol) {
+        const legToken = await prisma.token.findUnique({ where: { symbol: legSymbol } });
+        if (legToken) recalcTargets.push({ portfolioId: leg.portfolioId, tokenId: legToken.id });
+      }
+    }
+
+    await prisma.$transaction(
+      async (tx) => {
+        for (const leg of legs) {
+          await deleteTransactionRow(tx, leg.id);
+        }
+        // Recalc per affected asset first, then per portfolio (netDeposit sums assets).
+        for (const target of recalcTargets) {
+          await recalcAssetBalance(tx, target.portfolioId, target.tokenId);
+        }
+        for (const pid of portfolioIds) {
+          await recalcPortfolioNetDeposit(tx, pid);
+        }
+      },
+      { timeout: 15000 },
+    );
+
+    for (const pid of portfolioIds) {
+      await invalidatePnlCache(pid);
+    }
+    return;
   }
 
   const typeName = existing.type.name;

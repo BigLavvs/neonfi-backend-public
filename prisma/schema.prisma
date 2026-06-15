@@ -329,6 +329,11 @@ model Transaction {
   // user note attached to a manually-logged transaction (frontend AddTransactionModal).
   // Optional; null for webhook/connected transactions.
   notes           String?                  @db.VarChar(2000)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-10): links the
+  // two legs of a cross-portfolio transfer (a `sell` in the source portfolio + a `buy`
+  // in the dest, sharing this UUID) so they can be grouped/labelled and deleted as a
+  // pair. Null for all non-transfer transactions.
+  transferGroupId String?                  @db.VarChar(36)
 
   // Child detail records
   nativeDetail    NativeTransactionDetail?
@@ -340,6 +345,7 @@ model Transaction {
   @@index([portfolioId])
   @@index([typeId])
   @@index([directionId])
+  @@index([transferGroupId])
   @@map("transaction")
 }
 
