@@ -6,6 +6,7 @@ export interface NftDTO {
   name: string | null;
   tokenId: string;
   contractAddress: string;
+  owner: string | null;
   collectionName: string | null;
   logoUrl: string | null;
   chain: string;
@@ -19,13 +20,14 @@ export interface NftDTO {
   createdAt: Date;
 }
 
-export function toNftDTO(nft: Nft): NftDTO {
+export function toNftDTO(nft: Nft, owner: string | null): NftDTO {
   return {
     id: nft.id,
     portfolioId: nft.portfolioId,
     name: nft.name ?? null,
     tokenId: nft.tokenId,
     contractAddress: nft.contractAddress,
+    owner,
     collectionName: nft.collectionName ?? null,
     logoUrl: nft.logoUrl ?? null,
     chain: nft.chain,

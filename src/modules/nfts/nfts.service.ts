@@ -20,7 +20,7 @@ export async function listNfts(portfolio: PortfolioWithRelations): Promise<NftDT
     return [];
   }
   const nfts = await findAllNftsByPortfolioId(portfolio.id);
-  return nfts.map(toNftDTO);
+  return nfts.map((n) => toNftDTO(n, portfolio.walletAddress));
 }
 
 export async function getNftById(
@@ -31,5 +31,5 @@ export async function getNftById(
   if (!nft || nft.portfolioId !== portfolio.id) {
     throw new NftError(404, 'NFT_NOT_FOUND', 'NFT not found');
   }
-  return toNftDTO(nft);
+  return toNftDTO(nft, portfolio.walletAddress);
 }

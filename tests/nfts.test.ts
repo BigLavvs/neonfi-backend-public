@@ -172,12 +172,16 @@ it('281: GET /portfolios/:id/nfts Pro connected → 200 with 3 NFTs newest-first
 
   const res = await nftGet(nftUrl(portfolioId), cookie);
   expect(res.status).toBe(200);
-  const body = await res.json() as { data: { nfts: Array<{ id: number; name: string }> } };
+  const body = await res.json() as { data: { nfts: Array<{ id: number; name: string; owner: string | null }> } };
   expect(body.data.nfts).toHaveLength(3);
   // newest-first: id3 > id2 > id1
   expect(body.data.nfts[0]!.id).toBe(id3);
   expect(body.data.nfts[1]!.id).toBe(id2);
   expect(body.data.nfts[2]!.id).toBe(id1);
+  // owner is derived from the connected portfolio's walletAddress ('0xabc123')
+  for (const n of body.data.nfts) {
+    expect(n.owner).toBe('0xabc123');
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -255,6 +259,8 @@ it('284: GET /portfolios/:id/nfts/:nftId Pro → 200 with all 14 fields present'
   expect(nft.lastSaleNote).toBe('Sold 2 weeks ago');
   expect(nft.rarity).toBe('legendary');
   expect('createdAt' in nft).toBe(true);
+  // owner is derived from the connected portfolio's walletAddress ('0xabc123')
+  expect(nft.owner).toBe('0xabc123');
 });
 
 // ---------------------------------------------------------------------------
