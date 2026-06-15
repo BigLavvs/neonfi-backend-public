@@ -35,7 +35,7 @@ import { computeUsdValue } from './usd-value.js';
 // source stays in sync across every CUD callsite. del on a missing key is a harmless
 // no-op. Run AFTER the $transaction commits and never let a cache failure roll the
 // write back — stale derived data for 5 min is recoverable.
-async function invalidatePnlCache(portfolioId: number): Promise<void> {
+export async function invalidatePnlCache(portfolioId: number): Promise<void> {
   const keys = portfolioDerivedCacheKeys(portfolioId);
   await redis
     .del(...keys)
@@ -333,6 +333,55 @@ export async function createTransactionFromWebhook(params: {
   const full = await findTransactionById(newTxId);
   if (!full) throw new Error('Transaction not found after creation');
   return toTransactionDetailDTO(full);
+}
+
+// ---------------------------------------------------------------------------
+// Shared acquisition seed (retrofit-8 §1)
+// ---------------------------------------------------------------------------
+
+// Seeds a manual `native buy` acquisition. The Asset MUST already be created by the
+// caller in the SAME tx (assets.service.addAsset / portfolios.service.createPortfolio);
+// this only writes the transaction + native detail and recalcs. Transactions module
+// owns the Transaction table, so the seed lives here and assets/portfolios call it
+// (module isolation). Mirrors createTransactionFromWebhook: the static native/buy seed
+// rows are resolved via the global prisma client (low in-tx query count) while the tx +
+// detail + recalc are written via the passed tx client, so the asset(s) and the seed
+// commit atomically. Manual entries are always `native` — the Token catalog has no
+// contract address to build an erc20 detail; erc20/nft stay webhook-only.
+// computeUsdValue is priceAtTime-aware (retrofit-7): a user-entered priceAtTime drives
+// the cost basis, otherwise the current price at write-time is used.
+export async function seedAcquisitionInTx(
+  tx: Prisma.TransactionClient,
+  params: {
+    portfolioId: number;
+    tokenId: number;
+    symbol: string;
+    amount: string;
+    priceAtTime?: string;
+    timestamp?: string;
+    notes?: string | null;
+  },
+): Promise<void> {
+  const [typeRow, dirRow] = await Promise.all([
+    prisma.transactionType.findUniqueOrThrow({ where: { name: 'native' } }),
+    prisma.transactionDirection.findUniqueOrThrow({ where: { name: 'buy' } }),
+  ]);
+  const usdValue = await computeUsdValue(params.symbol, params.amount, params.priceAtTime);
+  const created = await createTransactionRow(tx, {
+    portfolioId: params.portfolioId,
+    typeId: typeRow.id,
+    directionId: dirRow.id,
+    timestamp: params.timestamp ? new Date(params.timestamp) : new Date(),
+    notes: params.notes ?? null,
+  });
+  await createNativeDetail(tx, created.id, {
+    amount: params.amount,
+    symbol: params.symbol,
+    usdValue,
+    priceAtTime: params.priceAtTime ?? null,
+  });
+  await recalcAssetBalance(tx, params.portfolioId, params.tokenId);
+  await recalcPortfolioNetDeposit(tx, params.portfolioId);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import {
   deletePortfolio,
 } from './portfolios.repository.js';
 import { toPortfolioDTO, type PortfolioDTO } from './portfolios.dto.js';
+import { seedAcquisitionInTx, invalidatePnlCache } from '../transactions/transactions.service.js';
 import { slugify } from './slug.js';
 import { validateWalletAddress } from './wallet-validator.js';
 import type { CreatePortfolioBody, ListPortfoliosQuery, UpdatePortfolioBody } from './portfolios.schemas.js';
@@ -121,6 +122,79 @@ export async function createPortfolio(
   }
 
   // type === 'manual'
+  // retrofit-8 §3: atomic manual portfolio + initial holdings. When assets[] is
+  // present, create the portfolio + every asset (+ acquisition seed) in ONE
+  // $transaction so a single bad asset rolls back the whole create. Validation runs
+  // INSIDE the loop (token exists, per-asset plan-rank, no duplicate tokenIds) so a
+  // failure aborts the transaction. netDeposit interaction: seeding runs
+  // recalcPortfolioNetDeposit → portfolio.netDeposit becomes Σ asset cost-basis,
+  // overriding the startingBalance-derived value. The frontend sends startingBalance
+  // OR assets[], not both; if both arrive, the seeds win.
+  const assets = body.assets;
+  if (assets && assets.length > 0) {
+    const portfolioId = await prisma.$transaction(
+      async (tx) => {
+        const created = await tx.portfolio.create({
+          data: {
+            userId,
+            name: body.name,
+            typeId: portfolioType.id,
+            startingBalance: body.startingBalance,
+            netDeposit: body.startingBalance ?? '0',
+          },
+          select: { id: true },
+        });
+
+        const seenTokenIds = new Set<number>();
+        for (const a of assets) {
+          if (seenTokenIds.has(a.tokenId)) {
+            throw new PortfolioError(409, 'DUPLICATE_ASSET', 'Duplicate token in assets list', {
+              tokenId: a.tokenId,
+            });
+          }
+          seenTokenIds.add(a.tokenId);
+
+          const token = await tx.token.findUnique({ where: { id: a.tokenId } });
+          if (!token) {
+            throw new PortfolioError(400, 'INVALID_TOKEN', 'Token not found', { tokenId: a.tokenId });
+          }
+          if (effectivePlan === 'free' && (token.rank === null || token.rank > 10)) {
+            throw new PortfolioError(
+              403,
+              'PLAN_LIMIT_REACHED',
+              'Your plan only allows tokens ranked in the top 10',
+              { tokenSymbol: token.symbol, plan: 'free', requiredRank: 10 },
+            );
+          }
+
+          await tx.asset.create({ data: { portfolioId: created.id, tokenId: a.tokenId } });
+          if (a.amount !== undefined && Number(a.amount) > 0) {
+            await seedAcquisitionInTx(tx, {
+              portfolioId: created.id,
+              tokenId: a.tokenId,
+              symbol: token.symbol,
+              amount: a.amount,
+              priceAtTime: a.priceAtTime,
+              timestamp: a.timestamp,
+              notes: a.notes ?? null,
+            });
+          }
+        }
+
+        return created.id;
+      },
+      { timeout: 15000 },
+    );
+
+    await invalidatePnlCache(portfolioId);
+
+    // DTO read AFTER the commit (STOP-gate §6.1): netDeposit reflects the seeds.
+    const full = await findPortfolioById(portfolioId);
+    if (!full) throw new Error('Portfolio not found after creation');
+    return await toPortfolioDTO(full);
+  }
+
+  // No assets[] — existing single-insert path unchanged.
   // retrofit-2 §1.5: seed netDeposit from startingBalance (the user's declared
   // cost basis). Connected portfolios start at 0 and grow via webhook IN txns.
   const portfolio = await createPortfolioRow({

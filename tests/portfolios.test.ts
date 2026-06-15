@@ -184,15 +184,22 @@ it('139: POST /portfolios manual with startingBalance → 201, serialized as num
 });
 
 // ---------------------------------------------------------------------------
-// 140. POST /portfolios manual with extra `assets` field → 400 (strict)
+// 140. POST /portfolios manual — `assets[]` now accepted (retrofit-8); strict still
+// rejects genuinely unknown fields.
 // ---------------------------------------------------------------------------
 
-it('140: POST /portfolios manual with extra `assets` field → 400 VALIDATION_ERROR (strict mode)', async () => {
+it('140: POST /portfolios manual — assets[] accepted (retrofit-8); strict still rejects unknown fields', async () => {
   const cookies = await registerAndLogin();
 
-  const res = await portPost({ type: 'manual', name: 'Test', assets: [] }, cookies);
-  expect(res.status).toBe(400);
-  const json = await res.json() as { error: { code: string } };
+  // retrofit-8: `assets` is now a recognized optional field — an empty array is accepted
+  // (no seeds → falls through to the plain single-insert path).
+  const okRes = await portPost({ type: 'manual', name: 'Has Empty Assets', assets: [] }, cookies);
+  expect(okRes.status).toBe(201);
+
+  // strict mode still rejects a genuinely unknown field
+  const badRes = await portPost({ type: 'manual', name: 'Bogus', bogus: true }, cookies);
+  expect(badRes.status).toBe(400);
+  const json = await badRes.json() as { error: { code: string } };
   expect(json.error.code).toBe('VALIDATION_ERROR');
 });
 
@@ -892,4 +899,90 @@ it('312: POST connected → Portfolio.netDeposit = 0 (starts empty, grows via we
 
   const db = await prisma.portfolio.findUniqueOrThrow({ where: { id: json.data.portfolio.id } });
   expect(Number(db.netDeposit.toString())).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// 342-344. retrofit-8 — atomic manual portfolio creation with assets[]
+// ---------------------------------------------------------------------------
+
+it('342: POST manual with assets[] → portfolio + 2 assets + 2 native buy seed txs; netDeposit = Σ cost-basis (34000)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  const eth = await prisma.token.findUniqueOrThrow({ where: { symbol: 'ETH' } });
+
+  const res = await portPost({
+    type: 'manual',
+    name: 'Seeded',
+    assets: [
+      { tokenId: btc.id, amount: '1', priceAtTime: '30000' },
+      { tokenId: eth.id, amount: '2', priceAtTime: '2000' },
+    ],
+  }, cookies);
+  expect(res.status).toBe(201);
+
+  const json = await res.json() as { data: { portfolio: { id: number; netDeposit: number } } };
+  expect(json.data.portfolio.netDeposit).toBe(34000); // 1×30000 + 2×2000
+
+  const portfolioId = json.data.portfolio.id;
+  expect(await prisma.asset.count({ where: { portfolioId } })).toBe(2);
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(2);
+
+  // Both seeded transactions are native buys
+  const txs = await prisma.transaction.findMany({
+    where: { portfolioId },
+    include: { type: true, direction: true },
+  });
+  for (const t of txs) {
+    expect(t.type.name).toBe('native');
+    expect(t.direction.name).toBe('buy');
+  }
+});
+
+it('343: POST manual with a duplicate tokenId in assets[] → 409 DUPLICATE_ASSET; nothing created (atomic)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+
+  const res = await portPost({
+    type: 'manual',
+    name: 'Dup',
+    assets: [
+      { tokenId: btc.id, amount: '1', priceAtTime: '30000' },
+      { tokenId: btc.id, amount: '2', priceAtTime: '31000' },
+    ],
+  }, cookies);
+  expect(res.status).toBe(409);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('DUPLICATE_ASSET');
+
+  expect(await prisma.portfolio.count()).toBe(0);
+  expect(await prisma.asset.count()).toBe(0);
+  expect(await prisma.transaction.count()).toBe(0);
+});
+
+it('344: POST manual with one valid + one invalid token in assets[] → 400; whole create rolls back (atomic)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+
+  const res = await portPost({
+    type: 'manual',
+    name: 'Rollback',
+    assets: [
+      { tokenId: btc.id, amount: '1', priceAtTime: '30000' },
+      { tokenId: 999999 },
+    ],
+  }, cookies);
+  expect(res.status).toBe(400);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('INVALID_TOKEN');
+
+  // Atomic: the already-created BTC asset + its seed tx and the portfolio all roll back
+  expect(await prisma.portfolio.count()).toBe(0);
+  expect(await prisma.asset.count()).toBe(0);
+  expect(await prisma.transaction.count()).toBe(0);
 });

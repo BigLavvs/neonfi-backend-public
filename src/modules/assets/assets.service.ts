@@ -1,11 +1,11 @@
 import { prisma } from '../../lib/prisma.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
+import { seedAcquisitionInTx, invalidatePnlCache } from '../transactions/transactions.service.js';
 import {
   findAllAssetsByPortfolioId,
   findAssetById,
   findAssetByPortfolioToken,
-  createAssetRow,
   updateAssetRow,
   deleteAssetRow,
 } from './assets.repository.js';
@@ -61,10 +61,38 @@ export async function addAsset(
     throw new AssetError(409, 'ASSET_ALREADY_EXISTS', 'This token is already in the portfolio');
   }
 
-  const asset = await createAssetRow({ portfolioId: portfolio.id, tokenId: body.tokenId });
+  // retrofit-8: create the Asset and (when an acquisition amount is supplied) seed a
+  // native `buy` transaction in ONE atomic $transaction, so balance and cost-basis
+  // derive from the recalc model — one source of truth, accurate PnL via priceAtTime.
+  // amount omitted → just the asset at balance 0 (back-compat with the {tokenId}-only
+  // path). Validation above stays OUTSIDE the tx (cheap reads, fail fast).
+  const seed = body.amount !== undefined && Number(body.amount) > 0;
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.asset.create({ data: { portfolioId: portfolio.id, tokenId: body.tokenId } });
+      if (seed) {
+        await seedAcquisitionInTx(tx, {
+          portfolioId: portfolio.id,
+          tokenId: body.tokenId,
+          symbol: token.symbol,
+          amount: body.amount!,
+          priceAtTime: body.priceAtTime,
+          timestamp: body.timestamp,
+          notes: body.notes ?? null,
+        });
+      }
+    },
+    { timeout: 15000 },
+  );
+
+  await invalidatePnlCache(portfolio.id);
+
+  // DTO read AFTER the commit (STOP-gate §6.1): balance/netDeposit now reflect the seed.
+  const created = await findAssetByPortfolioToken(portfolio.id, body.tokenId);
+  if (!created) throw new Error('Asset not found after creation');
   const allAssets = await findAllAssetsByPortfolioId(portfolio.id);
   const totalValue = computeTotalValue(allAssets);
-  return toAssetDTO(asset, totalValue);
+  return toAssetDTO(created, totalValue);
 }
 
 export async function listAssets(

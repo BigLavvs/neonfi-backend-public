@@ -589,3 +589,78 @@ it('197: Portfolio totalValue reflects asset sum — BTC 0.5 + ETH 2.0 = 52900',
   const json = await res.json() as { data: { portfolio: Record<string, unknown> } };
   expect(json.data.portfolio.totalValue).toBe(52900);
 });
+
+// ---------------------------------------------------------------------------
+// 339-341. retrofit-8 — asset-add optionally seeds an acquisition transaction
+// ---------------------------------------------------------------------------
+
+function txList(portfolioId: number, cookies?: string): Promise<Response> {
+  return app.request(`${PORT_BASE}/${portfolioId}/transactions`, {
+    method: 'GET',
+    headers: { ...(cookies ? { Cookie: cookies } : {}) },
+  });
+}
+
+it('339: POST asset {tokenId, amount, priceAtTime} → asset seeded; balance/netDeposit derived; one native buy tx', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  const res = await assetPost(portfolioId, { tokenId: btcId, amount: '2', priceAtTime: '100' }, cookies);
+  expect(res.status).toBe(201);
+
+  const json = await res.json() as { data: { asset: Record<string, unknown> } };
+  const a = json.data.asset;
+  expect(a.balance).toBe(2);
+  expect(a.netDeposit).toBe(200); // 2 × 100 (priceAtTime drives cost basis)
+
+  // Exactly one seeded native buy transaction, surfaced by GET transactions
+  const txRes = await txList(portfolioId, cookies);
+  expect(txRes.status).toBe(200);
+  const txJson = await txRes.json() as { data: { transactions: Array<Record<string, unknown>> } };
+  expect(txJson.data.transactions).toHaveLength(1);
+  const t = txJson.data.transactions[0]!;
+  expect(t.type).toBe('native');
+  expect(t.direction).toBe('buy');
+  expect(t.symbol).toBe('BTC');
+  expect(t.amount).toBe(2);
+  expect(t.usdValue).toBe(200);
+
+  // DB-side: asset row + transaction + native detail all present
+  expect(await prisma.asset.count()).toBe(1);
+  expect(await prisma.transaction.count()).toBe(1);
+  expect(await prisma.nativeTransactionDetail.count()).toBe(1);
+});
+
+it('340: POST asset {tokenId} only (no amount) → asset at balance 0, no transaction seeded (back-compat)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  const res = await assetPost(portfolioId, { tokenId: btcId }, cookies);
+  expect(res.status).toBe(201);
+
+  const json = await res.json() as { data: { asset: Record<string, unknown> } };
+  expect(json.data.asset.balance).toBe(0);
+  expect(json.data.asset.netDeposit).toBe(0);
+
+  expect(await prisma.asset.count()).toBe(1);
+  expect(await prisma.transaction.count()).toBe(0);
+});
+
+it('341: POST asset with amount as free user on a rank>10 token (MATIC) → 403 PLAN_LIMIT_REACHED, nothing seeded', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createFreeSubForUser(userId);
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  const res = await assetPost(portfolioId, { tokenId: maticId, amount: '5', priceAtTime: '1' }, cookies);
+  expect(res.status).toBe(403);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('PLAN_LIMIT_REACHED');
+
+  // Rank gate runs before any write — no asset, no transaction
+  expect(await prisma.asset.count()).toBe(0);
+  expect(await prisma.transaction.count()).toBe(0);
+});
