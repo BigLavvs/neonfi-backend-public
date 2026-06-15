@@ -8,8 +8,15 @@
 // The raw body from c.req.text() is exactly what Moralis signed — never JSON.parse
 // + JSON.stringify the body before signing, as re-serialization changes whitespace.
 
-import { keccak256 } from 'js-sha3';
+import jsSha3 from 'js-sha3';
 import { timingSafeEqual } from 'node:crypto';
+
+// js-sha3 is CommonJS and assembles its exports dynamically, so Node's ESM lexer can't
+// expose `keccak256` as a named import — `import { keccak256 } from 'js-sha3'` passes under
+// vitest's loader but throws at the real tsx/node boot ("does not provide an export named
+// 'keccak256'"). Default-import the module object, then destructure. Do NOT revert to a
+// named import. (boot fix; to be committed via retrofit-11.)
+const { keccak256 } = jsSha3;
 
 export function computeMoralisSignature(rawBody: string, secret: string): string {
   return keccak256(rawBody + secret);

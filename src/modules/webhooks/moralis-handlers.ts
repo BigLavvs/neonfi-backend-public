@@ -18,7 +18,7 @@
 // Moralis stops retrying; Stage 12 will implement the Nft table writes.
 
 import type { Context } from 'hono';
-import { keccak256 } from 'js-sha3';
+import jsSha3 from 'js-sha3';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
@@ -27,6 +27,11 @@ import { ok, err } from '../../lib/envelope.js';
 import { verifyMoralisSignature } from '../../lib/moralis-signature.js';
 import { createTransactionFromWebhook } from '../transactions/transactions.service.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
+
+// js-sha3 is CommonJS with dynamically-built exports — default-import then destructure
+// (a named import throws at the real tsx/node boot; vitest's loader masks it). See the
+// matching note in lib/moralis-signature.ts. (boot fix)
+const { keccak256 } = jsSha3;
 
 const REDIS_TTL_30_DAYS = 2592000;
 
