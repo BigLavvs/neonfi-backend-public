@@ -1,3 +1,4 @@
+import { getLivePriceMap } from '../../lib/live-price.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 import { findManyTokens, findTokenById } from './tokens.repository.js';
 import { toTokenListDTO, toTokenDetailDTO, type TokenListDTO, type TokenDetailDTO } from './tokens.dto.js';
@@ -28,8 +29,12 @@ export async function listTokens(
   const items = hasMore ? rows.slice(0, query.limit) : rows;
   const nextCursor = hasMore ? (items[items.length - 1]!.id) : null;
 
+  // retrofit-15: overlay live `price:<SYMBOL>` ticks over the seeded currentPrice for
+  // the symbols on this page; a miss falls back to currentPrice.
+  const priceMap = await getLivePriceMap(items.map((t) => t.symbol));
+
   return {
-    tokens: items.map(toTokenListDTO),
+    tokens: items.map((t) => toTokenListDTO(t, priceMap.get(t.symbol))),
     meta: { limit: query.limit, nextCursor },
   };
 }
@@ -39,5 +44,7 @@ export async function getTokenById(id: number): Promise<TokenDetailDTO> {
   if (!token) {
     throw new TokenError(404, 'TOKEN_NOT_FOUND', 'Token not found');
   }
-  return toTokenDetailDTO(token);
+  // retrofit-15: prefer the live tick for this symbol; miss falls back to currentPrice.
+  const priceMap = await getLivePriceMap([token.symbol]);
+  return toTokenDetailDTO(token, priceMap.get(token.symbol));
 }

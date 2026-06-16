@@ -23,24 +23,27 @@ export interface TokenDetailDTO extends TokenListDTO {
   updatedAt: Date;
 }
 
-export function toTokenListDTO(token: Token): TokenListDTO {
+// retrofit-15: `livePrice` overlays the fresh `price:<SYMBOL>` tick over the seeded
+// currentPrice. Resolved in tokens.service and passed per-token; undefined (no tick)
+// falls back to currentPrice. Optional so non-overlay callers stay valid.
+export function toTokenListDTO(token: Token, livePrice?: number): TokenListDTO {
   return {
     id: token.id,
     name: token.name,
     symbol: token.symbol,
     logoUrl: token.logoUrl,
-    currentPrice: Number(token.currentPrice.toString()),
+    currentPrice: livePrice ?? Number(token.currentPrice.toString()),
     rank: token.rank,
   };
 }
 
-export function toTokenDetailDTO(token: Token): TokenDetailDTO {
+export function toTokenDetailDTO(token: Token, livePrice?: number): TokenDetailDTO {
   return {
     id: token.id,
     name: token.name,
     symbol: token.symbol,
     logoUrl: token.logoUrl,
-    currentPrice: Number(token.currentPrice.toString()),
+    currentPrice: livePrice ?? Number(token.currentPrice.toString()),
     rank: token.rank,
     marketCap: token.marketCap !== null ? Number(token.marketCap.toString()) : null,
     updatedAt: token.updatedAt,

@@ -14,8 +14,13 @@
 
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
+import { getLivePriceMap } from '../../lib/live-price.js';
 
-const CACHE_TTL_S = 300;
+// retrofit-15: this cache is price-dependent (totalValue tracks live price), so it's
+// dropped from 5 min to 60s to match the `price:<SYMBOL>` TTL — "latest at page-load"
+// only holds if the cache can't outlive a tick. Reads only; the cost is a little more
+// recompute, fine at MVP scale.
+const CACHE_TTL_S = 60;
 
 export interface DerivedFields {
   totalValue: number;
@@ -72,10 +77,14 @@ async function computeFromDb(portfolioId: number): Promise<DerivedFields> {
     }),
   ]);
 
+  // retrofit-15: prefer the live `price:<SYMBOL>` tick over the seeded currentPrice.
+  // One mget for the portfolio's symbols; misses fall back to currentPrice.
+  const liveMap = await getLivePriceMap(assets.map((a) => a.token.symbol));
+
   let totalValue = 0;
   for (const a of assets) {
     const balance = Number(a.balance.toString());
-    const price = Number(a.token.currentPrice.toString());
+    const price = liveMap.get(a.token.symbol) ?? Number(a.token.currentPrice.toString());
     totalValue += balance * price;
   }
 

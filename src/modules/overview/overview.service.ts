@@ -16,6 +16,7 @@
 // staleness for the MVP.
 
 import { redis } from '../../lib/redis.js';
+import { getLivePriceMap } from '../../lib/live-price.js';
 import { computeDerived } from '../portfolios/derive.js';
 import { findPortfoliosByUserId } from '../portfolios/portfolios.repository.js';
 import { slugify } from '../portfolios/slug.js';
@@ -137,6 +138,12 @@ async function buildOverview(userId: number, { days, txLimit }: OverviewParams):
   const balanceBySymbol = new Map<string, number>();
   let grandTotal = 0;
 
+  // retrofit-15: overlay live `price:<SYMBOL>` ticks on the allocation/grandTotal math
+  // (the `totals`/per-portfolio totalValue already come from computeDerived, which the
+  // derive.ts overlay fixes — don't double-apply there). One mget across every symbol
+  // held in any of this user's portfolios; a miss falls back to currentPrice.
+  const liveMap = await getLivePriceMap(assetsList.flat().map((a) => a.token.symbol));
+
   const portfoliosDTO = portfolios.map((p, i) => {
     const d = derivedList[i]!;
     const assets = assetsList[i]!;
@@ -145,7 +152,7 @@ async function buildOverview(userId: number, { days, txLimit }: OverviewParams):
       const balance = Number(a.balance.toString());
       if (balance <= 0) continue;
       assetCount += 1;
-      const price = Number(a.token.currentPrice.toString());
+      const price = liveMap.get(a.token.symbol) ?? Number(a.token.currentPrice.toString());
       const value = balance * price;
       allocValueBySymbol.set(a.token.symbol, (allocValueBySymbol.get(a.token.symbol) ?? 0) + value);
       balanceBySymbol.set(a.token.symbol, (balanceBySymbol.get(a.token.symbol) ?? 0) + balance);

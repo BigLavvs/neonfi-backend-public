@@ -56,9 +56,16 @@ export async function seedPayment(opts: {
 //
 // Also flushes the derived-PnL/analytics caches (retrofit-3; extended Stage 14):
 // derive.ts caches by `portfolio_pnl:<portfolioId>` and the analytics module caches
-// by `analytics_{summary,performance,holdings}:<portfolioId>`, all 5-min TTL. TRUNCATE
+// by `analytics_{summary,performance,holdings}:<portfolioId>`, all 60-s TTL. TRUNCATE
 // resets the portfolio identity sequence so IDs repeat across tests — without this
 // flush, test B reading portfolio #1 could get test A's stale cached values.
+//
+// retrofit-15: also flush `price:<SYMBOL>` ticks. Every read path now overlays the live
+// price cache over the seeded currentPrice, and all test files share ONE Redis
+// (vitest.config fileParallelism:false). A `price:BTC` key left by another file (e.g.
+// prices.test, or live-price.test) would otherwise bleed a live price into value
+// assertions that expect the seeded currentPrice. The 60-s TTL is too long to rely on
+// expiry between files — flush them here, the same way the derived caches are flushed.
 export async function truncateAllUserData(): Promise<void> {
   await prisma.$executeRaw`TRUNCATE TABLE
     "payment", "subscription", "transaction",
@@ -71,6 +78,7 @@ export async function truncateAllUserData(): Promise<void> {
       redis.keys('analytics_summary:*'),
       redis.keys('analytics_performance:*'),
       redis.keys('analytics_holdings:*'),
+      redis.keys('price:*'),
     ])
   ).flat();
   if (derivedKeys.length > 0) await redis.del(derivedKeys);

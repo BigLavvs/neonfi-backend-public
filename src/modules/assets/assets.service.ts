@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { getLivePriceMap } from '../../lib/live-price.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import { seedAcquisitionInTx, invalidatePnlCache } from '../transactions/transactions.service.js';
@@ -91,8 +92,9 @@ export async function addAsset(
   const created = await findAssetByPortfolioToken(portfolio.id, body.tokenId);
   if (!created) throw new Error('Asset not found after creation');
   const allAssets = await findAllAssetsByPortfolioId(portfolio.id);
-  const totalValue = computeTotalValue(allAssets);
-  return toAssetDTO(created, totalValue);
+  const priceMap = await getLivePriceMap(allAssets.map((a) => a.token.symbol));
+  const totalValue = computeTotalValue(allAssets, priceMap);
+  return toAssetDTO(created, totalValue, priceMap);
 }
 
 export async function listAssets(
@@ -100,13 +102,16 @@ export async function listAssets(
   slug?: string,
 ): Promise<AssetDTO[]> {
   const allAssets = await findAllAssetsByPortfolioId(portfolio.id);
-  const totalValue = computeTotalValue(allAssets);
+  // retrofit-15: overlay live price on the whole portfolio (totalValue spans every
+  // asset, not just the slug-filtered display set).
+  const priceMap = await getLivePriceMap(allAssets.map((a) => a.token.symbol));
+  const totalValue = computeTotalValue(allAssets, priceMap);
 
   const display: AssetWithToken[] = slug
     ? allAssets.filter((a) => a.token.symbol.toLowerCase() === slug.toLowerCase())
     : allAssets;
 
-  return display.map((a) => toAssetDTO(a, totalValue));
+  return display.map((a) => toAssetDTO(a, totalValue, priceMap));
 }
 
 export async function getAsset(
@@ -119,8 +124,9 @@ export async function getAsset(
   }
 
   const allAssets = await findAllAssetsByPortfolioId(portfolio.id);
-  const totalValue = computeTotalValue(allAssets);
-  return toAssetDTO(asset, totalValue);
+  const priceMap = await getLivePriceMap(allAssets.map((a) => a.token.symbol));
+  const totalValue = computeTotalValue(allAssets, priceMap);
+  return toAssetDTO(asset, totalValue, priceMap);
 }
 
 export async function updateAsset(
@@ -141,8 +147,9 @@ export async function updateAsset(
       : existing;
 
   const allAssets = await findAllAssetsByPortfolioId(portfolio.id);
-  const totalValue = computeTotalValue(allAssets);
-  return toAssetDTO(asset, totalValue);
+  const priceMap = await getLivePriceMap(allAssets.map((a) => a.token.symbol));
+  const totalValue = computeTotalValue(allAssets, priceMap);
+  return toAssetDTO(asset, totalValue, priceMap);
 }
 
 export async function removeAsset(

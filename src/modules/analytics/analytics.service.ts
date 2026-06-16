@@ -15,6 +15,7 @@
 // both via the shared portfolioDerivedCacheKeys list.
 
 import { redis } from '../../lib/redis.js';
+import { getLivePriceMap } from '../../lib/live-price.js';
 import { computeDerived } from '../portfolios/derive.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import { getDepositWithdrawalTotals } from '../transactions/transactions.service.js';
@@ -26,7 +27,12 @@ import { findAllAssetsByPortfolioId } from '../assets/assets.repository.js';
 import { computeTotalValue } from '../assets/assets.dto.js';
 import type { SummaryDTO, PerformanceDTO, HoldingsDTO } from './analytics.dto.js';
 
-const CACHE_TTL_S = 300;
+// retrofit-15: these caches are price-dependent (summary.totalValue and holdings values
+// track live price), so dropped from 5 min to 60s to match the `price:<SYMBOL>` TTL —
+// "latest at page-load" only holds if the cache can't outlive a tick. Performance
+// (snapshot series) isn't price-sensitive but shares the constant; the extra recompute
+// is cheap at MVP scale.
+const CACHE_TTL_S = 60;
 
 /**
  * Round a derived analytics metric to a fixed wire scale. These values are JS-float
@@ -115,13 +121,16 @@ async function buildPerformance(portfolioId: number): Promise<PerformanceDTO> {
 
 async function buildHoldings(portfolio: PortfolioWithRelations): Promise<HoldingsDTO> {
   const assets = await findAllAssetsByPortfolioId(portfolio.id);
-  const totalValue = computeTotalValue(assets);
+  // retrofit-15: overlay live `price:<SYMBOL>` ticks over the seeded currentPrice — both
+  // in the totalValue denominator and per-holding value; a miss falls back to currentPrice.
+  const priceMap = await getLivePriceMap(assets.map((a) => a.token.symbol));
+  const totalValue = computeTotalValue(assets, priceMap);
 
   const items = assets
     .map((a) => ({
       symbol: a.token.symbol,
       balance: Number(a.balance.toString()),
-      price: Number(a.token.currentPrice.toString()),
+      price: priceMap.get(a.token.symbol) ?? Number(a.token.currentPrice.toString()),
     }))
     .filter((a) => a.balance > 0)
     .map((a) => {

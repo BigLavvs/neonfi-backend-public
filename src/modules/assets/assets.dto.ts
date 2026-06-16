@@ -22,9 +22,16 @@ export interface AssetDTO {
   updatedAt: Date;
 }
 
-export function toAssetDTO(asset: AssetWithToken, portfolioTotalValue: number): AssetDTO {
+// retrofit-15: `priceMap` overlays the live `price:<SYMBOL>` tick over the seeded
+// currentPrice. Resolved once in the service (assets.service) and threaded in; a miss
+// (or no map) falls back to currentPrice. Optional so non-overlay callers stay valid.
+export function toAssetDTO(
+  asset: AssetWithToken,
+  portfolioTotalValue: number,
+  priceMap?: Map<string, number>,
+): AssetDTO {
   const balance = Number(asset.balance.toString());
-  const price = Number(asset.token.currentPrice.toString());
+  const price = priceMap?.get(asset.token.symbol) ?? Number(asset.token.currentPrice.toString());
   const value = balance * price;
   const netDeposit = Number(asset.netDeposit.toString());
   const portfolioPercentage = portfolioTotalValue > 0 ? (value / portfolioTotalValue) * 100 : 0;
@@ -50,10 +57,13 @@ export function toAssetDTO(asset: AssetWithToken, portfolioTotalValue: number): 
   };
 }
 
-export function computeTotalValue(assets: AssetWithToken[]): number {
+export function computeTotalValue(
+  assets: AssetWithToken[],
+  priceMap?: Map<string, number>,
+): number {
   return assets.reduce((sum, a) => {
     const balance = Number(a.balance.toString());
-    const price = Number(a.token.currentPrice.toString());
+    const price = priceMap?.get(a.token.symbol) ?? Number(a.token.currentPrice.toString());
     return sum + balance * price;
   }, 0);
 }
