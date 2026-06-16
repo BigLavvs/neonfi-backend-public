@@ -15,15 +15,17 @@ import { clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 // Stripe mock
 // ---------------------------------------------------------------------------
 
-const { mockConstructEvent, mockSubscriptionsRetrieve } = vi.hoisted(() => ({
+const { mockConstructEvent, mockSubscriptionsRetrieve, mockInvoicesRetrieve } = vi.hoisted(() => ({
   mockConstructEvent: vi.fn(),
   mockSubscriptionsRetrieve: vi.fn(),
+  mockInvoicesRetrieve: vi.fn(),
 }));
 
 vi.mock('stripe', () => {
   const Stripe = vi.fn().mockImplementation(() => ({
     webhooks: { constructEvent: mockConstructEvent },
     subscriptions: { retrieve: mockSubscriptionsRetrieve },
+    invoices: { retrieve: mockInvoicesRetrieve },
   }));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (Stripe as any).errors = {
@@ -166,6 +168,10 @@ beforeEach(async () => {
   mockSubscriptionsRetrieve.mockResolvedValue({
     items: { data: [{ current_period_start: 1748678400, current_period_end: 1751356800 }] },
   });
+  // dahlia (Basil 2025-03-31+): invoice.payment_intent was removed; the PI is
+  // reached by expanding payments.data[].payment.payment_intent. Default to an
+  // empty payments list; invoice tests override with their own PI per-test.
+  mockInvoicesRetrieve.mockResolvedValue({ payments: { data: [] } });
   await truncateAllUserData();
   await clearRedisAuthKeys();
   const stripeKeys = await redis.keys('stripe_event:*');
@@ -177,10 +183,10 @@ beforeEach(async () => {
 // ---------------------------------------------------------------------------
 
 it('86: valid sig → 200 { received: true }', async () => {
-  // invoice.payment_failed with non-existent subscription: handler returns early, no error
+  // invoice.payment_failed with non-existent subscription: handler returns early, no error.
+  // dahlia shape: no top-level payment_intent (resolved via payments expansion when needed).
   const event = makeEvent('invoice.payment_failed', {
     parent: { subscription_details: { subscription: 'sub_nonexistent' } },
-    payment_intent: null,
     amount_due: 999,
     currency: 'usd',
     next_payment_attempt: null,
@@ -237,9 +243,14 @@ it('89: idempotency — same event ID twice → second returns duplicate: true; 
   const userId = await createUser('complete');
   const subId = await createProSubscription(userId);
 
+  // dahlia: PI resolved via stripe.invoices.retrieve → payments.data[0].payment.payment_intent.
+  mockInvoicesRetrieve.mockResolvedValue({
+    payments: { data: [{ payment: { payment_intent: 'pi_idempotency_test' } }] },
+  });
+
   const event = makeEvent('invoice.payment_succeeded', {
+    id: 'in_idempotency_test',
     parent: { subscription_details: { subscription: STRIPE_SUB_ID } },
-    payment_intent: 'pi_idempotency_test',
     amount_paid: 999,
     currency: 'usd',
     period_start: 1748678400,
@@ -365,9 +376,14 @@ it('92: invoice.payment_succeeded → Payment row created, Subscription period d
   const newPeriodStart = 1751356800; // 2026-07-01
   const newPeriodEnd = 1753948800;   // 2026-08-01
 
+  // dahlia: no top-level payment_intent — resolve via the payments expansion.
+  mockInvoicesRetrieve.mockResolvedValueOnce({
+    payments: { data: [{ payment: { payment_intent: 'pi_invoice_succeeded_001' } }] },
+  });
+
   const event = makeEvent('invoice.payment_succeeded', {
+    id: 'in_invoice_succeeded_001',
     parent: { subscription_details: { subscription: STRIPE_SUB_ID } },
-    payment_intent: 'pi_invoice_succeeded_001',
     amount_paid: 999,
     currency: 'usd',
     period_start: newPeriodStart,
@@ -377,6 +393,11 @@ it('92: invoice.payment_succeeded → Payment row created, Subscription period d
 
   const res = await webhookPost(event);
   expect(res.status).toBe(200);
+
+  // The invoice is retrieved with the payments expansion to recover the PI.
+  expect(mockInvoicesRetrieve).toHaveBeenCalledWith('in_invoice_succeeded_001', {
+    expand: ['payments.data.payment.payment_intent'],
+  });
 
   const payment = await prisma.payment.findFirst({ where: { subscriptionId: subId } });
   expect(payment).not.toBeNull();
@@ -397,9 +418,14 @@ it('93: invoice.payment_failed → Payment row created with status=failed; Subsc
   const userId = await createUser('complete');
   const subId = await createProSubscription(userId);
 
+  // dahlia: no top-level payment_intent — resolve via the payments expansion.
+  mockInvoicesRetrieve.mockResolvedValueOnce({
+    payments: { data: [{ payment: { payment_intent: 'pi_failed_001' } }] },
+  });
+
   const event = makeEvent('invoice.payment_failed', {
+    id: 'in_failed_001',
     parent: { subscription_details: { subscription: STRIPE_SUB_ID } },
-    payment_intent: 'pi_failed_001',
     amount_due: 999,
     currency: 'usd',
     next_payment_attempt: 1751443200,

@@ -46,6 +46,32 @@ function toStr(val: string | { id: string } | null | undefined): string | null {
   return typeof val === 'string' ? val : val.id;
 }
 
+/**
+ * Resolve the PaymentIntent id for an invoice. The Basil release (2025-03-31)
+ * removed the top-level `payment_intent` from the Invoice object — it now lives
+ * under `payments.data[].payment.payment_intent`, which the webhook payload does
+ * NOT expand (verified against node_modules/stripe/cjs/resources/Invoices.d.ts;
+ * apiVersion pinned to dahlia in src/lib/stripe.ts). Try the legacy top-level
+ * field first (in case the pinned types still surface it), then retrieve the
+ * invoice with the payments expansion. Returns null when it can't be resolved —
+ * the caller decides whether to skip or fall back.
+ */
+async function resolveInvoicePaymentIntentId(invoice: {
+  id?: string;
+  payment_intent?: string | { id: string } | null;
+}): Promise<string | null> {
+  const legacy = toStr(invoice.payment_intent ?? null);
+  if (legacy) return legacy;
+  if (!invoice.id) return null;
+  const full = await stripe.invoices.retrieve(invoice.id, {
+    expand: ['payments.data.payment.payment_intent'],
+  });
+  const pay = (full as unknown as {
+    payments?: { data?: Array<{ payment?: { payment_intent?: string | { id: string } | null } }> };
+  }).payments?.data?.[0];
+  return toStr(pay?.payment?.payment_intent ?? null);
+}
+
 // ---------------------------------------------------------------------------
 // checkout.session.completed
 // ---------------------------------------------------------------------------
@@ -136,13 +162,17 @@ export async function handleCheckoutSessionCompleted(event: Stripe.Event): Promi
 // ---------------------------------------------------------------------------
 
 export async function handleInvoicePaymentSucceeded(event: Stripe.Event): Promise<void> {
-  // Basil (2025-03-31)+ removed `subscription` from Invoice; the ref now lives at
-  // parent.subscription_details.subscription. period_start/end remain top-level
-  // (verified against the pinned dahlia SDK types — src/lib/stripe.ts).
+  // Basil (2025-03-31)+ removed BOTH `subscription` and `payment_intent` from the
+  // Invoice object. The sub ref now lives at parent.subscription_details.subscription;
+  // the PaymentIntent is reached by expanding payments.data.payment.payment_intent
+  // (resolved below via retrieve — the webhook payload isn't expanded). amount_paid,
+  // currency and period_start/end remain top-level (verified against the pinned dahlia
+  // SDK types — src/lib/stripe.ts; node_modules/stripe/cjs/resources/Invoices.d.ts).
   const invoice = event.data.object as unknown as {
+    id?: string;
     subscription?: string | { id: string } | null;
     parent?: { subscription_details?: { subscription?: string | { id: string } | null } | null } | null;
-    payment_intent: string | null;
+    payment_intent?: string | { id: string } | null;
     amount_paid: number;
     currency: string;
     period_start: number;
@@ -151,10 +181,15 @@ export async function handleInvoicePaymentSucceeded(event: Stripe.Event): Promis
   const stripeSubscriptionId = toStr(
     invoice.parent?.subscription_details?.subscription ?? invoice.subscription,
   );
-  const paymentIntentId = toStr(invoice.payment_intent);
+  if (!stripeSubscriptionId) {
+    console.warn('[webhooks] invoice.payment_succeeded: missing subscription', { eventId: event.id });
+    return;
+  }
 
-  if (!stripeSubscriptionId || !paymentIntentId) {
-    console.warn('[webhooks] invoice.payment_succeeded: missing subscription or payment_intent', { eventId: event.id });
+  const paymentIntentId = await resolveInvoicePaymentIntentId(invoice);
+  if (!paymentIntentId) {
+    // Don't fabricate an id — charge.refunded later matches on the real PI.
+    console.warn('[webhooks] invoice.payment_succeeded: could not resolve payment_intent', { eventId: event.id });
     return;
   }
 
@@ -210,11 +245,13 @@ export async function handleInvoicePaymentSucceeded(event: Stripe.Event): Promis
 
 export async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
   // Basil (2025-03-31)+ relocated the subscription ref to
-  // parent.subscription_details.subscription (src/lib/stripe.ts pins dahlia).
+  // parent.subscription_details.subscription and removed invoice.payment_intent
+  // (resolved below via the payments expansion). src/lib/stripe.ts pins dahlia.
   const invoice = event.data.object as unknown as {
+    id?: string;
     subscription?: string | { id: string } | null;
     parent?: { subscription_details?: { subscription?: string | { id: string } | null } | null } | null;
-    payment_intent: string | null;
+    payment_intent?: string | { id: string } | null;
     amount_due: number;
     currency: string;
     next_payment_attempt: number | null;
@@ -237,9 +274,10 @@ export async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<v
     return;
   }
 
-  // Use payment_intent if present; fall back to a stable composite key so the
-  // @unique constraint is still satisfied when Stripe retries without a new PI.
-  const intentId = invoice.payment_intent ?? `failed_${event.id}`;
+  // Resolve the PI via the payments expansion (Basil removed invoice.payment_intent);
+  // fall back to a stable composite key so the @unique constraint is still satisfied
+  // when Stripe retries without a new PI (or the PI can't be resolved).
+  const intentId = (await resolveInvoicePaymentIntentId(invoice)) ?? `failed_${event.id}`;
 
   const failedStatus = await prisma.paymentStatus.findUniqueOrThrow({ where: { name: 'failed' } });
 
