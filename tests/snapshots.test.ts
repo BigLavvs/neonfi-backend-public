@@ -10,7 +10,7 @@
 // Tests 296–301 (Stage 13 job) + 321–325 (retrofit-3: derive cache, real
 // pnlAllTime, missed detection, cache invalidation).
 
-import { it, beforeEach, afterAll, expect, vi } from 'vitest';
+import { it, beforeAll, beforeEach, afterAll, expect, vi } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
 import { truncateAllUserData } from './helpers.js';
@@ -89,6 +89,20 @@ async function seedBtcAsset(portfolioId: number, balance: number): Promise<numbe
 }
 
 const todayUtcYmd = (): string => new Date().toISOString().slice(0, 10);
+
+// ---------------------------------------------------------------------------
+// retrofit-22: one-time TimescaleDB probe. drop_chunks (test 300) is a TimescaleDB
+// function — present on Neon, absent on local vanilla Postgres (DATABASE_URL_TEST).
+// Probe once so #300 can SKIP (not fail / not silently pass) when the extension is
+// missing, while still running on Neon.
+// ---------------------------------------------------------------------------
+
+let hasTimescale = false;
+beforeAll(async () => {
+  const rows = await prisma.$queryRaw<Array<{ n: bigint }>>`
+    SELECT count(*)::bigint AS n FROM pg_extension WHERE extname = 'timescaledb'`;
+  hasTimescale = Number(rows[0]?.n ?? 0) > 0;
+});
 
 // ---------------------------------------------------------------------------
 // Setup — clear the hypertable FIRST so the cascade-truncate only ever reaches an
@@ -225,7 +239,9 @@ it('299: one portfolio throwing in computeDerived does not abort the job — fai
 // 300: drop_chunks runs after the loop and uses SNAPSHOT_RETENTION_DAYS
 // ---------------------------------------------------------------------------
 
-it('300: drop_chunks runs after snapshotting — dropChunksSucceeded is true and the SQL is built from SNAPSHOT_RETENTION_DAYS', async () => {
+it('300: drop_chunks runs after snapshotting — dropChunksSucceeded is true and the SQL is built from SNAPSHOT_RETENTION_DAYS', async (ctx) => {
+  if (!hasTimescale) ctx.skip(); // local vanilla Postgres has no drop_chunks; runs on Neon
+
   const userId = await createUser('snap.300@neonfi.test');
   await createProSub(userId);
   const portfolioId = await createManualPortfolio(userId, 'P300');
