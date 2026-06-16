@@ -36,6 +36,7 @@ import type {
 } from './transactions.schemas.js';
 import { recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
 import { computeUsdValue } from './usd-value.js';
+import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 
 // PnL/analytics cache invalidation (retrofit-2 §1.6; extended Stage 14 §1.9). Build
 // Guide §4.3/§6.3 mandate the portfolio's derived Redis caches be invalidated after
@@ -128,8 +129,13 @@ export async function createTransaction(
     prisma.transactionDirection.findUniqueOrThrow({ where: { name: body.direction } }),
   ]);
 
-  // Resolve token for native/erc20; check asset exists in portfolio
+  // Resolve token + asset. retrofit-27 §6: a `buy` of an unheld token AUTO-CREATES the
+  // asset (a pure trade: openingBalance=0, cost-unknown — the buy itself sets cost via
+  // recalc), subject to the same free-tier rank gate as POST /assets. sell/transfer of an
+  // unheld token stays ASSET_NOT_IN_PORTFOLIO. A `sell` exceeding holdings is rejected
+  // (INSUFFICIENT_BALANCE) — no negative balances via the create path (PATCH still allows it).
   let tokenId: number | null = null;
+  let autoCreateAsset = false;
   if (body.type === 'native' || body.type === 'erc20') {
     const token = await prisma.token.findUnique({ where: { symbol: body.symbol } });
     if (!token) {
@@ -139,17 +145,39 @@ export async function createTransaction(
         `Unknown token symbol: ${body.symbol}`,
       );
     }
+    tokenId = token.id;
     const asset = await prisma.asset.findUnique({
       where: { portfolioId_tokenId: { portfolioId: portfolio.id, tokenId: token.id } },
     });
-    if (!asset) {
-      throw new TransactionError(
-        400,
-        'ASSET_NOT_IN_PORTFOLIO',
-        'Add the token to your portfolio first before logging transactions for it',
-      );
+    if (body.direction === 'buy') {
+      if (!asset) {
+        const effectivePlan = await getEffectivePlan(portfolio.userId);
+        if (effectivePlan === 'free' && (token.rank === null || token.rank > 10)) {
+          throw new TransactionError(
+            403,
+            'PLAN_LIMIT_REACHED',
+            'Your plan only allows tokens ranked in the top 10',
+          );
+        }
+        autoCreateAsset = true;
+      }
+    } else {
+      // sell or transfer of an unheld token
+      if (!asset) {
+        throw new TransactionError(
+          400,
+          'ASSET_NOT_IN_PORTFOLIO',
+          'Add the token to your portfolio first before logging transactions for it',
+        );
+      }
+      if (body.direction === 'sell' && Number(body.amount) > Number(asset.balance.toString())) {
+        throw new TransactionError(
+          400,
+          'INSUFFICIENT_BALANCE',
+          'Cannot sell more than the current balance',
+        );
+      }
     }
-    tokenId = token.id;
   }
 
   // USD value at write-time for balance-affecting types (retrofit-2 §1.3). retrofit-7:
@@ -162,6 +190,15 @@ export async function createTransaction(
 
   const newTxId = await prisma.$transaction(
     async (tx) => {
+      // retrofit-27 §6: auto-create the Asset for a buy of an unheld token, inside the tx so
+      // it rolls back with the rest if the insert fails (e.g. duplicate hash). Pure trade —
+      // openingBalance/openingCostBasis default to 0/null; recalc sets cost from this buy.
+      if (autoCreateAsset && tokenId !== null) {
+        await tx.asset.create({
+          data: { portfolioId: portfolio.id, tokenId, balance: '0', netDeposit: '0' },
+        });
+      }
+
       let created: { id: number };
       try {
         created = await createTransactionRow(tx, {

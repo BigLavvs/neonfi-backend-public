@@ -18,6 +18,14 @@ export interface AssetDTO {
   netDeposit: number;
   pnlAllTime: number;
   pnlAllTimeValue: number;
+  // retrofit-27: average-cost PnL (additive). avgCost/costBasis are maintained by recalc;
+  // costTracked is false when avgCost is null (cost-unknown holding → unrealized PnL N/A).
+  avgCost: number | null;
+  costBasis: number;
+  costTracked: boolean;
+  unrealizedPnlValue: number;
+  unrealizedPnlPct: number;
+  realizedPnlValue: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -38,6 +46,15 @@ export function toAssetDTO(
   const pnlAllTimeValue = value - netDeposit;
   const pnlAllTime = netDeposit !== 0 ? ((value - netDeposit) / netDeposit) * 100 : 0;
 
+  // retrofit-27 average-cost fields. Cost-unknown holdings (avgCost null) are excluded
+  // from unrealized PnL; %-base guards Σ(costBasis)=0 → 0.
+  const avgCost = asset.avgCost !== null ? Number(asset.avgCost.toString()) : null;
+  const costBasis = Number(asset.costBasis.toString());
+  const costTracked = avgCost !== null;
+  const unrealizedPnlValue = costTracked ? balance * (price - avgCost) : 0;
+  const unrealizedPnlPct = costBasis !== 0 ? (unrealizedPnlValue / costBasis) * 100 : 0;
+  const realizedPnlValue = Number(asset.realizedPnl.toString());
+
   return {
     id: asset.id,
     portfolioId: asset.portfolioId,
@@ -52,6 +69,12 @@ export function toAssetDTO(
     netDeposit,
     pnlAllTime,
     pnlAllTimeValue,
+    avgCost,
+    costBasis,
+    costTracked,
+    unrealizedPnlValue,
+    unrealizedPnlPct,
+    realizedPnlValue,
     createdAt: asset.createdAt,
     updatedAt: asset.updatedAt,
   };

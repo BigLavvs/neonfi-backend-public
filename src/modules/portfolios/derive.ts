@@ -24,8 +24,19 @@ const CACHE_TTL_S = 60;
 
 export interface DerivedFields {
   totalValue: number;
+  // Legacy netDeposit-based all-time PnL (retrofit-2). KEPT and unchanged (retrofit-27
+  // Augment): pnlAllTimeValue = totalValue − Portfolio.netDeposit. The analytics summary
+  // still maps allTimePnl* from these.
   pnlAllTime: number;
   pnlAllTimeValue: number;
+  // retrofit-27: average-cost PnL (the new model). unrealizedPnlValue = Σ over cost-tracked
+  // assets of heldQty × (livePrice − avgCost); unrealizedPnlPct = that / Σ(costBasis) × 100
+  // (0 with no cost basis); realizedPnlValue = Σ Asset.realizedPnl; allTimePnlValue =
+  // unrealized + realized (the single avg-cost headline).
+  unrealizedPnlValue: number;
+  unrealizedPnlPct: number;
+  realizedPnlValue: number;
+  allTimePnlValue: number;
   pnl24h: number;
   pnl24hValue: number;
   pnl7d: number;
@@ -82,24 +93,44 @@ async function computeFromDb(portfolioId: number): Promise<DerivedFields> {
   const liveMap = await getLivePriceMap(assets.map((a) => a.token.symbol));
 
   let totalValue = 0;
+  // retrofit-27 average-cost accumulators. unrealized only counts cost-tracked assets
+  // (avgCost != null); costBasis is the basis of currently-held cost-known units.
+  let unrealizedPnlValue = 0;
+  let costBasisSum = 0;
+  let realizedPnlValue = 0;
   for (const a of assets) {
     const balance = Number(a.balance.toString());
     const price = liveMap.get(a.token.symbol) ?? Number(a.token.currentPrice.toString());
     totalValue += balance * price;
+
+    realizedPnlValue += Number(a.realizedPnl.toString());
+    if (a.avgCost !== null) {
+      unrealizedPnlValue += balance * (price - Number(a.avgCost.toString()));
+      costBasisSum += Number(a.costBasis.toString());
+    }
   }
 
   // All-time PnL (retrofit-3 §1.6): now that Portfolio.netDeposit is maintained
   // (retrofit-2), pnlAllTimeValue = totalValue − netDeposit. Percentage is the
   // relative change vs cost basis; guard divide-by-zero for portfolios with no
-  // deposits (return 0 rather than NaN/Infinity).
+  // deposits (return 0 rather than NaN/Infinity). KEPT unchanged by retrofit-27.
   const netDeposit = portfolio ? Number(portfolio.netDeposit.toString()) : 0;
   const pnlAllTimeValue = totalValue - netDeposit;
   const pnlAllTime = netDeposit !== 0 ? (pnlAllTimeValue / netDeposit) * 100 : 0;
+
+  // retrofit-27 average-cost headline: unrealized % over Σ cost basis (guarded), and
+  // all-time = unrealized + realized.
+  const unrealizedPnlPct = costBasisSum !== 0 ? (unrealizedPnlValue / costBasisSum) * 100 : 0;
+  const allTimePnlValue = unrealizedPnlValue + realizedPnlValue;
 
   return {
     totalValue,
     pnlAllTime,
     pnlAllTimeValue,
+    unrealizedPnlValue,
+    unrealizedPnlPct,
+    realizedPnlValue,
+    allTimePnlValue,
     // 24h/7d/30d PnL needs historical snapshot data — owned by Stage 14 analytics
     // (cross-module read of BalanceSnapshot belongs there, not here).
     pnl24h: 0,

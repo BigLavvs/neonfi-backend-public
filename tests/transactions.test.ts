@@ -444,15 +444,16 @@ it('206: POST with unknown token symbol → 400 UNKNOWN_TOKEN_SYMBOL', async () 
   expect(json.error.code).toBe('UNKNOWN_TOKEN_SYMBOL');
 });
 
-it('207: POST with token symbol not in portfolio (no Asset row) → 400 ASSET_NOT_IN_PORTFOLIO', async () => {
+it('207: POST SELL of a token not in portfolio (no Asset row) → 400 ASSET_NOT_IN_PORTFOLIO (retrofit-27 §6)', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
-  // BTC is a known token but no asset added to this portfolio
+  // BTC is a known token but no asset added. A BUY would auto-create it (test 345);
+  // a SELL/transfer of an unheld token is still rejected.
 
   const res = await txPost(
     portfolioId,
-    { type: 'native', direction: 'buy', amount: '1.0', symbol: 'BTC', timestamp: TIMESTAMP },
+    { type: 'native', direction: 'sell', amount: '1.0', symbol: 'BTC', timestamp: TIMESTAMP },
     cookies,
   );
   expect(res.status).toBe(400);
@@ -1415,3 +1416,74 @@ it('322: TransactionListDTO surfaces transferGroupId — set on transfer legs, n
   expect(sellLeg?.transferGroupId).toBe(groupId);
   expect(ordinaryBuy?.transferGroupId).toBeNull();
 });
+
+// ---------------------------------------------------------------------------
+// 345-347. retrofit-27 — auto-add asset on buy, reject oversell, average-cost realized PnL.
+// ---------------------------------------------------------------------------
+
+it('345: POST BUY of a token NOT yet in the portfolio → 201; asset auto-created; balance + avgCost set (retrofit-27 §6)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await clearPriceCache('BTC');
+  // No addAssetDirectly — the buy itself creates the asset (auto-add).
+
+  const res = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '0.5', symbol: 'BTC', priceAtTime: '30000', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+
+  expect(await prisma.asset.count({ where: { portfolioId } })).toBe(1);
+  const asset = await prisma.asset.findUniqueOrThrow({
+    where: { portfolioId_tokenId: { portfolioId, tokenId: btcId } },
+  });
+  expect(Number(asset.balance.toString())).toBeCloseTo(0.5);
+  // The buy sets cost via the average-cost model (entered price drives avgCost).
+  expect(Number(asset.avgCost!.toString())).toBeCloseTo(30000);
+  expect(Number(asset.costBasis.toString())).toBeCloseTo(0.5 * 30000); // 15000
+});
+
+it('346: POST SELL exceeding holdings → 400 INSUFFICIENT_BALANCE; balance unchanged (retrofit-27 §6)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  // Hold 1 BTC.
+  await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '1.0', symbol: 'BTC', timestamp: TIMESTAMP }, cookies);
+  expect(await getAssetBalance(portfolioId, btcId)).toBeCloseTo(1.0);
+
+  // Attempt to sell 2 BTC → rejected, no negative balance.
+  const res = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'sell', amount: '2.0', symbol: 'BTC', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(400);
+  expect(((await res.json()) as { error: { code: string } }).error.code).toBe('INSUFFICIENT_BALANCE');
+  expect(await getAssetBalance(portfolioId, btcId)).toBeCloseTo(1.0); // unchanged
+});
+
+it('347: average-cost realized PnL — buy 1@100, buy 1@200, sell 1@500 → avgCost 150, realizedPnl 350 (retrofit-27 §2)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+  await clearPriceCache('BTC');
+
+  await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '1', symbol: 'BTC', priceAtTime: '100', timestamp: '2026-01-01T00:00:00.000Z' }, cookies);
+  await txPost(portfolioId, { type: 'native', direction: 'buy', amount: '1', symbol: 'BTC', priceAtTime: '200', timestamp: '2026-01-02T00:00:00.000Z' }, cookies);
+  await txPost(portfolioId, { type: 'native', direction: 'sell', amount: '1', symbol: 'BTC', priceAtTime: '500', timestamp: '2026-01-03T00:00:00.000Z' }, cookies);
+
+  const asset = await prisma.asset.findUniqueOrThrow({
+    where: { portfolioId_tokenId: { portfolioId, tokenId: btcId } },
+  });
+  // After 2 buys: qty 2, avg 150. Sell 1 @500 → realized 1×(500−150)=350; remaining qty 1 @150.
+  expect(Number(asset.balance.toString())).toBeCloseTo(1);
+  expect(Number(asset.avgCost!.toString())).toBeCloseTo(150);
+  expect(Number(asset.costBasis.toString())).toBeCloseTo(150);
+  expect(Number(asset.realizedPnl.toString())).toBeCloseTo(350);
+}, 90000);

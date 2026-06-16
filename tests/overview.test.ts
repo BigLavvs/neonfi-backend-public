@@ -252,6 +252,11 @@ it('371: empty user (no portfolios) → 200, all totals 0, all arrays empty (NOT
     pnl24hValue: 0,
     pnlAllTime: 0,
     pnlAllTimeValue: 0,
+    // retrofit-27 average-cost aggregate fields (additive)
+    unrealizedPnlValue: 0,
+    unrealizedPnlPct: 0,
+    realizedPnlValue: 0,
+    allTimePnlValue: 0,
     portfolioCount: 0,
     transactionCount: 0,
   });

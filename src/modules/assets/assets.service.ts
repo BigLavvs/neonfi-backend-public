@@ -2,7 +2,9 @@ import { prisma } from '../../lib/prisma.js';
 import { getLivePriceMap } from '../../lib/live-price.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
-import { seedAcquisitionInTx, invalidatePnlCache } from '../transactions/transactions.service.js';
+import { invalidatePnlCache } from '../transactions/transactions.service.js';
+import { recalcAssetBalance, recalcPortfolioNetDeposit } from '../transactions/recalc.js';
+import { findTokenPriceSnapshotOnOrBefore } from '../tokens/tokens.repository.js';
 import {
   findAllAssetsByPortfolioId,
   findAssetById,
@@ -35,12 +37,20 @@ function assertManualPortfolio(portfolio: PortfolioWithRelations): void {
   }
 }
 
+// retrofit-27 §5: create an OPENING position (a pre-existing holding, NOT a trade). Sets
+// the immutable Asset.opening* fields; recalc then derives balance + avgCost/costBasis from
+// the opening lot. There is no PATCH of opening fields (the redo path is DELETE + re-add).
 export async function addAsset(
   userId: number,
   portfolio: PortfolioWithRelations,
   body: CreateAssetBody,
 ): Promise<AssetDTO> {
   assertManualPortfolio(portfolio);
+
+  const balanceNum = Number(body.balance);
+  if (!(balanceNum > 0)) {
+    throw new AssetError(400, 'INVALID_BALANCE', 'Opening balance must be greater than 0');
+  }
 
   const token = await prisma.token.findUnique({ where: { id: body.tokenId } });
   if (!token) {
@@ -62,33 +72,49 @@ export async function addAsset(
     throw new AssetError(409, 'ASSET_ALREADY_EXISTS', 'This token is already in the portfolio');
   }
 
-  // retrofit-8: create the Asset and (when an acquisition amount is supplied) seed a
-  // native `buy` transaction in ONE atomic $transaction, so balance and cost-basis
-  // derive from the recalc model — one source of truth, accurate PnL via priceAtTime.
-  // amount omitted → just the asset at balance 0 (back-compat with the {tokenId}-only
-  // path). Validation above stays OUTSIDE the tx (cheap reads, fail fast).
-  const seed = body.amount !== undefined && Number(body.amount) > 0;
+  // Resolve the opening cost basis per the cost mode (all reads OUTSIDE the tx — fail fast).
+  let openingCostBasis: string | null = null;
+  let openingAt: Date | null = null;
+  if (body.cost.mode === 'avg') {
+    openingCostBasis = (balanceNum * Number(body.cost.avgCost)).toFixed(8);
+  } else if (body.cost.mode === 'historical') {
+    const asOf = new Date(body.cost.date);
+    const snap = await findTokenPriceSnapshotOnOrBefore(body.tokenId, asOf);
+    if (!snap) {
+      throw new AssetError(
+        400,
+        'PRICE_HISTORY_UNAVAILABLE',
+        'No price history on or before the requested date — choose average or no cost',
+        { tokenSymbol: token.symbol, date: body.cost.date },
+      );
+    }
+    openingCostBasis = (balanceNum * snap.price).toFixed(8);
+    openingAt = asOf;
+  }
+  // mode === 'none' → openingCostBasis stays null (cost-unknown holding).
+
   await prisma.$transaction(
     async (tx) => {
-      await tx.asset.create({ data: { portfolioId: portfolio.id, tokenId: body.tokenId } });
-      if (seed) {
-        await seedAcquisitionInTx(tx, {
+      await tx.asset.create({
+        data: {
           portfolioId: portfolio.id,
           tokenId: body.tokenId,
-          symbol: token.symbol,
-          amount: body.amount!,
-          priceAtTime: body.priceAtTime,
-          timestamp: body.timestamp,
-          notes: body.notes ?? null,
-        });
-      }
+          openingBalance: body.balance,
+          openingCostBasis,
+          openingAt,
+        },
+      });
+      // recalc seeds balance = openingBalance and avgCost/costBasis from the opening lot
+      // (no transactions yet); netDeposit stays 0 (opening is not a deposit).
+      await recalcAssetBalance(tx, portfolio.id, body.tokenId);
+      await recalcPortfolioNetDeposit(tx, portfolio.id);
     },
     { timeout: 15000 },
   );
 
   await invalidatePnlCache(portfolio.id);
 
-  // DTO read AFTER the commit (STOP-gate §6.1): balance/netDeposit now reflect the seed.
+  // DTO read AFTER the commit (STOP-gate §6.1): balance/avgCost/costBasis reflect the opening.
   const created = await findAssetByPortfolioToken(portfolio.id, body.tokenId);
   if (!created) throw new Error('Asset not found after creation');
   const allAssets = await findAllAssetsByPortfolioId(portfolio.id);

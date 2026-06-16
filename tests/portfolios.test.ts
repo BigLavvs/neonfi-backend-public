@@ -469,8 +469,12 @@ it('154: GET /portfolios with 2 portfolios → ordered createdAt asc, each has s
   expect(first!.slug).toBe('alpha');
   expect(second!.name).toBe('Beta');
 
-  // All derived fields should be 0
-  const derived = ['totalValue', 'pnlAllTime', 'pnlAllTimeValue', 'pnl24h', 'pnl24hValue', 'pnl7d', 'pnl7dValue', 'pnl30d', 'pnl30dValue'];
+  // All derived fields should be 0 (incl. retrofit-27 average-cost fields, additive)
+  const derived = [
+    'totalValue', 'pnlAllTime', 'pnlAllTimeValue', 'pnl24h', 'pnl24hValue',
+    'pnl7d', 'pnl7dValue', 'pnl30d', 'pnl30dValue',
+    'unrealizedPnlValue', 'unrealizedPnlPct', 'realizedPnlValue', 'allTimePnlValue',
+  ];
   for (const field of derived) {
     expect(first![field]).toBe(0);
   }

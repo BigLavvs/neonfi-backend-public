@@ -48,6 +48,21 @@ export async function findTokenPriceSnapshotsSince(
   return rows.map((r) => ({ snapshotDate: r.snapshotDate, price: Number(r.price.toString()) }));
 }
 
+// retrofit-27: nearest price snapshot ON OR BEFORE `date` (the most recent daily close at
+// or before the opening-balance as-of date). Powers the `historical` opening-cost mode;
+// null when the token has no snapshot that old, so the caller can 400 PRICE_HISTORY_UNAVAILABLE.
+export async function findTokenPriceSnapshotOnOrBefore(
+  tokenId: number,
+  date: Date,
+): Promise<{ snapshotDate: Date; price: number } | null> {
+  const row = await prisma.tokenPriceSnapshot.findFirst({
+    where: { tokenId, snapshotDate: { lte: date } },
+    orderBy: { snapshotDate: 'desc' },
+    select: { snapshotDate: true, price: true },
+  });
+  return row ? { snapshotDate: row.snapshotDate, price: Number(row.price.toString()) } : null;
+}
+
 // retrofit-21: min/max snapshot price over ALL of a token's history (not windowed) —
 // the "high/low since tracking began" feeding ATH/ATL. Null when no snapshots exist yet.
 export async function aggregateTokenPriceExtremes(

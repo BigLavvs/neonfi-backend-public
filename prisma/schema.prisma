@@ -318,7 +318,22 @@ model Asset {
   token       Token     @relation(fields: [tokenId], references: [id])
   tokenId     Int
   balance     Decimal   @default(0) @db.Decimal(20, 8)
+  // NOTE (retrofit-2, kept by retrofit-27): Σ(buy usdValue) − Σ(sell usdValue) over
+  // this asset's transactions. retrofit-27 introduced the average-cost model below as
+  // the new PnL basis, but netDeposit stays MAINTAINED by recalc (Augment decision) so
+  // the legacy netDeposit-based pnlAllTime*/analytics-summary numbers don't go stale.
   netDeposit  Decimal   @default(0) @db.Decimal(20, 8)
+  // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-27): average-cost
+  // PnL + opening balances. An OPENING position seeds a pre-existing holding that is NOT a
+  // trade (written once at asset creation; immutable — no PATCH path). Cost-unknown opening
+  // (openingCostBasis null) is excluded from average cost AND unrealized PnL.
+  openingBalance   Decimal   @default(0) @db.Decimal(20, 8) // starting qty (same scale as balance)
+  openingCostBasis Decimal?  @db.Decimal(20, 8) // total USD cost of the opening qty; null = "don't track cost"
+  openingAt        DateTime? // as-of date for 'historical' cost mode (null otherwise)
+  // Maintained by recalc.ts from the opening lot + chronological buys/sells:
+  realizedPnl Decimal   @default(0) @db.Decimal(20, 8) // cumulative realized PnL (USD)
+  avgCost     Decimal?  @db.Decimal(20, 8) // average cost of currently-held cost-known units; null = no cost basis
+  costBasis   Decimal   @default(0) @db.Decimal(20, 8) // USD basis of the currently-held cost-known units
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt

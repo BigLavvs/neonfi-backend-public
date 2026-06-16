@@ -17,8 +17,14 @@ export interface OverviewDTO {
     totalValue: number; // Σ portfolio.totalValue
     pnl24h: number; // aggregate % (guarded divide-by-zero → 0)
     pnl24hValue: number; // Σ portfolio.pnl24hValue
-    pnlAllTime: number; // aggregate %
-    pnlAllTimeValue: number; // Σ portfolio.pnlAllTimeValue
+    pnlAllTime: number; // aggregate % (legacy netDeposit-based — KEPT, retrofit-27 Augment)
+    pnlAllTimeValue: number; // Σ portfolio.pnlAllTimeValue (legacy netDeposit-based)
+    // retrofit-27: average-cost PnL aggregate (additive). allTimePnlValue = unrealized +
+    // realized; unrealizedPnlPct is over Σ(costBasis) across all the user's assets.
+    unrealizedPnlValue: number;
+    unrealizedPnlPct: number;
+    realizedPnlValue: number;
+    allTimePnlValue: number;
     portfolioCount: number;
     transactionCount: number; // across all the user's portfolios
   };
@@ -35,6 +41,11 @@ export interface OverviewDTO {
     pnl24hValue: number;
     pnlAllTime: number;
     pnlAllTimeValue: number;
+    // retrofit-27: average-cost PnL per portfolio (additive).
+    unrealizedPnlValue: number;
+    unrealizedPnlPct: number;
+    realizedPnlValue: number;
+    allTimePnlValue: number;
   }>;
   valueHistory: Array<{ date: string; value: number }>; // 'YYYY-MM-DD', aggregate, asc
   allocation: Array<{ symbol: string; value: number; percentage: number }>; // desc by value

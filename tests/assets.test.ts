@@ -200,12 +200,13 @@ beforeEach(async () => {
 // 173-180. POST /portfolios/:portfolioId/assets
 // ---------------------------------------------------------------------------
 
-it('173: POST manual portfolio happy path → 201, balance=0, netDeposit=0, full DTO shape', async () => {
+// retrofit-27 §5: POST /assets now creates an OPENING position { tokenId, balance(>0), cost }.
+it('173: POST manual opening position (cost=none) → 201, balance set, cost-unknown, full DTO shape', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: btcId }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: btcId, balance: '1', cost: { mode: 'none' } }, cookies);
   expect(res.status).toBe(201);
 
   const json = await res.json() as { data: { asset: Record<string, unknown> } };
@@ -214,13 +215,17 @@ it('173: POST manual portfolio happy path → 201, balance=0, netDeposit=0, full
   expect(a.tokenId).toBe(btcId);
   expect(a.symbol).toBe('BTC');
   expect(a.name).toBe('Bitcoin');
-  expect(a.balance).toBe(0);
-  expect(a.netDeposit).toBe(0);
+  expect(a.balance).toBe(1);
+  expect(a.netDeposit).toBe(0); // opening is not a deposit
   expect(a.price).toBe(93000);
-  expect(a.value).toBe(0);
-  expect(a.portfolioPercentage).toBe(0);
-  expect(a.pnlAllTime).toBe(0);
-  expect(a.pnlAllTimeValue).toBe(0);
+  expect(a.value).toBe(93000); // 1 × 93000
+  expect(a.portfolioPercentage).toBe(100);
+  // retrofit-27 average-cost fields — cost-unknown holding
+  expect(a.avgCost).toBeNull();
+  expect(a.costTracked).toBe(false);
+  expect(a.costBasis).toBe(0);
+  expect(a.unrealizedPnlValue).toBe(0);
+  expect(a.realizedPnlValue).toBe(0);
   expect(typeof a.id).toBe('number');
   expect(typeof a.createdAt).toBe('string');
   expect(await prisma.asset.count()).toBe(1);
@@ -231,7 +236,7 @@ it('174: POST connected portfolio → 403 CONNECTED_PORTFOLIO_READ_ONLY; no asse
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'connected');
 
-  const res = await assetPost(portfolioId, { tokenId: btcId }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: btcId, balance: '1', cost: { mode: 'none' } }, cookies);
   expect(res.status).toBe(403);
 
   const json = await res.json() as { error: { code: string } };
@@ -244,7 +249,7 @@ it('175: POST non-existent tokenId → 400 INVALID_TOKEN', async () => {
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: 999999 }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: 999999, balance: '1', cost: { mode: 'none' } }, cookies);
   expect(res.status).toBe(400);
 
   const json = await res.json() as { error: { code: string } };
@@ -256,10 +261,10 @@ it('176: POST same tokenId twice → 201 then 409 ASSET_ALREADY_EXISTS', async (
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const first = await assetPost(portfolioId, { tokenId: btcId }, cookies);
+  const first = await assetPost(portfolioId, { tokenId: btcId, balance: '1', cost: { mode: 'none' } }, cookies);
   expect(first.status).toBe(201);
 
-  const second = await assetPost(portfolioId, { tokenId: btcId }, cookies);
+  const second = await assetPost(portfolioId, { tokenId: btcId, balance: '1', cost: { mode: 'none' } }, cookies);
   expect(second.status).toBe(409);
 
   const json = await second.json() as { error: { code: string } };
@@ -273,7 +278,7 @@ it('177: POST as free user with rank-1 token (BTC) → 201', async () => {
   await createFreeSubForUser(userId);
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: btcId }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: btcId, balance: '1', cost: { mode: 'none' } }, cookies);
   expect(res.status).toBe(201);
 });
 
@@ -283,7 +288,7 @@ it('178: POST as free user with rank-15 token (MATIC) → 403 PLAN_LIMIT_REACHED
   await createFreeSubForUser(userId);
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: maticId }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: maticId, balance: '1', cost: { mode: 'none' } }, cookies);
   expect(res.status).toBe(403);
 
   const json = await res.json() as { error: { code: string }; meta: Record<string, unknown> };
@@ -299,16 +304,20 @@ it('179: POST as pro user with rank-30 token (MKR) → 201 (no plan gate on Pro)
   await createProSubForUser(userId);
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: mkrId }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: mkrId, balance: '1', cost: { mode: 'none' } }, cookies);
   expect(res.status).toBe(201);
 });
 
-it('180: POST with extra balance field → 400 VALIDATION_ERROR (strict)', async () => {
+it('180: POST with unknown extra field → 400 VALIDATION_ERROR (strict)', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: btcId, balance: 1.5 }, cookies);
+  const res = await assetPost(
+    portfolioId,
+    { tokenId: btcId, balance: '1', cost: { mode: 'none' }, bogus: true },
+    cookies,
+  );
   expect(res.status).toBe(400);
 
   const json = await res.json() as { error: { code: string } };
@@ -601,60 +610,61 @@ function txList(portfolioId: number, cookies?: string): Promise<Response> {
   });
 }
 
-it('339: POST asset {tokenId, amount, priceAtTime} → asset seeded; balance/netDeposit derived; one native buy tx', async () => {
+it('339: POST opening avg-cost → asset created with avgCost/costBasis; NO transaction seeded (retrofit-27 §5)', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: btcId, amount: '2', priceAtTime: '100' }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: btcId, balance: '2', cost: { mode: 'avg', avgCost: '100' } }, cookies);
   expect(res.status).toBe(201);
 
   const json = await res.json() as { data: { asset: Record<string, unknown> } };
   const a = json.data.asset;
   expect(a.balance).toBe(2);
-  expect(a.netDeposit).toBe(200); // 2 × 100 (priceAtTime drives cost basis)
+  expect(a.avgCost).toBe(100);
+  expect(a.costBasis).toBe(200); // 2 × 100
+  expect(a.costTracked).toBe(true);
+  expect(a.netDeposit).toBe(0); // opening is not a deposit (no transaction)
+  // unrealized = 2 × (93000 − 100) = 185800
+  expect(a.unrealizedPnlValue).toBeCloseTo(2 * (93000 - 100));
+  expect(a.realizedPnlValue).toBe(0);
 
-  // Exactly one seeded native buy transaction, surfaced by GET transactions
-  const txRes = await txList(portfolioId, cookies);
-  expect(txRes.status).toBe(200);
-  const txJson = await txRes.json() as { data: { transactions: Array<Record<string, unknown>> } };
-  expect(txJson.data.transactions).toHaveLength(1);
-  const t = txJson.data.transactions[0]!;
-  expect(t.type).toBe('native');
-  expect(t.direction).toBe('buy');
-  expect(t.symbol).toBe('BTC');
-  expect(t.amount).toBe(2);
-  expect(t.usdValue).toBe(200);
-
-  // DB-side: asset row + transaction + native detail all present
+  // Opening seeds NO transaction (acquisitions go through New Transaction → Buy).
   expect(await prisma.asset.count()).toBe(1);
-  expect(await prisma.transaction.count()).toBe(1);
-  expect(await prisma.nativeTransactionDetail.count()).toBe(1);
+  expect(await prisma.transaction.count()).toBe(0);
+  expect(await prisma.nativeTransactionDetail.count()).toBe(0);
+
+  // GET transactions returns an empty list.
+  const txRes = await txList(portfolioId, cookies);
+  const txJson = await txRes.json() as { data: { transactions: unknown[] } };
+  expect(txJson.data.transactions).toHaveLength(0);
 });
 
-it('340: POST asset {tokenId} only (no amount) → asset at balance 0, no transaction seeded (back-compat)', async () => {
+it('340: POST opening cost=none → cost-unknown holding (avgCost null), no transaction', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: btcId }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: btcId, balance: '2', cost: { mode: 'none' } }, cookies);
   expect(res.status).toBe(201);
 
   const json = await res.json() as { data: { asset: Record<string, unknown> } };
-  expect(json.data.asset.balance).toBe(0);
-  expect(json.data.asset.netDeposit).toBe(0);
+  expect(json.data.asset.balance).toBe(2);
+  expect(json.data.asset.avgCost).toBeNull();
+  expect(json.data.asset.costTracked).toBe(false);
+  expect(json.data.asset.unrealizedPnlValue).toBe(0); // cost-unknown → no unrealized PnL
 
   expect(await prisma.asset.count()).toBe(1);
   expect(await prisma.transaction.count()).toBe(0);
 });
 
-it('341: POST asset with amount as free user on a rank>10 token (MATIC) → 403 PLAN_LIMIT_REACHED, nothing seeded', async () => {
+it('341: POST opening as free user on a rank>10 token (MATIC) → 403 PLAN_LIMIT_REACHED, nothing created', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   await createFreeSubForUser(userId);
   const portfolioId = await seedPortfolio(userId, 'manual');
 
-  const res = await assetPost(portfolioId, { tokenId: maticId, amount: '5', priceAtTime: '1' }, cookies);
+  const res = await assetPost(portfolioId, { tokenId: maticId, balance: '5', cost: { mode: 'avg', avgCost: '1' } }, cookies);
   expect(res.status).toBe(403);
 
   const json = await res.json() as { error: { code: string } };
@@ -663,4 +673,52 @@ it('341: POST asset with amount as free user on a rank>10 token (MATIC) → 403 
   // Rank gate runs before any write — no asset, no transaction
   expect(await prisma.asset.count()).toBe(0);
   expect(await prisma.transaction.count()).toBe(0);
+});
+
+it('392: POST opening historical with a snapshot on/before the date → costBasis = balance × nearest snapshot price (retrofit-27 §5)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  // TokenPriceSnapshot is GLOBAL catalog data (not cleaned by truncateAllUserData) —
+  // start clean, seed a BTC close at 50000 on 2026-06-01, and clean up at the end.
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btcId } });
+  await prisma.tokenPriceSnapshot.create({
+    data: { tokenId: btcId, price: '50000', snapshotDate: new Date('2026-06-01T00:00:00.000Z') },
+  });
+
+  const res = await assetPost(
+    portfolioId,
+    { tokenId: btcId, balance: '2', cost: { mode: 'historical', date: '2026-06-10T00:00:00.000Z' } },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+
+  const json = await res.json() as { data: { asset: Record<string, unknown> } };
+  const a = json.data.asset;
+  expect(a.balance).toBe(2);
+  expect(a.avgCost).toBe(50000); // nearest close on/before 2026-06-10
+  expect(a.costBasis).toBe(100000); // 2 × 50000
+  expect(a.costTracked).toBe(true);
+
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btcId } });
+});
+
+it('393: POST opening historical with NO snapshot on/before the date → 400 PRICE_HISTORY_UNAVAILABLE; nothing created', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btcId } }); // ensure none
+
+  const res = await assetPost(
+    portfolioId,
+    { tokenId: btcId, balance: '2', cost: { mode: 'historical', date: '2020-01-01T00:00:00.000Z' } },
+    cookies,
+  );
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('PRICE_HISTORY_UNAVAILABLE');
+  expect(await prisma.asset.count()).toBe(0);
 });

@@ -88,6 +88,10 @@ function emptyOverview(): OverviewAggregate {
       pnl24hValue: 0,
       pnlAllTime: 0,
       pnlAllTimeValue: 0,
+      unrealizedPnlValue: 0,
+      unrealizedPnlPct: 0,
+      realizedPnlValue: 0,
+      allTimePnlValue: 0,
       portfolioCount: 0,
       transactionCount: 0,
     },
@@ -215,13 +219,21 @@ async function buildOverview(
   // ---- totals (sum the value fields, recompute aggregate %s) ----
   let totalValue = 0;
   let pnlAllTimeValue = 0;
+  // retrofit-27 average-cost aggregate. unrealized/realized sum the per-portfolio derived
+  // values; the %-base Σ(costBasis) is accumulated in the allocation loop below (it already
+  // iterates every asset, and each asset row carries costBasis).
+  let unrealizedPnlValue = 0;
+  let realizedPnlValue = 0;
   for (const d of derivedList) {
     totalValue += d.totalValue;
     pnlAllTimeValue += d.pnlAllTimeValue;
+    unrealizedPnlValue += d.unrealizedPnlValue;
+    realizedPnlValue += d.realizedPnlValue;
   }
   // Guard divide-by-zero → 0 (never NaN/Infinity), mirroring computePnlPeriod.
   const costBasisAll = totalValue - pnlAllTimeValue;
   const pnlAllTime = costBasisAll === 0 ? 0 : (pnlAllTimeValue / costBasisAll) * 100;
+  const allTimePnlValue = unrealizedPnlValue + realizedPnlValue;
 
   // ---- 24h PnL from the daily snapshot history (retrofit-20) ----
   // derive.ts can't compute 24h without history, so it hardcodes pnl24h*=0. Recompute
@@ -248,6 +260,8 @@ async function buildOverview(
   const allocValueBySymbol = new Map<string, number>();
   const balanceBySymbol = new Map<string, number>();
   let grandTotal = 0;
+  // retrofit-27: Σ(costBasis) across every cost-tracked asset → the unrealized %-base.
+  let unrealizedCostBasisSum = 0;
 
   // retrofit-15: overlay live `price:<SYMBOL>` ticks on the allocation/grandTotal math
   // (the `totals`/per-portfolio totalValue already come from computeDerived, which the
@@ -268,6 +282,7 @@ async function buildOverview(
       allocValueBySymbol.set(a.token.symbol, (allocValueBySymbol.get(a.token.symbol) ?? 0) + value);
       balanceBySymbol.set(a.token.symbol, (balanceBySymbol.get(a.token.symbol) ?? 0) + balance);
       grandTotal += value;
+      if (a.avgCost !== null) unrealizedCostBasisSum += Number(a.costBasis.toString());
     }
     return {
       id: p.id,
@@ -282,8 +297,16 @@ async function buildOverview(
       pnl24hValue: round(d.pnl24hValue),
       pnlAllTime: round(d.pnlAllTime),
       pnlAllTimeValue: round(d.pnlAllTimeValue),
+      unrealizedPnlValue: round(d.unrealizedPnlValue),
+      unrealizedPnlPct: round(d.unrealizedPnlPct),
+      realizedPnlValue: round(d.realizedPnlValue),
+      allTimePnlValue: round(d.allTimePnlValue),
     };
   });
+
+  // retrofit-27: aggregate unrealized % over Σ(costBasis) across all the user's assets.
+  const unrealizedPnlPct =
+    unrealizedCostBasisSum !== 0 ? (unrealizedPnlValue / unrealizedCostBasisSum) * 100 : 0;
 
   // allocation: desc by value, % of grandTotal (guarded), rounded 2dp. Sort on the raw
   // value (like analytics buildHoldings), then round. Drop zero-value symbols (a token
@@ -314,6 +337,10 @@ async function buildOverview(
       pnl24hValue: round(pnl24hValue),
       pnlAllTime: round(pnlAllTime),
       pnlAllTimeValue: round(pnlAllTimeValue),
+      unrealizedPnlValue: round(unrealizedPnlValue),
+      unrealizedPnlPct: round(unrealizedPnlPct),
+      realizedPnlValue: round(realizedPnlValue),
+      allTimePnlValue: round(allTimePnlValue),
       portfolioCount: portfolios.length,
       transactionCount,
     },

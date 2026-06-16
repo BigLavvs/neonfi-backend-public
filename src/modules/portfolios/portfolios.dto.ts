@@ -19,6 +19,12 @@ export interface PortfolioDTO {
   totalValue: number;
   pnlAllTime: number;
   pnlAllTimeValue: number;
+  // retrofit-27: average-cost PnL (new model, additive). allTimePnlValue = unrealized +
+  // realized. The legacy pnlAllTime*/netDeposit numbers above are kept unchanged.
+  unrealizedPnlValue: number;
+  unrealizedPnlPct: number;
+  realizedPnlValue: number;
+  allTimePnlValue: number;
   pnl24h: number;
   pnl24hValue: number;
   pnl7d: number;
