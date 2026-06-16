@@ -185,7 +185,31 @@ async function findConnectedPortfolio(
 // Per-transfer processors
 // ---------------------------------------------------------------------------
 
+// Per-transfer business outcomes (NONE of these throw — all are deterministic and
+// safe to ack+dedupe):
+//   'processed' — a Transaction/Nft row was written (or already existed → duplicate)
+//   'skipped'   — a genuine BUSINESS skip: unknown chain/token/native-symbol. Retrying
+//                 will never succeed, so we ack and dedupe.
+//   'no-op'     — the transfer touches no wallet we track; nothing to do, not counted.
+// TRANSIENT/UNEXPECTED errors (DB unreachable, Redis down, an unforeseen throw) are NOT
+// in this set: the processors RE-THROW them so handleMoralisWebhook 500s WITHOUT setting
+// the dedupe key, and Moralis retries the whole payload (retrofit-17 §3). Re-processing
+// is idempotent — the transactionHash unique constraint turns an already-written transfer
+// into TRANSACTION_HASH_DUPLICATE (counted as processed), and NFT upsert/delete are
+// naturally idempotent.
 type TransferResult = 'processed' | 'skipped' | 'no-op';
+
+// A duplicate transactionHash means the transfer was ALREADY ingested (the DB unique
+// constraint surfaced as TRANSACTION_HASH_DUPLICATE by transactions.service). That is
+// idempotent success, NOT a transient failure — count it as processed, never retry.
+function isDuplicateHashError(e: unknown): boolean {
+  return (
+    e !== null &&
+    typeof e === 'object' &&
+    'code' in e &&
+    (e as { code: string }).code === 'TRANSACTION_HASH_DUPLICATE'
+  );
+}
 
 async function processNativeTx(
   nativeTx: MoralisNativeTx,
@@ -240,12 +264,15 @@ async function processNativeTx(
       });
       processed++;
     } catch (e) {
-      // Secondary idempotency safety net — duplicate hash rejected at DB level
-      if (e !== null && typeof e === 'object' && 'code' in e && (e as { code: string }).code === 'TRANSACTION_HASH_DUPLICATE') {
+      // Duplicate hash = already ingested → idempotent success, count as processed.
+      if (isDuplicateHashError(e)) {
         processed++;
       } else {
+        // Transient/unexpected (DB unreachable, etc.) — RE-THROW so the handler 500s
+        // and Moralis retries. Counting it as `skipped` would silently ack a lost
+        // transfer (retrofit-17 §3).
         console.error('[moralis]', JSON.stringify({ event: 'native_tx_error', hash: txHash }), e);
-        skipped++;
+        throw e;
       }
     }
   }
@@ -312,10 +339,14 @@ async function processErc20Transfer(
       });
       anyProcessed = true;
     } catch (e) {
-      if (e !== null && typeof e === 'object' && 'code' in e && (e as { code: string }).code === 'TRANSACTION_HASH_DUPLICATE') {
+      // Duplicate hash = already ingested → idempotent success.
+      if (isDuplicateHashError(e)) {
         anyProcessed = true;
       } else {
+        // Transient/unexpected — RE-THROW so the handler 500s and Moralis retries
+        // instead of silently acking a lost transfer (retrofit-17 §3).
         console.error('[moralis]', JSON.stringify({ event: 'erc20_error', hash: txHash }), e);
+        throw e;
       }
     }
   }
@@ -457,49 +488,43 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
   let processed = 0;
   let skipped = 0;
 
+  // NOTE: there is NO per-transfer try/catch here. Business skips are RETURNED by
+  // the processors (counted below); transient/unexpected errors are RE-THROWN and
+  // caught by the single try/catch around the whole loop, which 500s WITHOUT setting
+  // the dedupe key so Moralis retries the entire payload (retrofit-17 §3). Swallowing
+  // a transient error into `skipped` here would silently ack — and permanently lose —
+  // a transfer that a retry would have ingested.
   try {
     // Process native transfers
     for (const nativeTx of txs) {
-      try {
-        const counts = await processNativeTx(nativeTx, chain.id, moralisChainId, blockTimestamp);
-        processed += counts.processed;
-        skipped += counts.skipped;
-      } catch (e) {
-        console.error('[moralis]', JSON.stringify({ event: 'native_tx_error', hash: nativeTx.hash }), e);
-        skipped++;
-      }
+      const counts = await processNativeTx(nativeTx, chain.id, moralisChainId, blockTimestamp);
+      processed += counts.processed;
+      skipped += counts.skipped;
     }
 
     // Process ERC-20 transfers
     for (const erc20 of erc20Transfers) {
-      try {
-        const result = await processErc20Transfer(erc20, chain.id, blockTimestamp);
-        if (result === 'processed') processed++;
-        else if (result === 'skipped') skipped++;
-        // 'no-op' → wallet not tracked, don't count
-      } catch (e) {
-        console.error('[moralis]', JSON.stringify({ event: 'erc20_error', hash: erc20.transactionHash }), e);
-        skipped++;
-      }
+      const result = await processErc20Transfer(erc20, chain.id, blockTimestamp);
+      if (result === 'processed') processed++;
+      else if (result === 'skipped') skipped++;
+      // 'no-op' → wallet not tracked, don't count
     }
 
     // Process NFT transfers — upsert on received, delete on sent
     if (nftTransfers.length > 0) {
-      try {
-        const nftProcessed = await processNftTransfers(nftTransfers, chain.id, chain.slug);
-        processed += nftProcessed;
-      } catch (e) {
-        console.error('[moralis]', JSON.stringify({ event: 'nft_error', count: nftTransfers.length }), e);
-        skipped += nftTransfers.length;
-      }
+      const nftProcessed = await processNftTransfers(nftTransfers, chain.id, chain.slug);
+      processed += nftProcessed;
     }
   } catch (e) {
-    // Unrecoverable error — don't set idempotency key so Moralis retries
+    // Transient/unexpected error — do NOT set the dedupe key so Moralis retries the
+    // whole payload (already-written transfers are idempotent on replay: duplicate
+    // hashes count as processed, NFT upsert/delete are idempotent).
     console.error('[moralis]', JSON.stringify({ event: 'handler_error', eventId }), e);
-    return c.json(err('WEBHOOK_HANDLER_ERROR', 'Internal webhook handler error'), 500);
+    return c.json(err('WEBHOOK_HANDLER_ERROR', 'Internal webhook handler error — retrying'), 500);
   }
 
-  // 6. Set idempotency key after all transfers processed
+  // 6. Set idempotency key ONLY after the whole payload processed without a transient
+  //    error (genuine business skips above are deterministic, so acking them is safe).
   await redis.set(`moralis_event:${eventId}`, '1', 'EX', REDIS_TTL_30_DAYS);
 
   return c.json(ok({ received: true, processed, skipped }), 200);

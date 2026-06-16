@@ -114,6 +114,19 @@ const schema = z
       .string()
       .default('0 0 * * *')
       .refine((v) => cron.validate(v), 'SNAPSHOT_CRON must be a valid cron expression'),
+
+    // --- DB keep-alive ping (retrofit-17 Part 3) ---
+    // OPTIONAL, default OFF. When true, src/index.ts runs `SELECT 1` every 4 min
+    // to keep the Neon compute from scale-to-zero auto-suspend (which causes the
+    // slow/erroring first request after idle). TRADEOFF: this consumes free-tier
+    // compute-hours continuously, defeating scale-to-zero's savings — opt in only
+    // for active dev. NOTE: explicit transform, NOT z.coerce.boolean() —
+    // Boolean("false") === true, so coercion would never disable it (same gotcha
+    // as BINANCE_ENABLED / TOKEN_SYNC_ENABLED / SNAPSHOT_ENABLED).
+    DB_KEEPALIVE_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('false'),
   });
   // DATABASE_URL_TEST and REDIS_URL_TEST are optional. When present and
   // NODE_ENV=test, prisma.ts / redis.ts use them instead of the dev URLs

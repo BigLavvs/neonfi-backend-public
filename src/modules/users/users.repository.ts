@@ -7,7 +7,7 @@
 // (cancelled AND currentPeriodEnd > now).
 
 import { type Prisma, type Session } from '@prisma/client';
-import { prisma } from '../../lib/prisma.js';
+import { prisma, type PrismaTransactionClient } from '../../lib/prisma.js';
 
 // ---------------------------------------------------------------------------
 // User with relations
@@ -190,7 +190,7 @@ export async function findActiveSessionsByUser(userId: number): Promise<Session[
 
 export async function transitionToCompleteOnboarding(
   userId: number,
-  tx?: Prisma.TransactionClient,
+  tx?: PrismaTransactionClient,
 ): Promise<void> {
   // Use the main prisma client for the lookup — static seed data, safe outside tx.
   // Keeps the transaction query count low to avoid Neon's P2028 timeout.

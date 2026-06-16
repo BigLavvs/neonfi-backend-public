@@ -1,8 +1,9 @@
 import type { Prisma } from '@prisma/client';
-import { prisma } from '../../lib/prisma.js';
+import { prisma, type PrismaTransactionClient } from '../../lib/prisma.js';
 import type { TransactionWithAllRelations, TransactionWithListIncludes } from './transactions.dto.js';
 
-type TxClient = Prisma.TransactionClient;
+// The $extends'd client's interactive-tx type (see prisma.ts) — not Prisma.TransactionClient.
+type TxClient = PrismaTransactionClient;
 
 const DETAIL_INCLUDE = {
   type: true,

@@ -5,7 +5,7 @@
 // the tx parameter threads the Prisma transaction client through.
 
 import type { Prisma } from '@prisma/client';
-import { prisma } from '../../lib/prisma.js';
+import { prisma, type PrismaTransactionClient } from '../../lib/prisma.js';
 import type { SubscriptionWithRelations } from './subscriptions.dto.js';
 
 const SUBSCRIPTION_INCLUDE = {
@@ -29,7 +29,7 @@ export async function findSubscriptionByUserId(
 
 export async function createFreeSubscription(
   userId: number,
-  tx?: Prisma.TransactionClient,
+  tx?: PrismaTransactionClient,
 ): Promise<SubscriptionWithRelations> {
   // Lookups use the main prisma client — static seed data, safe outside tx.
   const [plan, status] = await Promise.all([
@@ -70,7 +70,7 @@ export async function upsertSubscriptionFromCheckout(params: {
   stripeSubscriptionId: string | null;
   currentPeriodStart: Date;
   currentPeriodEnd: Date;
-  tx?: Prisma.TransactionClient;
+  tx?: PrismaTransactionClient;
 }): Promise<SubscriptionWithRelations> {
   const { userId, billingCycle, stripeCustomerId, stripeSubscriptionId, currentPeriodStart, currentPeriodEnd, tx } = params;
   // Lookups use the main prisma client — static seed data, safe outside tx.
@@ -110,7 +110,7 @@ export async function upsertSubscriptionFromCheckout(params: {
 
 export async function applyScheduledDowngrade(
   subscriptionId: number,
-  tx?: Prisma.TransactionClient,
+  tx?: PrismaTransactionClient,
 ): Promise<SubscriptionWithRelations> {
   // Lookups use the main prisma client — static seed data, safe outside tx.
   const [freePlan, activeStatus] = await Promise.all([

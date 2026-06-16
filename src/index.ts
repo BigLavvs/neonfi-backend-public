@@ -39,6 +39,7 @@ import { config } from './lib/config.js';
 import { app } from './app.js';
 import { startTokenSyncScheduler } from './jobs/token-sync.job.js';
 import { startSnapshotScheduler } from './jobs/snapshot.job.js';
+import { startDbKeepalive, stopDbKeepalive } from './jobs/db-keepalive.job.js';
 import { coinbase, fetchCoinbaseUsdBaseSymbols } from './lib/coinbase.js';
 import { binance } from './lib/binance.js';
 import { kraken } from './lib/kraken.js';
@@ -55,6 +56,14 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
 if (config.NODE_ENV !== 'test') {
   startTokenSyncScheduler();
   startSnapshotScheduler();
+  // OPTIONAL keep-alive (retrofit-17, default OFF) — gated so it only runs when an
+  // operator opts in. Starts after the schedulers; the DB is reachable on demand
+  // (the prisma retry extension absorbs a cold-start on the first ping).
+  if (config.DB_KEEPALIVE_ENABLED) {
+    startDbKeepalive();
+  } else {
+    console.log('[db-keepalive] disabled by DB_KEEPALIVE_ENABLED (default off)');
+  }
   coinbase.connect();
   void startWsServer(server);
   void startPriceFeeds();
@@ -119,6 +128,13 @@ async function shutdown(signal: string): Promise<void> {
   const { stopWsServer } = await import('./ws/server.js');
   const { redis } = await import('./lib/redis.js');
   const { prisma } = await import('./lib/prisma.js');
+
+  // Stop the keep-alive heartbeat first so no ping fires after $disconnect below.
+  try {
+    stopDbKeepalive();
+  } catch (e) {
+    console.error('[neonfi-backend] stopDbKeepalive error:', e);
+  }
 
   try {
     await stopWsServer();

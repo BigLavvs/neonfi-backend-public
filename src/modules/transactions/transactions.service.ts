@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../lib/prisma.js';
+import { prisma, type PrismaTransactionClient } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
 import { portfolioDerivedCacheKeys } from '../../lib/portfolio-cache-keys.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
@@ -360,7 +360,7 @@ export async function createTransactionFromWebhook(params: {
 // computeUsdValue is priceAtTime-aware (retrofit-7): a user-entered priceAtTime drives
 // the cost basis, otherwise the current price at write-time is used.
 export async function seedAcquisitionInTx(
-  tx: Prisma.TransactionClient,
+  tx: PrismaTransactionClient,
   params: {
     portfolioId: number;
     tokenId: number;

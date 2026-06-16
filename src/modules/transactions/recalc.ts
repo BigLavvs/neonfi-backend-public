@@ -1,6 +1,7 @@
-import type { Prisma } from '@prisma/client';
+import type { PrismaTransactionClient } from '../../lib/prisma.js';
 
-type TxClient = Prisma.TransactionClient;
+// The $extends'd client's interactive-tx type (see prisma.ts) — not Prisma.TransactionClient.
+type TxClient = PrismaTransactionClient;
 
 // Recalculates Asset.balance AND Asset.netDeposit for a (portfolioId, tokenId)
 // pair by summing all native and erc20 transactions for that token in that
