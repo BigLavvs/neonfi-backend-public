@@ -87,8 +87,8 @@ async function createProCheckoutSession(
       plan: 'pro',
       billingCycle,
     },
-    success_url: `${config.APP_BASE_URL}/onboarding?subscription=activated`,
-    cancel_url: `${config.APP_BASE_URL}/onboarding?subscription=cancelled`,
+    success_url: `${config.APP_BASE_URL}/payments?subscription=activated`,
+    cancel_url: `${config.APP_BASE_URL}/payments?subscription=cancelled`,
   });
 
   if (!session.url) {
