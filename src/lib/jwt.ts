@@ -9,6 +9,7 @@
 // jose is used (not jsonwebtoken) because it is ESM-native and has no
 // Buffer-polyfill requirement (stage-1a.md §4.3 / §8 notes).
 
+import { randomUUID } from 'node:crypto';
 import { SignJWT, jwtVerify, errors as joseErrors } from 'jose';
 import type { JWTPayload } from 'jose';
 import { config } from './config.js';
@@ -24,7 +25,11 @@ export async function signAccessToken(payload: {
   userId: number;
   sessionId: number;
 }): Promise<string> {
-  return new SignJWT({ sub: String(payload.userId), sid: payload.sessionId })
+  // jti: a random UUID per token. Purely additive — verification is unchanged
+  // and the session is still validated by `sid` + DB lookup. It guarantees two
+  // tokens issued in the same second (second-granular `iat`) are byte-distinct,
+  // e.g. a fast login+refresh on a low-latency DB (retrofit-23).
+  return new SignJWT({ sub: String(payload.userId), sid: payload.sessionId, jti: randomUUID() })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(config.ACCESS_TOKEN_EXPIRY) // e.g. "15m"
