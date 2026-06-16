@@ -22,6 +22,7 @@
 // runSnapshotJob() directly.
 
 import cron from 'node-cron';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { redis } from '../lib/redis.js';
 import { config } from '../lib/config.js';
@@ -38,6 +39,9 @@ export interface SnapshotJobResult {
   // architecture line 1222 "flag and alert on missed snapshots").
   missed: number;
   dropChunksSucceeded: boolean;
+  // retrofit-21: catalog tokens whose price was snapshotted this run (global step,
+  // not tied to any portfolio). Powers the token-detail price chart.
+  tokenPricesSnapshotted: number;
 }
 
 // drop_chunks retention cutoff, built from the typed constant (NOT user input — so
@@ -157,11 +161,50 @@ export async function runSnapshotJob(
     console.error('[snapshots]', JSON.stringify({ event: 'drop_chunks_failed' }), err);
   }
 
+  // retrofit-21: daily per-token price snapshot (global; powers the token-detail chart).
+  // Token prices are catalog-wide — NOT per-user and NOT Pro-gated — so this writes one
+  // row per catalog token for today's UTC date, independent of the portfolio loop above.
+  //
+  // ONE bulk `INSERT … ON CONFLICT DO UPDATE` rather than a per-token upsert loop: the
+  // whole catalog is a single round-trip. With Neon's per-query latency a 30+ token
+  // sequential loop adds tens of seconds to every run (and blows the snapshot tests'
+  // timeout); the bulk statement keeps the job ~as fast as before. Semantics are
+  // identical to the per-row upsert: idempotent per UTC day via the composite PK
+  // (tokenId, snapshotDate) — a same-day re-run rewrites today's price (EXCLUDED.price),
+  // never a second row. Failure-isolated at the job level (try/catch: a failure logs and
+  // the job still completes + returns); per-row isolation isn't needed because every row
+  // comes from a token we just read (FK always valid) with a NOT NULL price. Snapshots
+  // only accrue when this job runs — daily granularity, sparse in dev, like BalanceSnapshot.
+  const tokens = await prisma.token.findMany({ select: { id: true, currentPrice: true } });
+  let tokenPricesSnapshotted = 0;
+  if (tokens.length > 0) {
+    try {
+      const ymd = snapshotDate.toISOString().slice(0, 10); // 'YYYY-MM-DD' for the ::date cast
+      const rows = tokens.map(
+        (t) => Prisma.sql`(${t.id}::int, ${t.currentPrice.toString()}::decimal, ${ymd}::date)`,
+      );
+      tokenPricesSnapshotted = await prisma.$executeRaw`
+        INSERT INTO "token_price_snapshot" ("tokenId", "price", "snapshotDate")
+        VALUES ${Prisma.join(rows)}
+        ON CONFLICT ("tokenId", "snapshotDate") DO UPDATE SET "price" = EXCLUDED."price"
+      `;
+    } catch (err) {
+      console.error('[snapshots]', JSON.stringify({ event: 'token_price_snapshot_failed' }), err);
+    }
+  }
+
   console.log(
     '[snapshots]',
-    JSON.stringify({ event: 'job_complete', snapshotted, failed, missed, dropChunksSucceeded }),
+    JSON.stringify({
+      event: 'job_complete',
+      snapshotted,
+      failed,
+      missed,
+      dropChunksSucceeded,
+      tokenPricesSnapshotted,
+    }),
   );
-  return { snapshotted, failed, missed, dropChunksSucceeded };
+  return { snapshotted, failed, missed, dropChunksSucceeded, tokenPricesSnapshotted };
 }
 
 export function startSnapshotScheduler(): void {

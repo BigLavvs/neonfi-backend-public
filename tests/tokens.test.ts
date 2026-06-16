@@ -7,6 +7,8 @@
 import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { redis } from '../src/lib/redis.js';
+import { TokenHistoryQuerySchema } from '../src/modules/tokens/tokens.schemas.js';
 import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -382,4 +384,131 @@ it('137: GET /tokens/:id — non-existent id 999999 → 404 TOKEN_NOT_FOUND', as
   expect(res.status).toBe(404);
   const json = await res.json() as { error: { code: string } };
   expect(json.error.code).toBe('TOKEN_NOT_FOUND');
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-21 — GET /tokens/:id/history (daily price chart + ATH/ATL).
+// ---------------------------------------------------------------------------
+
+// UTC-midnight date `daysAgo` days before today, matching the service's window math.
+function utcDaysAgo(daysAgo: number): Date {
+  const today = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`);
+  return new Date(today.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+}
+const ymd = (d: Date): string => d.toISOString().slice(0, 10);
+
+interface HistoryResponse {
+  data: { points: Array<{ date: string; price: number }>; ath: number; atl: number };
+}
+
+// ---------------------------------------------------------------------------
+// 138. GET /tokens/:id/history — no auth → 401 UNAUTHENTICATED
+// ---------------------------------------------------------------------------
+
+it('138: GET /tokens/:id/history — no auth → 401 UNAUTHENTICATED', async () => {
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  const res = await tokenGet(`/${btc.id}/history`);
+  expect(res.status).toBe(401);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('UNAUTHENTICATED');
+});
+
+// ---------------------------------------------------------------------------
+// 139. GET /tokens/:id/history — points ascending within the window; rows outside
+// excluded; live "now" point appended; ath/atl = max/min over ALL snapshots incl live.
+// ---------------------------------------------------------------------------
+
+it('139: GET /tokens/:id/history?days=30 — points ascending within window (40d-old excluded), live now-point appended, ath/atl fold in live price', async () => {
+  const cookies = await registerAndLogin();
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+
+  // Deterministic ath/atl: clear any job-written rows for this token, then seed known
+  // prices. The aggregate spans ALL snapshots (not just the window).
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btc.id } });
+  await prisma.tokenPriceSnapshot.createMany({
+    data: [
+      { tokenId: btc.id, snapshotDate: utcDaysAgo(40), price: '100' }, // outside 30d window
+      { tokenId: btc.id, snapshotDate: utcDaysAgo(20), price: '300' }, // in window — max snapshot
+      { tokenId: btc.id, snapshotDate: utcDaysAgo(10), price: '50' },  // in window — min snapshot
+      { tokenId: btc.id, snapshotDate: utcDaysAgo(2), price: '200' },
+    ],
+  });
+
+  // Live overlay tick — getTokenById prefers price:BTC over the seeded currentPrice, so
+  // it becomes the appended "now" point and folds into ath/atl.
+  await redis.set('price:BTC', JSON.stringify({ price: 12345, change24h: 0, timestamp: Date.now() }), 'EX', 60);
+
+  const res = await tokenGet(`/${btc.id}/history?days=30`, cookies);
+  expect(res.status).toBe(200);
+  const json = await res.json() as HistoryResponse;
+  const { points, ath, atl } = json.data;
+
+  // 3 in-window snapshots + 1 appended live point (latest snapshot is 2d ago, not today).
+  expect(points).toHaveLength(4);
+
+  // Strictly ascending by date.
+  const dates = points.map((p) => p.date);
+  expect(dates).toEqual([...dates].sort());
+
+  // The 40-day-old row (price 100) is outside the window → excluded.
+  expect(points.some((p) => p.date === ymd(utcDaysAgo(40)))).toBe(false);
+  expect(points.some((p) => p.price === 100)).toBe(false);
+
+  // First in-window point is the 20d-old snapshot; last point is today's live price.
+  expect(points[0]!.date).toBe(ymd(utcDaysAgo(20)));
+  expect(points[0]!.price).toBeCloseTo(300);
+  expect(points[points.length - 1]!.date).toBe(ymd(utcDaysAgo(0)));
+  expect(points[points.length - 1]!.price).toBeCloseTo(12345);
+
+  // ATH = max(maxSnapshot 300, live 12345) = 12345; ATL = min(minSnapshot 50, live) = 50.
+  expect(ath).toBeCloseTo(12345);
+  expect(atl).toBeCloseTo(50);
+});
+
+// ---------------------------------------------------------------------------
+// 140. GET /tokens/:id/history — no snapshots yet → single live "now" point;
+// ath = atl = live price.
+// ---------------------------------------------------------------------------
+
+it('140: GET /tokens/:id/history — no snapshots → one live now-point, ath = atl = live price', async () => {
+  const cookies = await registerAndLogin();
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btc.id } });
+  await redis.set('price:BTC', JSON.stringify({ price: 70000, change24h: 0, timestamp: Date.now() }), 'EX', 60);
+
+  const res = await tokenGet(`/${btc.id}/history?days=365`, cookies);
+  expect(res.status).toBe(200);
+  const json = await res.json() as HistoryResponse;
+
+  expect(json.data.points).toHaveLength(1);
+  expect(json.data.points[0]!.date).toBe(ymd(utcDaysAgo(0)));
+  expect(json.data.points[0]!.price).toBeCloseTo(70000);
+  expect(json.data.ath).toBeCloseTo(70000);
+  expect(json.data.atl).toBeCloseTo(70000);
+});
+
+// ---------------------------------------------------------------------------
+// 141. GET /tokens/:id/history — unknown id → 404 TOKEN_NOT_FOUND (404 before query).
+// ---------------------------------------------------------------------------
+
+it('141: GET /tokens/:id/history — non-existent id 999999 → 404 TOKEN_NOT_FOUND', async () => {
+  const cookies = await registerAndLogin();
+  const res = await tokenGet('/999999/history', cookies);
+  expect(res.status).toBe(404);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('TOKEN_NOT_FOUND');
+});
+
+// ---------------------------------------------------------------------------
+// 142. TokenHistoryQuerySchema — days CLAMPS into [1, 3650] (0 → 1, 99999 → 3650),
+// defaults 365 on missing/malformed (not a 400).
+// ---------------------------------------------------------------------------
+
+it('142: TokenHistoryQuerySchema — days clamps to [1,3650]; missing/malformed → 365', () => {
+  expect(TokenHistoryQuerySchema.parse({ days: '0' }).days).toBe(1);
+  expect(TokenHistoryQuerySchema.parse({ days: '99999' }).days).toBe(3650);
+  expect(TokenHistoryQuerySchema.parse({ days: '30' }).days).toBe(30);
+  expect(TokenHistoryQuerySchema.parse({}).days).toBe(365);
+  expect(TokenHistoryQuerySchema.parse({ days: 'abc' }).days).toBe(365);
 });

@@ -240,10 +240,32 @@ model Token {
   marketCap    Decimal? @db.Decimal(30, 2)
   rank         Int?
   assets       Asset[]
+  // retrofit-21: daily price-history rows (powers the token-detail chart + ATH/ATL).
+  priceSnapshots TokenPriceSnapshot[]
 
   updatedAt    DateTime @updatedAt
 
   @@map("token")
+}
+
+// retrofit-21: daily per-token USD price snapshot. Modelled on BalanceSnapshot —
+// composite PK (tokenId, snapshotDate) makes the daily sampling upsert idempotent
+// (a same-day re-run rewrites the price, never a second row). Prices are GLOBAL
+// (catalog-wide, not per-user, not Pro-gated), sampled by snapshot.job.ts. Plain
+// table, NOT a TimescaleDB hypertable — daily granularity keeps row counts tiny, so
+// the MVP doesn't need chunking/retention here.
+model TokenPriceSnapshot {
+  id           Int      @default(autoincrement())
+  token        Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  tokenId      Int
+  price        Decimal  @db.Decimal(20, 8)
+  snapshotDate DateTime @db.Date
+
+  createdAt    DateTime @default(now())
+
+  @@id([tokenId, snapshotDate])
+  @@index([tokenId])
+  @@map("token_price_snapshot")
 }
 
 // PORTFOLIOS

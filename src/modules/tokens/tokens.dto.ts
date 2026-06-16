@@ -23,6 +23,23 @@ export interface TokenDetailDTO extends TokenListDTO {
   updatedAt: Date;
 }
 
+// retrofit-21: GET /tokens/:id/history response. `points` is the daily price series
+// (oldest→newest, 'YYYY-MM-DD'), with a trailing "now" point overlaid from the live
+// price when the latest snapshot predates today. `ath`/`atl` are the high/low of price
+// SINCE TRACKING BEGAN (min/max over all snapshots folded with the live price), NOT a
+// true all-time high/low — CoinMarketCap's quote doesn't expose ATH/ATL, so this is the
+// honest MVP semantics. Built in tokens.service (live overlay + aggregate live there).
+export interface TokenPricePointDTO {
+  date: string;
+  price: number;
+}
+
+export interface TokenHistoryDTO {
+  points: TokenPricePointDTO[];
+  ath: number;
+  atl: number;
+}
+
 // retrofit-15: `livePrice` overlays the fresh `price:<SYMBOL>` tick over the seeded
 // currentPrice. Resolved in tokens.service and passed per-token; undefined (no tick)
 // falls back to currentPrice. Optional so non-overlay callers stay valid.

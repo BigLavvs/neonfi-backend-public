@@ -97,6 +97,10 @@ const todayUtcYmd = (): string => new Date().toISOString().slice(0, 10);
 
 beforeEach(async () => {
   await prisma.balanceSnapshot.deleteMany({});
+  // retrofit-21: runSnapshotJob now also writes token_price_snapshot (global, one row
+  // per catalog token for today). It's keyed off the seeded Token catalog (not user
+  // data), so truncateAllUserData never reaches it — clear it here for a clean count.
+  await prisma.tokenPriceSnapshot.deleteMany({});
   await truncateAllUserData();
 });
 
@@ -105,6 +109,7 @@ beforeEach(async () => {
 // beforeEach+afterEach double-TRUNCATE pattern that deadlocks under Neon's pooler.
 afterAll(async () => {
   await prisma.balanceSnapshot.deleteMany({});
+  await prisma.tokenPriceSnapshot.deleteMany({});
 });
 
 // ---------------------------------------------------------------------------
@@ -370,4 +375,49 @@ it('325: snapshot.job PnL cache invalidation — redis.del called with portfolio
   } finally {
     delSpy.mockRestore();
   }
+});
+
+// ---------------------------------------------------------------------------
+// 326. retrofit-21 — token price snapshot: one row per catalog token for today;
+// tokenPricesSnapshotted matches; same-day re-run upserts (no dup, price rewritten).
+// ---------------------------------------------------------------------------
+
+it('326: token price snapshot — one row per catalog token dated today (UTC), tokenPricesSnapshotted matches, same-day re-run upserts (no dup row, update branch rewrites price)', async () => {
+  const today = todayUtcYmd();
+  // Token prices are GLOBAL (catalog-wide), so the step covers every seeded token, not
+  // per-user / Pro-gated. The catalog seeds ≥2 tokens (db:seed) — gate's "seed ≥2".
+  const tokenCount = await prisma.token.count();
+  expect(tokenCount).toBeGreaterThanOrEqual(2);
+
+  const result = await runSnapshotJob();
+  expect(result.tokenPricesSnapshotted).toBe(tokenCount);
+
+  const rows = await prisma.tokenPriceSnapshot.findMany();
+  expect(rows).toHaveLength(tokenCount); // exactly one row per token
+  for (const r of rows) {
+    expect(r.snapshotDate.toISOString().slice(0, 10)).toBe(today);
+  }
+
+  // Sampled price equals the token's currentPrice.
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  const btcSnap = rows.find((r) => r.tokenId === btc.id)!;
+  expect(btcSnap).toBeDefined();
+  expect(Number(btcSnap.price.toString())).toBeCloseTo(Number(btc.currentPrice.toString()));
+
+  // Corrupt today's BTC row, then re-run the SAME UTC day. Composite PK
+  // (tokenId, snapshotDate) → the upsert takes the UPDATE branch: no second row, price
+  // rewritten back to currentPrice. Touches only token_price_snapshot (cleaned in
+  // beforeEach), never the shared Token catalog.
+  await prisma.tokenPriceSnapshot.update({
+    where: { tokenId_snapshotDate: { tokenId: btc.id, snapshotDate: btcSnap.snapshotDate } },
+    data: { price: '0.00000001' },
+  });
+
+  const result2 = await runSnapshotJob();
+  expect(result2.tokenPricesSnapshotted).toBe(tokenCount);
+
+  const rows2 = await prisma.tokenPriceSnapshot.findMany();
+  expect(rows2).toHaveLength(tokenCount); // still one row per token — no duplicate
+  const btcSnap2 = rows2.find((r) => r.tokenId === btc.id)!;
+  expect(Number(btcSnap2.price.toString())).toBeCloseTo(Number(btc.currentPrice.toString()));
 });
