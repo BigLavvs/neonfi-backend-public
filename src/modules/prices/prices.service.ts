@@ -7,6 +7,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
 import { config } from '../../lib/config.js';
+import { portfolioDerivedCacheKeys } from '../../lib/portfolio-cache-keys.js';
 import { CoinMarketCapTokenMetadataProvider } from '../tokens/sync/coinmarketcap-provider.js';
 
 const PRICE_TTL_S = 60;
@@ -120,7 +121,27 @@ export async function refreshPrices(
     }
   }
 
+  // retrofit-18: now that the fresh `price:<SYMBOL>` values are written, bust the caller's
+  // derived caches (portfolio_pnl + analytics_*) so the next GET /overview (and analytics)
+  // recomputes against them — otherwise the 60s-cached derived values mask the refresh.
+  // Best-effort: a Redis/DB hiccup here must NOT fail an otherwise-successful refresh.
+  await invalidateUserDerivedCaches(userId).catch((e: Error) =>
+    console.error(`[prices] derived-cache invalidation failed for user ${userId}:`, e.message),
+  );
+
   return { prices, ...(partialFailure ? { partialFailure: true } : {}) };
+}
+
+// Delete every derived-cache key for each of the user's portfolios. Keys come from the
+// shared portfolioDerivedCacheKeys() helper (the same list transactions.service busts on
+// CUD), so this stays in sync as new derived caches are added there.
+async function invalidateUserDerivedCaches(userId: number): Promise<void> {
+  const portfolios = await prisma.portfolio.findMany({
+    where: { userId },
+    select: { id: true },
+  });
+  const keys = portfolios.flatMap((p) => portfolioDerivedCacheKeys(p.id));
+  if (keys.length > 0) await redis.del(...keys);
 }
 
 // Exported for test injection

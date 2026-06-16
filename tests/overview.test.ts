@@ -72,6 +72,21 @@ interface OverviewData {
   allocation: Array<{ symbol: string; value: number; percentage: number }>;
   holdings: Array<{ symbol: string; balance: number }>;
   recentTransactions: Array<{ id: number; portfolioId: number; timestamp: string }>;
+  topMovers: Array<{ symbol: string; name: string; change24h: number }>;
+}
+
+// retrofit-18: write a canonical live price tick (mirrors the resolver payload). Pass
+// change24h:null to write a tick with NO change24h field (the "missing" skip path).
+async function seedPriceTick(
+  symbol: string,
+  change24h: number | null,
+  price = 100,
+): Promise<void> {
+  const payload =
+    change24h === null
+      ? JSON.stringify({ price, source: 'coinbase', ts: 1700000000000 })
+      : JSON.stringify({ price, change24h, source: 'coinbase', ts: 1700000000000 });
+  await redis.set(`price:${symbol}`, payload, 'EX', 60);
 }
 
 async function authPost(path: string, body: Record<string, unknown>): Promise<Response> {
@@ -207,6 +222,9 @@ beforeEach(async () => {
   // overview payload from a prior test must be flushed here.
   const overviewKeys = await redis.keys('overview:*');
   if (overviewKeys.length > 0) await redis.del(overviewKeys);
+  // retrofit-18: topMovers is a single GLOBAL cache key (not per-user) — flush it too so
+  // each test computes fresh from the ticks it seeds (truncateAllUserData clears price:*).
+  await redis.del('overview_top_movers');
 });
 
 afterAll(async () => {
@@ -433,4 +451,60 @@ it("377: a second user's overview excludes the first user's portfolios/data", as
 it('378: no session cookie → 401', async () => {
   const res = await overviewGet();
   expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// 386 — topMovers: ranked by |change24h| desc, capped at 6 (retrofit-18)
+// ---------------------------------------------------------------------------
+
+it('386: topMovers = catalog tokens with a live tick, sorted by |change24h| desc, capped at 6', async () => {
+  const cookies = await registerAndLogin();
+  // 7 fresh ticks with distinct |change24h| (mix of +/- to prove BOTH directions count),
+  // plus a tick missing change24h (must be skipped, not crash).
+  await seedPriceTick('BTC', 10); // |10|
+  await seedPriceTick('ETH', -8); // |8|
+  await seedPriceTick('SOL', 6); // |6|
+  await seedPriceTick('ADA', -4); // |4|
+  await seedPriceTick('DOT', 2); // |2|
+  await seedPriceTick('LINK', -1); // |1|
+  await seedPriceTick('AVAX', 0.5); // |0.5| — falls outside the top 6
+  await seedPriceTick('USDT', null); // no change24h → skipped
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // Capped at 6, ordered by absolute change desc (largest mover first, either direction).
+  expect(d.topMovers).toHaveLength(6);
+  expect(d.topMovers.map((m) => m.symbol)).toEqual(['BTC', 'ETH', 'SOL', 'ADA', 'DOT', 'LINK']);
+  // Shape: { symbol, name, change24h } with catalog name + signed change preserved.
+  expect(d.topMovers[0]).toEqual({ symbol: 'BTC', name: 'Bitcoin', change24h: 10 });
+  expect(d.topMovers[1]).toEqual({ symbol: 'ETH', name: 'Ethereum', change24h: -8 });
+  expect(d.topMovers[5]).toEqual({ symbol: 'LINK', name: 'Chainlink', change24h: -1 });
+  // The 7th-largest mover and the change24h-less tick are excluded.
+  expect(d.topMovers.map((m) => m.symbol)).not.toContain('AVAX');
+  expect(d.topMovers.map((m) => m.symbol)).not.toContain('USDT');
+  // Sorted strictly by |change24h| desc.
+  const abs = d.topMovers.map((m) => Math.abs(m.change24h));
+  expect(abs).toEqual([...abs].sort((a, b) => b - a));
+
+  // 60s global cache key is populated with the computed list.
+  const cached = await redis.get('overview_top_movers');
+  expect(cached).not.toBeNull();
+  expect((JSON.parse(cached!) as unknown[]).length).toBe(6);
+});
+
+// ---------------------------------------------------------------------------
+// 387 — topMovers: no live ticks → [] (frontend empty state, never an error)
+// ---------------------------------------------------------------------------
+
+it('387: topMovers is [] when no symbol has a fresh tick (feeds down)', async () => {
+  const cookies = await registerAndLogin();
+  // beforeEach flushed price:* and overview_top_movers — no ticks seeded here.
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+  expect(d.topMovers).toEqual([]);
+  // The empty list is still cached (so we don't recompute every request for 60s).
+  expect(await redis.get('overview_top_movers')).toBe('[]');
 });

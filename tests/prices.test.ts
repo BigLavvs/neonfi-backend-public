@@ -8,6 +8,7 @@ import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
 import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
+import { portfolioDerivedCacheKeys } from '../src/lib/portfolio-cache-keys.js';
 import type { CoinMarketCapTokenMetadataProvider } from '../src/modules/tokens/sync/coinmarketcap-provider.js';
 
 // ---------------------------------------------------------------------------
@@ -328,4 +329,69 @@ it('246: POST /prices/refresh no auth → 401', async () => {
     body: JSON.stringify({ symbols: ['BTC'] }),
   });
   expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// 388. Refresh busts the caller's derived caches (retrofit-18)
+// ---------------------------------------------------------------------------
+
+it("388: POST /prices/refresh deletes the caller's portfolio_pnl + analytics_* derived caches", async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createFreeSubForUser(userId);
+  const portfolioType = await prisma.portfolioType.findUniqueOrThrow({ where: { name: 'manual' } });
+  const portfolio = await prisma.portfolio.create({
+    data: { userId, name: 'Main', typeId: portfolioType.id },
+  });
+
+  // Prime every derived-cache key for this portfolio, as GET /overview + analytics would
+  // (60s TTL). These are exactly the keys the shared helper enumerates.
+  const keys = portfolioDerivedCacheKeys(portfolio.id);
+  for (const k of keys) await redis.set(k, JSON.stringify({ stale: true }), 'EX', 60);
+
+  mockFetchPrices.mockResolvedValueOnce(new Map([['BTC', { price: 95000, change24h: 1.5 }]]));
+
+  const res = await app.request(`${PRICES_BASE}/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ symbols: ['BTC'] }),
+  });
+  expect(res.status).toBe(200);
+
+  // All four derived keys evicted → the next GET /overview recomputes with the fresh price.
+  for (const k of keys) {
+    expect(await redis.get(k)).toBeNull();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 389. A Redis failure during invalidation must NOT fail the refresh (retrofit-18)
+// ---------------------------------------------------------------------------
+
+it('389: POST /prices/refresh still succeeds when derived-cache invalidation throws (Redis down)', async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createFreeSubForUser(userId);
+  // A portfolio so the invalidation actually reaches redis.del (keys to delete).
+  const portfolioType = await prisma.portfolioType.findUniqueOrThrow({ where: { name: 'manual' } });
+  await prisma.portfolio.create({ data: { userId, name: 'Main', typeId: portfolioType.id } });
+
+  mockFetchPrices.mockResolvedValueOnce(new Map([['BTC', { price: 95000, change24h: 1.5 }]]));
+
+  // Make the single invalidation redis.del reject; the .catch guard must swallow it.
+  const delSpy = vi.spyOn(redis, 'del').mockRejectedValueOnce(new Error('redis down'));
+  try {
+    const res = await app.request(`${PRICES_BASE}/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ symbols: ['BTC'] }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { prices: Array<{ symbol: string; source: string }> } };
+    expect(body.data.prices[0]!.symbol).toBe('BTC');
+    expect(body.data.prices[0]!.source).toBe('live'); // prices still written
+    expect(delSpy).toHaveBeenCalled(); // invalidation was attempted
+  } finally {
+    delSpy.mockRestore();
+  }
 });

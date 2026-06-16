@@ -15,6 +15,7 @@
 // wiring (evict on tx/asset/snapshot writes) is a follow-up; the short TTL bounds
 // staleness for the MVP.
 
+import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
 import { getLivePriceMap } from '../../lib/live-price.js';
 import { computeDerived } from '../portfolios/derive.js';
@@ -33,6 +34,11 @@ const CACHE_TTL_S = 60;
 // A user is unlikely to exceed a handful of portfolios (plan caps gate the count); pull
 // them all in one page so the aggregate is complete. Far above any realistic count.
 const PORTFOLIO_FETCH_LIMIT = 1000;
+
+// retrofit-18: top-movers cache. Global (not per-user), so one shared key — TTL matches
+// CACHE_TTL_S (60s). Capped at the 6 biggest movers by absolute 24h change.
+const TOP_MOVERS_KEY = 'overview_top_movers';
+const TOP_MOVERS_LIMIT = 6;
 
 export interface OverviewParams {
   days: number;
@@ -67,7 +73,11 @@ async function withCache<T>(key: string, compute: () => Promise<T>): Promise<T> 
   return result;
 }
 
-function emptyOverview(): OverviewDTO {
+// The per-user aggregate, sans `topMovers` — that field is merged in by getOverview from
+// its own global cache (see below), so the per-user cache never freezes a movers list.
+type OverviewAggregate = Omit<OverviewDTO, 'topMovers'>;
+
+function emptyOverview(): OverviewAggregate {
   return {
     totals: {
       totalValue: 0,
@@ -86,13 +96,67 @@ function emptyOverview(): OverviewDTO {
   };
 }
 
-export function getOverview(userId: number, params: OverviewParams): Promise<OverviewDTO> {
-  return withCache(`overview:${userId}:${params.days}:${params.txLimit}`, () =>
-    buildOverview(userId, params),
-  );
+export async function getOverview(userId: number, params: OverviewParams): Promise<OverviewDTO> {
+  // Two independent caches, fetched in parallel: the per-user aggregate
+  // (`overview:<userId>:…`) and the global movers list (`overview_top_movers`). Keeping
+  // topMovers OUTSIDE the per-user cache means a fresh 24h tick surfaces for every user
+  // within the movers' own 60s window instead of being baked into each user's payload.
+  const [aggregate, topMovers] = await Promise.all([
+    withCache(`overview:${userId}:${params.days}:${params.txLimit}`, () =>
+      buildOverview(userId, params),
+    ),
+    getTopMovers(),
+  ]);
+  return { ...aggregate, topMovers };
 }
 
-async function buildOverview(userId: number, { days, txLimit }: OverviewParams): Promise<OverviewDTO> {
+// ---- top movers (global, retrofit-18) ----------------------------------------------
+// movers = catalog tokens that currently have a live canonical `price:<SYMBOL>` tick
+// (written EX 60 by the resolver, retrofit-16), ranked by |change24h|. Cached globally
+// for 60s via withCache so it's computed once per window, not per user/request.
+function getTopMovers(): Promise<OverviewDTO['topMovers']> {
+  return withCache(TOP_MOVERS_KEY, computeTopMovers);
+}
+
+async function computeTopMovers(): Promise<OverviewDTO['topMovers']> {
+  // The Token table IS the shared price catalog (the live-price overlay reads it too), so
+  // pulling symbol→name here is the same surface, not another business module's state.
+  const tokens = await prisma.token.findMany({ select: { symbol: true, name: true } });
+  if (tokens.length === 0) return [];
+
+  let raw: Array<string | null>;
+  try {
+    raw = await redis.mget(...tokens.map((t) => `price:${t.symbol}`));
+  } catch {
+    return []; // feeds/Redis down → empty state (frontend shows its placeholder), never an error
+  }
+
+  const movers: OverviewDTO['topMovers'] = [];
+  tokens.forEach((t, i) => {
+    const v = raw[i];
+    if (!v) return; // no fresh tick for this symbol
+    let change24h: unknown;
+    try {
+      ({ change24h } = JSON.parse(v) as { change24h?: unknown });
+    } catch {
+      return; // malformed payload — skip
+    }
+    if (typeof change24h !== 'number' || !Number.isFinite(change24h)) return;
+    movers.push({ symbol: t.symbol, name: t.name, change24h });
+  });
+
+  // Biggest movers in EITHER direction: sort by |change| desc, take top 6. Sort on the
+  // raw value (like allocation), round only the wire output to 2dp.
+  return movers
+    .sort((a, b) => Math.abs(b.change24h) - Math.abs(a.change24h))
+    .slice(0, TOP_MOVERS_LIMIT)
+    .map((m) => ({ symbol: m.symbol, name: m.name, change24h: round(m.change24h) }));
+}
+
+async function buildOverview(
+  userId: number,
+  { days, txLimit }: OverviewParams,
+): Promise<OverviewAggregate> {
   // 1. Portfolios. Zero portfolios → an all-empty payload (NOT a 404): a brand-new
   //    user still loads the dashboard.
   const { portfolios } = await findPortfoliosByUserId(userId, {

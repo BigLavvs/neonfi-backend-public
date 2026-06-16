@@ -40,4 +40,8 @@ export interface OverviewDTO {
   allocation: Array<{ symbol: string; value: number; percentage: number }>; // desc by value
   holdings: Array<{ symbol: string; balance: number }>; // aggregate balance per symbol
   recentTransactions: TransactionListDTO[]; // most recent `txLimit`, desc by timestamp
+  // retrofit-18: catalog tokens with a live `price:<SYMBOL>` tick, ranked by |24h change|
+  // desc and capped at 6 (biggest movers in EITHER direction). Global (same for every
+  // user), cached under `overview_top_movers`; `[]` when no symbol has a fresh tick.
+  topMovers: Array<{ symbol: string; name: string; change24h: number }>;
 }
