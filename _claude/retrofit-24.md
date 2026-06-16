@@ -1,44 +1,69 @@
-# retrofit-24: session survives external-redirect returns (SameSite=Lax) + Stripe returns to /payments
+# retrofit-24: session survives external-redirect returns (SameSite=Lax) + Stripe returns via an allowlisted returnPath
 
-Two separate user-facing bugs, both backend:
+Two separate user-facing bugs, both backend. (The webhook 401s are a THIRD, separate thing — a
+`STRIPE_WEBHOOK_SECRET` mismatch with the `stripe listen` secret; env-only, NOT in this retrofit.)
 
-1. **Logged out after returning from Stripe.** `src/lib/cookies.ts` sets the `session` and `refresh`
-   cookies with `sameSite: 'Strict'`. Strict cookies are **withheld by the browser on a request that
-   follows a cross-site top-level navigation** — i.e. coming back from Stripe Checkout (or Google
-   OAuth). So on return the app sees no session and dumps the user on /register. Switch to **Lax**
-   (what `oauth_state` already uses): Lax is sent on top-level GET navigations (the return trip)
-   while still NOT sent on cross-site POST/subresource requests, so CSRF protection is preserved.
-   The API is same-site with the frontend in every env (localhost↔localhost; neonfi.live↔
-   api.neonfi.live), so normal same-site XHR is unaffected.
+---
 
-   In `src/lib/cookies.ts`, `BASE_OPTS`: change `sameSite: 'Strict' as const` → `sameSite: 'Lax' as const`.
-   Update the two header comments (lines 3, 6) from "SameSite=Strict" → "SameSite=Lax" with a note
-   that Lax is required so the session survives OAuth/Stripe redirect returns. Leave httpOnly,
-   `secure: isProduction`, path, maxAge untouched.
+## Part 1 — SameSite=Lax so the session survives Stripe/OAuth returns
+`src/lib/cookies.ts` sets `session` + `refresh` with `sameSite: 'Strict'`. Strict cookies are
+**withheld by the browser on the request following a cross-site top-level navigation** — i.e.
+returning from Stripe Checkout or Google OAuth — so the app sees no session and dumps the user on
+/register. Switch to **Lax** (what `oauth_state` already uses): sent on top-level GET navigations
+(the return trip) but NOT on cross-site POST/subresources, so CSRF protection holds. Frontend and
+API are same-site in every env (localhost↔localhost; neonfi.live↔api.neonfi.live), so normal XHR
+is unaffected.
 
-2. **Stripe returns to /onboarding, not the payments page.** In `src/modules/subscriptions/
-   subscriptions.service.ts` `createProCheckoutSession`:
-   - `success_url`: `${config.APP_BASE_URL}/onboarding?subscription=activated` → `${config.APP_BASE_URL}/payments?subscription=activated`
-   - `cancel_url`:  `${config.APP_BASE_URL}/onboarding?subscription=cancelled` → `${config.APP_BASE_URL}/payments?subscription=cancelled`
-   (After payment the webhook completes onboarding + flips the user to Pro, so landing on /payments
-   is correct for both the onboarding-Pro and upgrade-Pro paths.)
+- `src/lib/cookies.ts` `BASE_OPTS`: `sameSite: 'Strict' as const` → `sameSite: 'Lax' as const`.
+- Update the two header comments (lines 3, 6) "SameSite=Strict" → "SameSite=Lax", noting it's
+  required so the session survives OAuth/Stripe redirect returns.
+- Leave httpOnly, `secure: isProduction`, path, maxAge untouched.
 
-## Not in scope (separate, already identified)
-- The webhook 401s are a **`STRIPE_WEBHOOK_SECRET` mismatch** — it must equal the `whsec_…` that
-  `stripe listen` prints (env change + restart), NOT a code change. Don't touch the verification.
-- The async gap (user can land on /payments a beat before the webhook flips them to Pro) is a
-  frontend polish (a "finalizing your upgrade…" state) — handled separately on the frontend.
+---
+
+## Part 2 — return to the page you paid FROM, via an allowlisted `returnPath`
+There are two ways to buy Pro: during **onboarding** (must return to `/onboarding` to finish the
+wizard) and from the **payments page** (return to `/payments`). A single hardcoded `success_url`
+breaks one of them. So the checkout carries a `returnPath` — but **allowlist it**, never reflect a
+raw URL into `success_url` (open-redirect/phishing risk).
+
+1. **Schema** (`subscriptions.schemas.ts`): add to BOTH the create-subscription body schema and
+   the upgrade body schema:
+   ```ts
+   returnPath: z.enum(['/onboarding', '/payments', '/dashboard']).optional(),
+   ```
+   (z.enum IS the allowlist — anything else 400s. Keep `.strict()` if present; returnPath is now a
+   known field. For the `plan: 'free'` activate branch returnPath is simply ignored.)
+2. **Service** (`subscriptions.service.ts`): thread it through:
+   ```ts
+   async function createProCheckoutSession(user, billingCycle, returnPath: string = '/dashboard') {
+     // ...
+     success_url: `${config.APP_BASE_URL}${returnPath}?subscription=activated`,
+     cancel_url:  `${config.APP_BASE_URL}${returnPath}?subscription=cancelled`,
+   }
+   ```
+   `activateSubscription` (pro branch) and `upgradeSubscription` pass `body.returnPath` (falls back
+   to `/dashboard` when absent — still safe). Because `returnPath` is enum-validated upstream, no
+   string sanitisation is needed here, but do NOT interpolate any user string that hasn't passed
+   the enum.
+
+Frontend already sends it: onboarding → `returnPath: '/onboarding'`, payments → `'/payments'`.
+
+---
 
 ## Gates
-- Update any test asserting the old success_url path. Likely `tests/subscriptions.test.ts` (the
-  pro-checkout cases, ~52/53/65) assert `success_url`/checkout contains `/onboarding` — change to
-  `/payments`. Grep tests for `onboarding?subscription` and `success_url`.
-- Run per-file (local DB): `npx vitest run tests/subscriptions.test.ts tests/auth.test.ts` → green
-  (auth cookie tests check presence/HttpOnly, not SameSite, so Lax shouldn't break them — confirm).
+- Existing tests that assert the old `/onboarding` success_url (≈ subscriptions #52/#53/#65) now
+  send/expect the returnPath. Grep `tests/subscriptions.test.ts` for `success_url` /
+  `onboarding?subscription` and update: pass `returnPath` in the request, assert the success_url
+  contains it. Add one case: invalid `returnPath` (e.g. `https://evil.com`) → 400 VALIDATION_ERROR.
+- `npx vitest run tests/subscriptions.test.ts tests/auth.test.ts` (DATABASE_URL_TEST set, dev
+  server stopped) → green. (auth cookie tests check presence/HttpOnly, not SameSite.)
 
 ## Commit (explicit add, no -A)
 ```bash
-git add src/lib/cookies.ts src/modules/subscriptions/subscriptions.service.ts tests/subscriptions.test.ts _claude/retrofit-24.md
-git commit -m "fix(auth): SameSite=Lax so session survives Stripe/OAuth returns; fix(subscriptions): checkout returns to /payments (retrofit-24)"
+git add src/lib/cookies.ts src/modules/subscriptions/subscriptions.service.ts \
+        src/modules/subscriptions/subscriptions.schemas.ts tests/subscriptions.test.ts \
+        _claude/retrofit-24.md
+git commit -m "fix(auth): SameSite=Lax so session survives Stripe/OAuth returns; feat(subscriptions): allowlisted returnPath for checkout (retrofit-24)"
 ```
-Report SHA + confirm the auth + subscriptions suites pass.
+Report SHA + confirm auth + subscriptions suites pass.

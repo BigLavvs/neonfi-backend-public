@@ -283,6 +283,64 @@ it('53: POST /subscriptions pro yearly → Stripe called with yearly price and b
 });
 
 // ---------------------------------------------------------------------------
+// 53a. POST /subscriptions pro with returnPath — success_url/cancel_url reflect it
+// ---------------------------------------------------------------------------
+
+it('53a: POST /subscriptions pro with returnPath → success_url/cancel_url use that path', async () => {
+  await registerUser();
+  await setOnboardingStatus(TEST_EMAIL, 'verified');
+  const cookies = await loginUser();
+
+  const res = await post('', { plan: 'pro', billingCycle: 'monthly', returnPath: '/payments' }, cookies);
+  expect(res.status).toBe(200);
+
+  expect(mockCreateSession).toHaveBeenCalledWith(
+    expect.objectContaining({
+      success_url: `${config.APP_BASE_URL}/payments?subscription=activated`,
+      cancel_url: `${config.APP_BASE_URL}/payments?subscription=cancelled`,
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 53b. POST /subscriptions pro without returnPath — defaults to /dashboard
+// ---------------------------------------------------------------------------
+
+it('53b: POST /subscriptions pro without returnPath → success_url/cancel_url default to /dashboard', async () => {
+  await registerUser();
+  await setOnboardingStatus(TEST_EMAIL, 'verified');
+  const cookies = await loginUser();
+
+  const res = await post('', { plan: 'pro', billingCycle: 'monthly' }, cookies);
+  expect(res.status).toBe(200);
+
+  expect(mockCreateSession).toHaveBeenCalledWith(
+    expect.objectContaining({
+      success_url: `${config.APP_BASE_URL}/dashboard?subscription=activated`,
+      cancel_url: `${config.APP_BASE_URL}/dashboard?subscription=cancelled`,
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 53c. POST /subscriptions pro with invalid returnPath — 400, Stripe not called
+// ---------------------------------------------------------------------------
+
+it('53c: POST /subscriptions pro with invalid returnPath → 400 VALIDATION_ERROR, Stripe NOT called', async () => {
+  await registerUser();
+  await setOnboardingStatus(TEST_EMAIL, 'verified');
+  const cookies = await loginUser();
+
+  const res = await post('', { plan: 'pro', billingCycle: 'monthly', returnPath: '/evil' }, cookies);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('VALIDATION_ERROR');
+
+  expect(mockCreateSession).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
 // 54. POST /subscriptions as pending_verification user — 403
 // ---------------------------------------------------------------------------
 

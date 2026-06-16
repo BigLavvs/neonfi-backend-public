@@ -6,6 +6,9 @@ export const CreateSubscriptionSchema = z
   .object({
     plan: z.enum(['free', 'pro']),
     billingCycle: z.enum(['monthly', 'yearly']).optional(),
+    // Frontend page to return to after Stripe Checkout (pro path only).
+    // Restricted enum so it can be reflected into success_url/cancel_url safely.
+    returnPath: z.enum(['/onboarding', '/payments', '/dashboard']).optional(),
   })
   .strict()
   .refine(
@@ -22,6 +25,8 @@ export type CreateSubscriptionBody = z.infer<typeof CreateSubscriptionSchema>;
 export const UpgradeSubscriptionSchema = z
   .object({
     billingCycle: z.enum(['monthly', 'yearly']),
+    // Frontend page to return to after Stripe Checkout (free→pro path only).
+    returnPath: z.enum(['/onboarding', '/payments', '/dashboard']).optional(),
   })
   .strict();
 

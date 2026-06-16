@@ -71,6 +71,7 @@ export async function getEffectivePlan(userId: number): Promise<'free' | 'pro'> 
 async function createProCheckoutSession(
   user: UserWithRelations,
   billingCycle: 'monthly' | 'yearly',
+  returnPath: '/onboarding' | '/payments' | '/dashboard' = '/dashboard',
 ): Promise<string> {
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
@@ -87,8 +88,8 @@ async function createProCheckoutSession(
       plan: 'pro',
       billingCycle,
     },
-    success_url: `${config.APP_BASE_URL}/payments?subscription=activated`,
-    cancel_url: `${config.APP_BASE_URL}/payments?subscription=cancelled`,
+    success_url: `${config.APP_BASE_URL}${returnPath}?subscription=activated`,
+    cancel_url: `${config.APP_BASE_URL}${returnPath}?subscription=cancelled`,
   });
 
   if (!session.url) {
@@ -144,7 +145,7 @@ export async function activateSubscription(
     return { subscription: toSubscriptionDTO(subscription) };
   }
 
-  const checkoutUrl = await createProCheckoutSession(user, body.billingCycle!);
+  const checkoutUrl = await createProCheckoutSession(user, body.billingCycle!, body.returnPath);
   return { checkoutUrl };
 }
 
@@ -182,7 +183,7 @@ export async function upgradeSubscription(
 
   // Free → Pro: delegate to checkout
   if (sub.plan.name === 'free') {
-    const checkoutUrl = await createProCheckoutSession(user, requestedBillingCycle);
+    const checkoutUrl = await createProCheckoutSession(user, requestedBillingCycle, body.returnPath);
     return { checkoutUrl };
   }
 
