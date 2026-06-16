@@ -7,10 +7,19 @@
 
 import { it, expect, describe, beforeEach, vi } from 'vitest';
 
-const { store, published } = vi.hoisted(() => ({
+const { store, lists, published } = vi.hoisted(() => ({
   store: new Map<string, string>(),
+  // retrofit-20: list-typed keys (price_hist:*) live in their own store so the string
+  // KV ops (set/get/mget) and the list ops (lpush/ltrim/lrange) don't collide.
+  lists: new Map<string, string[]>(),
   published: [] as Array<{ channel: string; message: string }>,
 }));
+
+// Resolve a possibly-negative LRANGE/LTRIM stop index against a list length (Redis
+// semantics: -1 == last element).
+function resolveStop(len: number, stop: number): number {
+  return stop < 0 ? len + stop : stop;
+}
 
 vi.mock('../src/lib/redis.js', () => ({
   redis: {
@@ -24,10 +33,27 @@ vi.mock('../src/lib/redis.js', () => ({
       published.push({ channel, message });
       return 1;
     }),
+    // LPUSH: each value is inserted at the head in turn, so `LPUSH k a b` → [b, a, …].
+    lpush: vi.fn(async (key: string, ...vals: string[]) => {
+      const cur = lists.get(key) ?? [];
+      cur.unshift(...[...vals].reverse());
+      lists.set(key, cur);
+      return cur.length;
+    }),
+    ltrim: vi.fn(async (key: string, start: number, stop: number) => {
+      const cur = lists.get(key) ?? [];
+      lists.set(key, cur.slice(start, resolveStop(cur.length, stop) + 1));
+      return 'OK';
+    }),
+    lrange: vi.fn(async (key: string, start: number, stop: number) => {
+      const cur = lists.get(key) ?? [];
+      return cur.slice(start, resolveStop(cur.length, stop) + 1);
+    }),
+    expire: vi.fn(async () => 1),
   },
 }));
 
-import { recordTick, __resetThrottleForTest } from '../src/lib/price-resolver.js';
+import { recordTick, __resetThrottleForTest, __internals } from '../src/lib/price-resolver.js';
 
 function canonical(sym: string): { price: number; change24h: number; source: string; ts: number } | null {
   const raw = store.get(`price:${sym}`);
@@ -40,6 +66,7 @@ function publishCount(sym: string): number {
 
 beforeEach(() => {
   store.clear();
+  lists.clear();
   published.length = 0;
   __resetThrottleForTest();
 });
@@ -117,5 +144,46 @@ describe('throttle', () => {
     await recordTick('BBB', 'binance', 2, 0, 'USDT', now);
     expect(publishCount('AAA')).toBe(1);
     expect(publishCount('BBB')).toBe(1);
+  });
+});
+
+describe('sampled price history (sparklines, retrofit-20)', () => {
+  const FIVE_MIN = __internals.HIST_SAMPLE_MS;
+
+  it('appends the winning price as the first sample, then samples at most once per ≥5 min', async () => {
+    const base = 8_000_000;
+    // First tick → first history sample (newest at head).
+    await recordTick('BTC', 'coinbase', 100, 1, 'USD', base);
+    expect(lists.get('price_hist:BTC')).toEqual(['100']);
+
+    // Another tick 1.1s later: passes the 1s canonical throttle but NOT the 5-min
+    // history gate → no new sample.
+    await recordTick('BTC', 'coinbase', 101, 1, 'USD', base + 1_100);
+    expect(lists.get('price_hist:BTC')).toEqual(['100']);
+
+    // ≥5 min after the last sample → a new point is prepended (newest→oldest).
+    await recordTick('BTC', 'coinbase', 102, 1, 'USD', base + FIVE_MIN + 1);
+    expect(lists.get('price_hist:BTC')).toEqual(['102', '100']);
+  });
+
+  it('caps the history at 12 points (LTRIM 0..11), newest first', async () => {
+    let t = 9_000_000;
+    // 15 samples, each ≥5 min apart so every one passes the sample gate.
+    for (let i = 0; i < 15; i++) {
+      await recordTick('ETH', 'coinbase', 200 + i, 1, 'USD', t);
+      t += FIVE_MIN + 1;
+    }
+    const hist = lists.get('price_hist:ETH')!;
+    expect(hist).toHaveLength(__internals.HIST_MAX_POINTS); // 12
+    expect(hist[0]).toBe('214'); // newest (last pushed) at head
+    expect(hist[11]).toBe('203'); // oldest 12 kept; 200..202 trimmed off
+  });
+
+  it('history sampling is per-symbol (one symbol does not gate another)', async () => {
+    const now = 10_000_000;
+    await recordTick('AAA', 'coinbase', 1, 0, 'USD', now);
+    await recordTick('BBB', 'coinbase', 2, 0, 'USD', now);
+    expect(lists.get('price_hist:AAA')).toEqual(['1']);
+    expect(lists.get('price_hist:BBB')).toEqual(['2']);
   });
 });

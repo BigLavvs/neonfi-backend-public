@@ -22,7 +22,10 @@ import { computeDerived } from '../portfolios/derive.js';
 import { findPortfoliosByUserId } from '../portfolios/portfolios.repository.js';
 import { slugify } from '../portfolios/slug.js';
 import { findAllAssetsByPortfolioId } from '../assets/assets.repository.js';
-import { findAllSnapshotsAscByPortfolio } from '../snapshots/snapshots.service.js';
+import {
+  findAllSnapshotsAscByPortfolio,
+  findSnapshotNearDaysAgo,
+} from '../snapshots/snapshots.service.js';
 import {
   listRecentUserTransactions,
   countUserTransactions,
@@ -131,7 +134,9 @@ async function computeTopMovers(): Promise<OverviewDTO['topMovers']> {
     return []; // feeds/Redis down → empty state (frontend shows its placeholder), never an error
   }
 
-  const movers: OverviewDTO['topMovers'] = [];
+  // Working list — the final `spark` is attached after the top-6 cut (below), so this
+  // intermediate shape omits it.
+  const movers: Array<{ symbol: string; name: string; change24h: number }> = [];
   tokens.forEach((t, i) => {
     const v = raw[i];
     if (!v) return; // no fresh tick for this symbol
@@ -147,10 +152,29 @@ async function computeTopMovers(): Promise<OverviewDTO['topMovers']> {
 
   // Biggest movers in EITHER direction: sort by |change| desc, take top 6. Sort on the
   // raw value (like allocation), round only the wire output to 2dp.
-  return movers
+  const top = movers
     .sort((a, b) => Math.abs(b.change24h) - Math.abs(a.change24h))
-    .slice(0, TOP_MOVERS_LIMIT)
-    .map((m) => ({ symbol: m.symbol, name: m.name, change24h: round(m.change24h) }));
+    .slice(0, TOP_MOVERS_LIMIT);
+
+  // retrofit-20: attach a real recent price series (`spark`) per chosen mover from the
+  // sampled `price_hist:<SYMBOL>` list (resolver-written, ≥5-min samples, ≤12 points,
+  // stored newest→oldest). Reverse to oldest→newest for the chart; no history / Redis
+  // miss → [] (the frontend draws a flat line until ≥2 points accrue). ≤6 small LRANGEs.
+  const sparks = await Promise.all(
+    top.map((m) =>
+      redis
+        .lrange(`price_hist:${m.symbol}`, 0, -1)
+        .then((rawHist) => rawHist.map(Number).filter(Number.isFinite).reverse())
+        .catch(() => [] as number[]),
+    ),
+  );
+
+  return top.map((m, i) => ({
+    symbol: m.symbol,
+    name: m.name,
+    change24h: round(m.change24h),
+    spark: sparks[i]!,
+  }));
 }
 
 async function buildOverview(
@@ -169,29 +193,52 @@ async function buildOverview(
 
   // 2-5. Fetch per-portfolio derived numbers, assets, and snapshots in parallel, plus
   //      the cross-portfolio recent txs + count. derive.ts is already Redis-cached.
-  const [derivedList, assetsList, snapshotsList, recentTransactions, transactionCount] =
-    await Promise.all([
-      Promise.all(portfolios.map((p) => computeDerived(p.id))),
-      Promise.all(portfolios.map((p) => findAllAssetsByPortfolioId(p.id))),
-      Promise.all(portfolios.map((p) => findAllSnapshotsAscByPortfolio(p.id))),
-      listRecentUserTransactions(userId, txLimit),
-      countUserTransactions(userId),
-    ]);
+  const [
+    derivedList,
+    assetsList,
+    snapshotsList,
+    recentTransactions,
+    transactionCount,
+    snaps24hAgo,
+  ] = await Promise.all([
+    Promise.all(portfolios.map((p) => computeDerived(p.id))),
+    Promise.all(portfolios.map((p) => findAllAssetsByPortfolioId(p.id))),
+    Promise.all(portfolios.map((p) => findAllSnapshotsAscByPortfolio(p.id))),
+    listRecentUserTransactions(userId, txLimit),
+    countUserTransactions(userId),
+    // retrofit-20: the most recent snapshot per portfolio dated ≤ now−24h (daysAgo=1,
+    // i.e. the last daily close) — the same source/read the Stage-14 analytics summary
+    // uses (findSnapshotNearDaysAgo), so the 24h baseline stays module-isolated.
+    Promise.all(portfolios.map((p) => findSnapshotNearDaysAgo(p.id, 1))),
+  ]);
 
   // ---- totals (sum the value fields, recompute aggregate %s) ----
   let totalValue = 0;
-  let pnl24hValue = 0;
   let pnlAllTimeValue = 0;
   for (const d of derivedList) {
     totalValue += d.totalValue;
-    pnl24hValue += d.pnl24hValue;
     pnlAllTimeValue += d.pnlAllTimeValue;
   }
   // Guard divide-by-zero → 0 (never NaN/Infinity), mirroring computePnlPeriod.
   const costBasisAll = totalValue - pnlAllTimeValue;
   const pnlAllTime = costBasisAll === 0 ? 0 : (pnlAllTimeValue / costBasisAll) * 100;
-  const base24 = totalValue - pnl24hValue; // value 24h ago
-  const pnl24h = base24 === 0 ? 0 : (pnl24hValue / base24) * 100;
+
+  // ---- 24h PnL from the daily snapshot history (retrofit-20) ----
+  // derive.ts can't compute 24h without history, so it hardcodes pnl24h*=0. Recompute
+  // the TOTALS here from BalanceSnapshot: sum each portfolio's most recent snapshot
+  // dated ≤ now−24h → value24hAgo, then pnl24hValue = current total − value24hAgo and
+  // pnl24h = that over the 24h-ago base. If NO portfolio has a snapshot ≥24h old (a
+  // brand-new account) leave 0/0 — the frontend shows +$0.00. Per-portfolio rows keep
+  // derive's 0 here (out of scope, same as pnl7d/pnl30d).
+  let value24hAgo = 0;
+  let has24hBaseline = false;
+  for (const s of snaps24hAgo) {
+    if (!s) continue;
+    value24hAgo += Number(s.value.toString());
+    has24hBaseline = true;
+  }
+  const pnl24hValue = has24hBaseline ? totalValue - value24hAgo : 0;
+  const pnl24h = has24hBaseline && value24hAgo > 0 ? (pnl24hValue / value24hAgo) * 100 : 0;
 
   // ---- per-portfolio rows + allocation/holdings aggregation ----
   // allocation: value (balance × price) summed per symbol; holdings: raw balance summed

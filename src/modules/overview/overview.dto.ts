@@ -43,5 +43,8 @@ export interface OverviewDTO {
   // retrofit-18: catalog tokens with a live `price:<SYMBOL>` tick, ranked by |24h change|
   // desc and capped at 6 (biggest movers in EITHER direction). Global (same for every
   // user), cached under `overview_top_movers`; `[]` when no symbol has a fresh tick.
-  topMovers: Array<{ symbol: string; name: string; change24h: number }>;
+  // retrofit-20: each mover carries a sampled recent price series (`spark`, oldest→newest,
+  // read from `price_hist:<SYMBOL>`) for the frontend's trend line; `[]` until ≥2 samples
+  // accrue (the resolver samples at ≥5-min intervals).
+  topMovers: Array<{ symbol: string; name: string; change24h: number; spark: number[] }>;
 }

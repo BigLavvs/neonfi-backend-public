@@ -72,7 +72,7 @@ interface OverviewData {
   allocation: Array<{ symbol: string; value: number; percentage: number }>;
   holdings: Array<{ symbol: string; balance: number }>;
   recentTransactions: Array<{ id: number; portfolioId: number; timestamp: string }>;
-  topMovers: Array<{ symbol: string; name: string; change24h: number }>;
+  topMovers: Array<{ symbol: string; name: string; change24h: number; spark: number[] }>;
 }
 
 // retrofit-18: write a canonical live price tick (mirrors the resolver payload). Pass
@@ -225,6 +225,10 @@ beforeEach(async () => {
   // retrofit-18: topMovers is a single GLOBAL cache key (not per-user) — flush it too so
   // each test computes fresh from the ticks it seeds (truncateAllUserData clears price:*).
   await redis.del('overview_top_movers');
+  // retrofit-20: price_hist:<SYMBOL> sparkline lists (read by computeTopMovers, seeded
+  // directly by the spark gate) — flush so a series can't bleed across tests.
+  const histKeys = await redis.keys('price_hist:*');
+  if (histKeys.length > 0) await redis.del(histKeys);
 });
 
 afterAll(async () => {
@@ -283,7 +287,7 @@ it('372: aggregates totals, merges allocation/holdings by symbol, per-portfolio 
   expect(d.totals.portfolioCount).toBe(2);
   expect(d.totals.pnlAllTimeValue).toBeCloseTo(26900, 2); // 19400 + 7500
   expect(d.totals.pnlAllTime).toBe(22.42); // 26900 / (146900-26900) * 100 = 22.4166… → 2dp
-  expect(d.totals.pnl24h).toBe(0); // derive.ts has no 24h source yet
+  expect(d.totals.pnl24h).toBe(0); // retrofit-20: no snapshot ≥24h old → 0/0 baseline
   expect(d.totals.pnl24hValue).toBe(0);
 
   // allocation — merged, desc by value, % of grand total (146900)
@@ -477,10 +481,11 @@ it('386: topMovers = catalog tokens with a live tick, sorted by |change24h| desc
   // Capped at 6, ordered by absolute change desc (largest mover first, either direction).
   expect(d.topMovers).toHaveLength(6);
   expect(d.topMovers.map((m) => m.symbol)).toEqual(['BTC', 'ETH', 'SOL', 'ADA', 'DOT', 'LINK']);
-  // Shape: { symbol, name, change24h } with catalog name + signed change preserved.
-  expect(d.topMovers[0]).toEqual({ symbol: 'BTC', name: 'Bitcoin', change24h: 10 });
-  expect(d.topMovers[1]).toEqual({ symbol: 'ETH', name: 'Ethereum', change24h: -8 });
-  expect(d.topMovers[5]).toEqual({ symbol: 'LINK', name: 'Chainlink', change24h: -1 });
+  // Shape: { symbol, name, change24h, spark } with catalog name + signed change
+  // preserved; spark is [] here (no price_hist:<SYMBOL> list seeded — retrofit-20).
+  expect(d.topMovers[0]).toEqual({ symbol: 'BTC', name: 'Bitcoin', change24h: 10, spark: [] });
+  expect(d.topMovers[1]).toEqual({ symbol: 'ETH', name: 'Ethereum', change24h: -8, spark: [] });
+  expect(d.topMovers[5]).toEqual({ symbol: 'LINK', name: 'Chainlink', change24h: -1, spark: [] });
   // The 7th-largest mover and the change24h-less tick are excluded.
   expect(d.topMovers.map((m) => m.symbol)).not.toContain('AVAX');
   expect(d.topMovers.map((m) => m.symbol)).not.toContain('USDT');
@@ -507,4 +512,55 @@ it('387: topMovers is [] when no symbol has a fresh tick (feeds down)', async ()
   expect(d.topMovers).toEqual([]);
   // The empty list is still cached (so we don't recompute every request for 60s).
   expect(await redis.get('overview_top_movers')).toBe('[]');
+});
+
+// ---------------------------------------------------------------------------
+// 390 — real 24h PnL from the latest BalanceSnapshot ≤24h old (retrofit-20, Part 1)
+// ---------------------------------------------------------------------------
+
+it('390: totals.pnl24h* = current total − latest snapshot ≤24h old (matching %)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const p = await createManualPortfolio(userId, 'P', 50000);
+  await seedAsset(p, btcId, 1.0);
+  // Live tick → current BTC price 100000 (overlays the seeded currentPrice), so the
+  // current total (100000) differs from the snapshot baseline below.
+  await seedPriceTick('BTC', 5, 100000);
+  // Daily snapshot dated ~25h ago (the "last daily close") with a known value 80000.
+  const ymd25hAgo = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  await seedSnapshot(p, userId, ymd25hAgo, 80000);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  expect(d.totals.totalValue).toBeCloseTo(100000, 2);
+  // pnl24hValue = current total (100000) − snapshot baseline (80000) = 20000
+  expect(d.totals.pnl24hValue).toBe(20000);
+  // pnl24h = 20000 / 80000 * 100 = 25.00 (the matching %)
+  expect(d.totals.pnl24h).toBe(25);
+});
+
+// ---------------------------------------------------------------------------
+// 391 — real top-mover sparklines from sampled price_hist (retrofit-20, Part 2)
+// ---------------------------------------------------------------------------
+
+it('391: topMovers attach the sampled price_hist series as spark (oldest→newest); no list → []', async () => {
+  const cookies = await registerAndLogin();
+  // BTC: a live tick (so it ranks) + a sampled history list. The resolver LPUSHes the
+  // newest sample at the head, so the stored order is newest→oldest; serve reverses it
+  // to oldest→newest for the chart.
+  await seedPriceTick('BTC', 10, 100000);
+  await redis.rpush('price_hist:BTC', '105', '103', '101'); // newest→oldest, as stored
+  // ETH: a live tick but NO history list → its spark must be [].
+  await seedPriceTick('ETH', -8, 3000);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const btc = d.topMovers.find((m) => m.symbol === 'BTC')!;
+  const eth = d.topMovers.find((m) => m.symbol === 'ETH')!;
+  expect(btc.spark).toEqual([101, 103, 105]); // oldest→newest (reversed from stored)
+  expect(eth.spark).toEqual([]); // no history list → flat/empty
 });

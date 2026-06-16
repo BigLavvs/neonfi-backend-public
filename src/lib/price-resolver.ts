@@ -22,6 +22,14 @@ const STALENESS_WINDOW_MS = 15_000;
 // three feeds could otherwise hammer Redis — enforce the ceiling here.
 const THROTTLE_MS = 1_000;
 
+// retrofit-20: sampled per-symbol price history for sparklines (`price_hist:<SYMBOL>`).
+// Appended at most once per symbol every HIST_SAMPLE_MS so the capped list spans hours,
+// not seconds — a far coarser gate than the 1s canonical throttle. Kept to the newest
+// HIST_MAX_POINTS and expired after HIST_TTL_S so a quiet symbol's series ages out.
+const HIST_SAMPLE_MS = 5 * 60_000; // ≥5 min between samples per symbol
+const HIST_MAX_POINTS = 12; // LTRIM 0..11
+const HIST_TTL_S = 86_400; // 1 day
+
 // Resolver priority TIERS: lower number wins. The true-USD sources (coinbase,
 // kraken) share the top tier — between them the freshest tick wins. Binance is
 // the lower tier (USDT-quoted ≈ USD approximation), used only as a fallback.
@@ -43,6 +51,11 @@ interface ExchangeTick {
 // Last canonical write time per symbol — drives the throttle. In-process Map is
 // fine: a single backend process owns the feeds.
 const lastCanonicalWriteAt = new Map<string, number>();
+
+// retrofit-20: last history-sample time per symbol — drives the ≥5-min sparkline
+// sample gate, independent of the 1s canonical throttle above. Same in-process Map
+// rationale (single feed-owning process).
+const lastHistSampleAt = new Map<string, number>();
 
 /**
  * Record a tick from one exchange. Writes the per-exchange key unconditionally,
@@ -124,11 +137,30 @@ async function resolveCanonical(sym: string, now: number): Promise<void> {
 
   await redis.set(`price:${sym}`, payload, 'EX', PRICE_TTL_S);
   await redis.publish(`price:${sym}`, payload);
+
+  // retrofit-20: append the winning price to a capped per-symbol history list for
+  // sparklines, sampled at ≥5 min (a separate, coarser gate than the 1s canonical
+  // throttle) so ~12 points span hours, not seconds. Stamp the sample time BEFORE the
+  // await (same collapse-concurrent-ticks reasoning as the throttle). Best-effort: a
+  // history failure must never break the canonical price path, so the chain is fully
+  // `.catch`-swallowed.
+  const lastHist = lastHistSampleAt.get(sym) ?? 0;
+  if (now - lastHist >= HIST_SAMPLE_MS) {
+    lastHistSampleAt.set(sym, now);
+    await redis
+      .lpush(`price_hist:${sym}`, String(winner.tick.price))
+      .then(() => redis.ltrim(`price_hist:${sym}`, 0, HIST_MAX_POINTS - 1))
+      .then(() => redis.expire(`price_hist:${sym}`, HIST_TTL_S))
+      .catch(() => {
+        /* sparkline history is best-effort */
+      });
+  }
 }
 
-/** Test-only: reset the throttle bookkeeping between cases. */
+/** Test-only: reset the throttle + history-sample bookkeeping between cases. */
 export function __resetThrottleForTest(): void {
   lastCanonicalWriteAt.clear();
+  lastHistSampleAt.clear();
 }
 
 export const __internals = {
@@ -136,4 +168,7 @@ export const __internals = {
   THROTTLE_MS,
   PRICE_TTL_S,
   SOURCE_PRIORITY,
+  HIST_SAMPLE_MS,
+  HIST_MAX_POINTS,
+  HIST_TTL_S,
 };
