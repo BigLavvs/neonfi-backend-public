@@ -121,27 +121,35 @@ export async function refreshPrices(
     }
   }
 
-  // retrofit-18: now that the fresh `price:<SYMBOL>` values are written, bust the caller's
-  // derived caches (portfolio_pnl + analytics_*) so the next GET /overview (and analytics)
-  // recomputes against them — otherwise the 60s-cached derived values mask the refresh.
+  // retrofit-18/19: now that the fresh `price:<SYMBOL>` values are written, bust the caller's
+  // read caches so the next GET /overview (and analytics) reflects the refresh immediately:
+  //   - derived caches (portfolio_pnl + analytics_*) that computeDerived reads, AND
+  //   - the per-user overview response cache (`overview:<userId>:*`) that wraps the whole payload.
+  // Both layers must go: the response cache sits in front of the derived caches, so clearing
+  // only the derived ones would still serve the pre-refresh response until its 60s TTL lapses.
   // Best-effort: a Redis/DB hiccup here must NOT fail an otherwise-successful refresh.
-  await invalidateUserDerivedCaches(userId).catch((e: Error) =>
-    console.error(`[prices] derived-cache invalidation failed for user ${userId}:`, e.message),
+  await invalidateUserReadCaches(userId).catch((e: Error) =>
+    console.error(`[prices] read-cache invalidation failed for user ${userId}:`, e.message),
   );
 
   return { prices, ...(partialFailure ? { partialFailure: true } : {}) };
 }
 
-// Delete every derived-cache key for each of the user's portfolios. Keys come from the
-// shared portfolioDerivedCacheKeys() helper (the same list transactions.service busts on
-// CUD), so this stays in sync as new derived caches are added there.
-async function invalidateUserDerivedCaches(userId: number): Promise<void> {
+// Delete the user's read caches so the next GET /overview recomputes against the fresh prices:
+//   1. Every derived-cache key for each of the user's portfolios. Keys come from the shared
+//      portfolioDerivedCacheKeys() helper (the same list transactions.service busts on CUD),
+//      so this stays in sync as new derived caches are added there.
+//   2. The per-user overview response cache (`overview:<userId>:*`, every days/txLimit variant).
+async function invalidateUserReadCaches(userId: number): Promise<void> {
   const portfolios = await prisma.portfolio.findMany({
     where: { userId },
     select: { id: true },
   });
   const keys = portfolios.flatMap((p) => portfolioDerivedCacheKeys(p.id));
   if (keys.length > 0) await redis.del(...keys);
+
+  const overviewKeys = await redis.keys(`overview:${userId}:*`);
+  if (overviewKeys.length > 0) await redis.del(...overviewKeys);
 }
 
 // Exported for test injection

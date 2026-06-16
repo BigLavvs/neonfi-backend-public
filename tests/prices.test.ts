@@ -335,7 +335,7 @@ it('246: POST /prices/refresh no auth → 401', async () => {
 // 388. Refresh busts the caller's derived caches (retrofit-18)
 // ---------------------------------------------------------------------------
 
-it("388: POST /prices/refresh deletes the caller's portfolio_pnl + analytics_* derived caches", async () => {
+it("388: POST /prices/refresh deletes the caller's portfolio_pnl + analytics_* derived caches AND overview response cache", async () => {
   const cookie = await registerAndLogin();
   const userId = await getUserId();
   await createFreeSubForUser(userId);
@@ -348,6 +348,12 @@ it("388: POST /prices/refresh deletes the caller's portfolio_pnl + analytics_* d
   // (60s TTL). These are exactly the keys the shared helper enumerates.
   const keys = portfolioDerivedCacheKeys(portfolio.id);
   for (const k of keys) await redis.set(k, JSON.stringify({ stale: true }), 'EX', 60);
+
+  // retrofit-19: also prime the per-user overview response cache (one days/txLimit variant)
+  // that getOverview wraps the whole payload in — refresh must evict this too or the cached
+  // pre-refresh response is served until its 60s TTL lapses.
+  const overviewKey = `overview:${userId}:30:10`;
+  await redis.set(overviewKey, JSON.stringify({ stale: true }), 'EX', 60);
 
   mockFetchPrices.mockResolvedValueOnce(new Map([['BTC', { price: 95000, change24h: 1.5 }]]));
 
@@ -362,6 +368,8 @@ it("388: POST /prices/refresh deletes the caller's portfolio_pnl + analytics_* d
   for (const k of keys) {
     expect(await redis.get(k)).toBeNull();
   }
+  // And the overview response cache is evicted → the refreshed payload is rebuilt immediately.
+  expect(await redis.get(overviewKey)).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
