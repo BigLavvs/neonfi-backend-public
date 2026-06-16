@@ -69,9 +69,16 @@ export async function handleCheckoutSessionCompleted(event: Stripe.Event): Promi
   }
 
   const stripeSub = await stripe.subscriptions.retrieve(stripeSubscriptionId);
-  const rawSub = stripeSub as unknown as { current_period_start: number; current_period_end: number };
-  const currentPeriodStart = new Date(rawSub.current_period_start * 1000);
-  const currentPeriodEnd = new Date(rawSub.current_period_end * 1000);
+  // Basil (2025-03-31)+ removed current_period_start/end from Subscription; they
+  // now live on each SubscriptionItem. apiVersion is pinned to dahlia (src/lib/stripe.ts).
+  const item = stripeSub.items.data[0];
+  if (!item?.current_period_start || !item?.current_period_end) {
+    throw new Error(
+      `checkout.session.completed: subscription ${stripeSubscriptionId} has no item billing period`,
+    );
+  }
+  const currentPeriodStart = new Date(item.current_period_start * 1000);
+  const currentPeriodEnd = new Date(item.current_period_end * 1000);
 
   const paymentIntentId = toStr(session.payment_intent as string | { id: string } | null);
 
@@ -129,15 +136,21 @@ export async function handleCheckoutSessionCompleted(event: Stripe.Event): Promi
 // ---------------------------------------------------------------------------
 
 export async function handleInvoicePaymentSucceeded(event: Stripe.Event): Promise<void> {
+  // Basil (2025-03-31)+ removed `subscription` from Invoice; the ref now lives at
+  // parent.subscription_details.subscription. period_start/end remain top-level
+  // (verified against the pinned dahlia SDK types — src/lib/stripe.ts).
   const invoice = event.data.object as unknown as {
-    subscription: string | { id: string } | null;
+    subscription?: string | { id: string } | null;
+    parent?: { subscription_details?: { subscription?: string | { id: string } | null } | null } | null;
     payment_intent: string | null;
     amount_paid: number;
     currency: string;
     period_start: number;
     period_end: number;
   };
-  const stripeSubscriptionId = toStr(invoice.subscription);
+  const stripeSubscriptionId = toStr(
+    invoice.parent?.subscription_details?.subscription ?? invoice.subscription,
+  );
   const paymentIntentId = toStr(invoice.payment_intent);
 
   if (!stripeSubscriptionId || !paymentIntentId) {
@@ -196,14 +209,19 @@ export async function handleInvoicePaymentSucceeded(event: Stripe.Event): Promis
 // ---------------------------------------------------------------------------
 
 export async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
+  // Basil (2025-03-31)+ relocated the subscription ref to
+  // parent.subscription_details.subscription (src/lib/stripe.ts pins dahlia).
   const invoice = event.data.object as unknown as {
-    subscription: string | { id: string } | null;
+    subscription?: string | { id: string } | null;
+    parent?: { subscription_details?: { subscription?: string | { id: string } | null } | null } | null;
     payment_intent: string | null;
     amount_due: number;
     currency: string;
     next_payment_attempt: number | null;
   };
-  const stripeSubscriptionId = toStr(invoice.subscription);
+  const stripeSubscriptionId = toStr(
+    invoice.parent?.subscription_details?.subscription ?? invoice.subscription,
+  );
 
   if (!stripeSubscriptionId) {
     console.warn('[webhooks] invoice.payment_failed: no subscription ID', { eventId: event.id });
@@ -252,12 +270,14 @@ export async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<v
 // ---------------------------------------------------------------------------
 
 export async function handleSubscriptionUpdated(event: Stripe.Event): Promise<void> {
+  // Basil (2025-03-31)+ relocated current_period_start/end onto each
+  // SubscriptionItem; read the period from items.data[0] (src/lib/stripe.ts).
   const raw = event.data.object as unknown as {
     id: string;
     cancel_at_period_end: boolean;
-    current_period_start: number;
-    current_period_end: number;
+    items?: { data?: Array<{ current_period_start?: number; current_period_end?: number }> };
   };
+  const period = raw.items?.data?.[0];
 
   const localSub = await prisma.subscription.findFirst({
     where: { stripeSubscriptionId: raw.id },
@@ -268,10 +288,12 @@ export async function handleSubscriptionUpdated(event: Stripe.Event): Promise<vo
     return;
   }
 
-  const updateData: Record<string, unknown> = {
-    currentPeriodStart: new Date(raw.current_period_start * 1000),
-    currentPeriodEnd: new Date(raw.current_period_end * 1000),
-  };
+  // Only set period fields when present so a missing period can never write an Invalid Date.
+  const updateData: Record<string, unknown> = {};
+  if (period?.current_period_start && period?.current_period_end) {
+    updateData.currentPeriodStart = new Date(period.current_period_start * 1000);
+    updateData.currentPeriodEnd = new Date(period.current_period_end * 1000);
+  }
 
   if (raw.cancel_at_period_end && localSub.status.name === 'active') {
     const cancelledStatus = await prisma.subscriptionStatus.findUniqueOrThrow({ where: { name: 'cancelled' } });

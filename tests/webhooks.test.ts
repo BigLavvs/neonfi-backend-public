@@ -161,9 +161,10 @@ async function createPayment(subscriptionId: number, userId: number, piId = STRI
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  // dahlia (Basil 2025-03-31+): current_period_start/end live on the
+  // subscription ITEM, not the Subscription resource.
   mockSubscriptionsRetrieve.mockResolvedValue({
-    current_period_start: 1748678400,
-    current_period_end: 1751356800,
+    items: { data: [{ current_period_start: 1748678400, current_period_end: 1751356800 }] },
   });
   await truncateAllUserData();
   await clearRedisAuthKeys();
@@ -178,7 +179,7 @@ beforeEach(async () => {
 it('86: valid sig → 200 { received: true }', async () => {
   // invoice.payment_failed with non-existent subscription: handler returns early, no error
   const event = makeEvent('invoice.payment_failed', {
-    subscription: 'sub_nonexistent',
+    parent: { subscription_details: { subscription: 'sub_nonexistent' } },
     payment_intent: null,
     amount_due: 999,
     currency: 'usd',
@@ -237,7 +238,7 @@ it('89: idempotency — same event ID twice → second returns duplicate: true; 
   const subId = await createProSubscription(userId);
 
   const event = makeEvent('invoice.payment_succeeded', {
-    subscription: STRIPE_SUB_ID,
+    parent: { subscription_details: { subscription: STRIPE_SUB_ID } },
     payment_intent: 'pi_idempotency_test',
     amount_paid: 999,
     currency: 'usd',
@@ -365,7 +366,7 @@ it('92: invoice.payment_succeeded → Payment row created, Subscription period d
   const newPeriodEnd = 1753948800;   // 2026-08-01
 
   const event = makeEvent('invoice.payment_succeeded', {
-    subscription: STRIPE_SUB_ID,
+    parent: { subscription_details: { subscription: STRIPE_SUB_ID } },
     payment_intent: 'pi_invoice_succeeded_001',
     amount_paid: 999,
     currency: 'usd',
@@ -397,7 +398,7 @@ it('93: invoice.payment_failed → Payment row created with status=failed; Subsc
   const subId = await createProSubscription(userId);
 
   const event = makeEvent('invoice.payment_failed', {
-    subscription: STRIPE_SUB_ID,
+    parent: { subscription_details: { subscription: STRIPE_SUB_ID } },
     payment_intent: 'pi_failed_001',
     amount_due: 999,
     currency: 'usd',
@@ -434,8 +435,7 @@ it('94: customer.subscription.updated cancel_at_period_end=true → local Subscr
   const event = makeEvent('customer.subscription.updated', {
     id: STRIPE_SUB_ID,
     cancel_at_period_end: true,
-    current_period_start: 1748678400,
-    current_period_end: 1751356800,
+    items: { data: [{ current_period_start: 1748678400, current_period_end: 1751356800 }] },
   }, 'evt_sub_updated_001');
   mockConstructEvent.mockReturnValueOnce(event);
 
@@ -551,4 +551,67 @@ it('98: unhandled event type → 200 { received: true, unhandled: true }; Redis 
   // Idempotency key still set so retries are no-ops
   const key = await redis.get('stripe_event:evt_unhandled_001');
   expect(key).toBe('1');
+});
+
+// ---------------------------------------------------------------------------
+// 99. REGRESSION (retrofit-25): checkout.session.completed with the dahlia
+//     item-level billing period must activate Pro with a valid future period
+//     end + a succeeded Payment + completed onboarding. The pre-fix handler read
+//     the (now-absent) top-level current_period_* → Invalid Date → tx rollback →
+//     500, Pro never activated, no Payment row. This guards that relocation.
+// ---------------------------------------------------------------------------
+
+it('99: checkout.session.completed (dahlia item-level period) → plan=pro/status=active, valid future currentPeriodEnd, succeeded Payment, onboarding complete', async () => {
+  const userId = await createUser('verified');
+
+  // dahlia: current_period_start/end live on the subscription ITEM, not the sub.
+  const futureStart = Math.floor(new Date('2098-12-01T00:00:00Z').getTime() / 1000);
+  const futureEnd = Math.floor(new Date('2099-01-01T00:00:00Z').getTime() / 1000);
+  mockSubscriptionsRetrieve.mockResolvedValueOnce({
+    items: { data: [{ current_period_start: futureStart, current_period_end: futureEnd }] },
+  });
+
+  const event = makeEvent('checkout.session.completed', {
+    payment_intent: STRIPE_PI_ID,
+    subscription: STRIPE_SUB_ID,
+    customer: STRIPE_CUST_ID,
+    amount_total: 999,
+    currency: 'usd',
+    payment_status: 'paid',
+    metadata: { userId: String(userId), plan: 'pro', billingCycle: 'monthly' },
+  }, 'evt_retrofit25_regression');
+  mockConstructEvent.mockReturnValueOnce(event);
+
+  const res = await webhookPost(event);
+  expect(res.status).toBe(200);
+
+  const sub = await prisma.subscription.findUnique({
+    where: { userId },
+    include: { plan: true, status: true },
+  });
+  expect(sub).not.toBeNull();
+  expect(sub!.plan.name).toBe('pro');
+  expect(sub!.status.name).toBe('active');
+  // Valid (not Invalid Date) and in the future — the exact regression that 500'd.
+  expect(sub!.currentPeriodEnd).not.toBeNull();
+  expect(Number.isNaN(sub!.currentPeriodEnd!.getTime())).toBe(false);
+  expect(sub!.currentPeriodEnd!.getTime()).toBe(futureEnd * 1000);
+  expect(sub!.currentPeriodEnd!.getTime()).toBeGreaterThan(Date.now());
+
+  const payment = await prisma.payment.findFirst({
+    where: { stripePaymentIntentId: STRIPE_PI_ID },
+    include: { status: true },
+  });
+  expect(payment).not.toBeNull();
+  expect(payment!.amount).toBe(999);
+  expect(payment!.currency).toBe('usd');
+  expect(payment!.status.name).toBe('succeeded');
+
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { id: userId },
+    include: { onboardingStatus: true },
+  });
+  expect(user.onboardingStatus.name).toBe('complete');
+
+  expect(mockSubscriptionsRetrieve).toHaveBeenCalledWith(STRIPE_SUB_ID);
 });
