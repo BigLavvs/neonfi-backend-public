@@ -1,28 +1,30 @@
-// Neonfi backend — client-facing WebSocket server (Stage 10B).
+// Neonfi backend — client-facing WebSocket server (Stage 10B; retrofit-28 broadcast firehose).
 //
 // Upgrade-level auth: GETDEL ws_ticket:<token> from Redis (issued by GET /auth/ws-token).
 // Build Guide §2.7: close code 4001 = consumed/invalid ticket; at upgrade time this
 // manifests as HTTP 401 (no WS handshake has occurred yet — no socket to send a close
 // frame to). HTTP 403 = free user rejected at handshake.
 //
-// Fan-out path: Coinbase → Redis publish price:<SYMBOL> → redisSubscriber → subs:<SYMBOL>
-// SET members → wsBySocketId map → ws.send(price_update envelope).
+// retrofit-28 — BROADCAST FIREHOSE. Realtime prices are a client-side display overlay
+// (Idowu's decision, see _claude/retrofit-28.md). The server no longer tracks per-socket
+// symbol subscriptions; it psubscribes the full `price:*` channel ONCE, buffers the
+// latest tick per symbol, and flushes ONE batched `price_update` frame to EVERY open
+// (Pro) socket on a fixed ~1s cadence. No `subscribe` message, no `subs:<SYMBOL>` sets,
+// no per-socket symbol state — server cost is flat regardless of symbol/holding count.
+// The exchange feeds already subscribe full coverage at boot (index.ts startPriceFeeds),
+// so prices are already flowing into Redis `price:<SYMBOL>`.
 
 import { WebSocketServer, WebSocket } from 'ws';
-import type { RawData } from 'ws';
 import type { IncomingMessage } from 'node:http';
 import type { Server as HttpServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { redis } from '../lib/redis.js';
 import { redisSubscriber } from '../lib/redis-subscriber.js';
-import { coinbase } from '../lib/coinbase.js';
 import { findSessionById } from '../modules/users/users.repository.js';
 import { getEffectivePlan } from '../modules/subscriptions/subscriptions.service.js';
-import { prisma } from '../lib/prisma.js';
 import {
   socketsByUser,
   wsBySocketId,
-  symbolsBySocket,
   registerSocket,
   unregisterSocket,
   clearRegistry,
@@ -33,7 +35,15 @@ import {
 // ---------------------------------------------------------------------------
 
 let _wss: WebSocketServer | null = null;
-const subscribedRedisChannels = new Set<string>();
+
+// retrofit-28: latest tick per symbol, accumulated between flushes (latest wins). One
+// shared buffer for the whole process — the broadcast is identical for every socket.
+const priceBuffer = new Map<string, { price: number; change24h: number }>();
+
+// Single batching timer: one client update/sec (smooth, low churn) instead of per-tick
+// spam. Cleared in stopWsServer.
+let _flushTimer: ReturnType<typeof setInterval> | null = null;
+const FLUSH_INTERVAL_MS = 1_000;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -66,27 +76,37 @@ export async function startWsServer(httpServer: HttpServer): Promise<void> {
   _wss.on('connection', handleConnection);
 
   await startRedisSubscriptions();
+  startFlushLoop();
 }
 
 export async function stopWsServer(): Promise<void> {
+  if (_flushTimer) {
+    clearInterval(_flushTimer);
+    _flushTimer = null;
+  }
+  priceBuffer.clear();
+
   for (const ws of wsBySocketId.values()) {
     ws.terminate();
   }
   clearRegistry();
-  subscribedRedisChannels.clear();
+
+  // Best-effort subscription cleanup, then force the connection down. We do NOT await the
+  // unsubscribe/punsubscribe round-trips — disconnect() tears the connection down
+  // regardless, and a slow round-trip must not block (or hang) shutdown.
+  try {
+    void redisSubscriber.unsubscribe().catch(() => {});
+    void redisSubscriber.punsubscribe().catch(() => {});
+    redisSubscriber.disconnect();
+  } catch {
+    // ignore cleanup errors
+  }
 
   if (_wss) {
     await new Promise<void>((r, e) =>
       _wss!.close((err) => (err ? e(err) : r())),
     );
     _wss = null;
-  }
-
-  try {
-    await redisSubscriber.unsubscribe();
-    redisSubscriber.disconnect();
-  } catch {
-    // ignore cleanup errors
   }
 }
 
@@ -149,12 +169,14 @@ function handleConnection(ws: WebSocket, _req: IncomingMessage, context: AuthCon
 
   registerSocket(socketId, userId, ws);
 
-  ws.on('message', (data: RawData) => {
-    void handleMessage(socketId, ws, data);
+  // retrofit-28: clients send nothing now (the firehose delivers everything). Inbound
+  // frames are ignored — drain them so the socket buffer doesn't grow, but never reply.
+  ws.on('message', () => {
+    /* ignore — broadcast firehose has no client→server protocol */
   });
 
   ws.on('close', () => {
-    void handleClose(socketId, userId);
+    unregisterSocket(socketId, userId);
   });
 
   ws.on('error', (err: Error) => {
@@ -163,98 +185,54 @@ function handleConnection(ws: WebSocket, _req: IncomingMessage, context: AuthCon
 }
 
 // ---------------------------------------------------------------------------
-// Subscribe message handler
+// Price firehose — buffer + batched flush
 // ---------------------------------------------------------------------------
 
-async function handleMessage(
-  socketId: string,
-  ws: WebSocket,
-  data: RawData,
-): Promise<void> {
-  let msg: Record<string, unknown>;
-  try {
-    msg = JSON.parse(data.toString()) as Record<string, unknown>;
-  } catch {
-    sendError(ws, 'INVALID_SUBSCRIBE_MESSAGE', 'Message is not valid JSON');
-    return;
-  }
-
-  if (msg['type'] !== 'subscribe') {
-    sendError(
-      ws,
-      'INVALID_SUBSCRIBE_MESSAGE',
-      `Unknown message type: ${String(msg['type'])}`,
-    );
-    return;
-  }
-
-  const payload = msg['payload'] as { symbols?: unknown } | undefined;
-  if (!payload || !Array.isArray(payload.symbols)) {
-    sendError(ws, 'INVALID_SUBSCRIBE_MESSAGE', 'payload.symbols must be an array of strings');
-    return;
-  }
-
-  const rawSymbols = payload.symbols as unknown[];
-  const stringSymbols = rawSymbols.filter((s): s is string => typeof s === 'string');
-
-  if (stringSymbols.length === 0) {
-    sendError(ws, 'INVALID_SUBSCRIBE_MESSAGE', 'payload.symbols must contain at least one string');
-    return;
-  }
-
-  // Validate against known tokens in DB
-  const tokens = await prisma.token.findMany({
-    where: { symbol: { in: stringSymbols } },
-    select: { symbol: true },
-  });
-  const validSymbolSet = new Set(tokens.map((t) => t.symbol));
-
-  const invalid = stringSymbols.filter((s) => !validSymbolSet.has(s));
-  if (invalid.length > 0) {
-    sendError(ws, 'UNKNOWN_SYMBOL', `Unknown symbols: ${invalid.join(', ')}`, { invalid });
-    // Do not return — continue subscribing to valid symbols
-  }
-
-  const socketSymbols = symbolsBySocket.get(socketId);
-  if (!socketSymbols) return; // socket closed before processing
-
-  for (const symbol of stringSymbols) {
-    if (!validSymbolSet.has(symbol) || socketSymbols.has(symbol)) continue;
-
-    socketSymbols.add(symbol);
-
-    // Redis SET tracks which sockets want fan-out for this symbol.
-    // SADD returns 1 if the member was new; combined with SCARD we detect
-    // when this is the first subscriber (subs:SYMBOL was empty before).
-    const addedCount = await redis.sadd('subs:' + symbol, socketId);
-    if (addedCount === 1) {
-      const total = await redis.scard('subs:' + symbol);
-      if (total === 1) {
-        // First subscriber: open Coinbase feed and Redis sub channel
-        await coinbase.subscribeToSymbol(symbol);
-        await ensureRedisChannelSubscribed(symbol);
-      }
-    }
-  }
+function startFlushLoop(): void {
+  if (_flushTimer) return;
+  _flushTimer = setInterval(flushPrices, FLUSH_INTERVAL_MS);
+  // Don't let the batching timer keep the process alive on its own; the HTTP server
+  // (prod) / test harness owns the event loop. Guarded for runtimes lacking unref.
+  _flushTimer.unref?.();
 }
 
-// ---------------------------------------------------------------------------
-// Close handler
-// ---------------------------------------------------------------------------
+function bufferPrice(channel: string, raw: string): void {
+  const symbol = channel.slice('price:'.length);
+  if (!symbol) return;
+  let data: { price?: unknown; change24h?: unknown };
+  try {
+    data = JSON.parse(raw) as { price?: unknown; change24h?: unknown };
+  } catch {
+    return;
+  }
+  if (typeof data.price !== 'number' || !Number.isFinite(data.price)) return;
+  const change24h =
+    typeof data.change24h === 'number' && Number.isFinite(data.change24h) ? data.change24h : 0;
+  // Latest tick wins until the next flush.
+  priceBuffer.set(symbol, { price: data.price, change24h });
+}
 
-async function handleClose(socketId: string, userId: number): Promise<void> {
-  const socketSymbols = symbolsBySocket.get(socketId) ?? new Set<string>();
+function flushPrices(): void {
+  if (priceBuffer.size === 0) return;
 
-  for (const symbol of socketSymbols) {
-    await redis.srem('subs:' + symbol, socketId);
-    const remaining = await redis.scard('subs:' + symbol);
-    if (remaining === 0) {
-      await coinbase.unsubscribeFromSymbol(symbol);
-      await ensureRedisChannelUnsubscribed(symbol);
+  const prices = [...priceBuffer.entries()].map(([symbol, { price, change24h }]) => ({
+    symbol,
+    price,
+    change24h,
+  }));
+  priceBuffer.clear();
+
+  const msg = JSON.stringify({
+    type: 'price_update',
+    payload: { prices },
+    timestamp: new Date().toISOString(),
+  });
+
+  for (const ws of wsBySocketId.values()) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(msg);
     }
   }
-
-  unregisterSocket(socketId, userId);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,21 +240,27 @@ async function handleClose(socketId: string, userId: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function startRedisSubscriptions(): Promise<void> {
+  // Control-plane channels (exact) + the price firehose pattern (one psubscribe for
+  // every symbol). Both ride the single dedicated subscriber connection.
   await redisSubscriber.subscribe('user_events', 'client_events');
+  await redisSubscriber.psubscribe('price:*');
 
-  redisSubscriber.on('message', async (channel: string, raw: string) => {
-    try {
-      if (channel === 'user_events') {
-        await handleUserEvent(raw);
-      } else if (channel === 'client_events') {
-        await handleClientEvent(raw);
-      } else if (channel.startsWith('price:')) {
-        const symbol = channel.slice('price:'.length);
-        await handlePriceUpdate(symbol, raw);
+  redisSubscriber.on('message', (channel: string, raw: string) => {
+    void (async () => {
+      try {
+        if (channel === 'user_events') {
+          await handleUserEvent(raw);
+        } else if (channel === 'client_events') {
+          await handleClientEvent(raw);
+        }
+      } catch (e) {
+        console.error('[ws] pub/sub handler error', e instanceof Error ? e.message : e);
       }
-    } catch (e) {
-      console.error('[ws] pub/sub handler error', e instanceof Error ? e.message : e);
-    }
+    })();
+  });
+
+  redisSubscriber.on('pmessage', (_pattern: string, channel: string, raw: string) => {
+    if (channel.startsWith('price:')) bufferPrice(channel, raw);
   });
 }
 
@@ -329,67 +313,4 @@ async function handleClientEvent(raw: string): Promise<void> {
       ws.send(msg);
     }
   }
-}
-
-async function handlePriceUpdate(symbol: string, raw: string): Promise<void> {
-  let priceData: { price: number; change24h: number };
-  try {
-    priceData = JSON.parse(raw) as { price: number; change24h: number };
-  } catch {
-    return;
-  }
-
-  const socketIds = await redis.smembers('subs:' + symbol);
-
-  const msg = JSON.stringify({
-    type: 'price_update',
-    payload: {
-      symbol,
-      price: priceData.price,
-      change24h: priceData.change24h,
-    },
-    timestamp: new Date().toISOString(),
-  });
-
-  for (const sid of socketIds) {
-    const ws = wsBySocketId.get(sid);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Redis channel management
-// ---------------------------------------------------------------------------
-
-async function ensureRedisChannelSubscribed(symbol: string): Promise<void> {
-  if (subscribedRedisChannels.has(symbol)) return;
-  await redisSubscriber.subscribe('price:' + symbol);
-  subscribedRedisChannels.add(symbol);
-}
-
-async function ensureRedisChannelUnsubscribed(symbol: string): Promise<void> {
-  if (!subscribedRedisChannels.has(symbol)) return;
-  await redisSubscriber.unsubscribe('price:' + symbol);
-  subscribedRedisChannels.delete(symbol);
-}
-
-// ---------------------------------------------------------------------------
-// Error envelope
-// ---------------------------------------------------------------------------
-
-function sendError(
-  ws: WebSocket,
-  code: string,
-  message: string,
-  extra?: Record<string, unknown>,
-): void {
-  ws.send(
-    JSON.stringify({
-      type: 'error',
-      payload: { code, message, ...extra },
-      timestamp: new Date().toISOString(),
-    }),
-  );
 }

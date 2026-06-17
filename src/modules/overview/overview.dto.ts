@@ -46,10 +46,33 @@ export interface OverviewDTO {
     unrealizedPnlPct: number;
     realizedPnlValue: number;
     allTimePnlValue: number;
+    // retrofit-28: raw per-portfolio position data so the FRONTEND can recompute every
+    // displayed figure from the live-price firehose (falling back to the daily DB price
+    // when a symbol has no live tick). Excludes balance <= 0. `balance` is full-precision
+    // quantity; avgCost/costBasis/realizedPnl are taken straight off the Asset (maintained
+    // by recalc — no new computation here). avgCost is null for cost-unknown holdings.
+    holdings: Array<{
+      symbol: string;
+      balance: number;
+      avgCost: number | null;
+      costBasis: number;
+      realizedPnl: number;
+    }>;
   }>;
   valueHistory: Array<{ date: string; value: number }>; // 'YYYY-MM-DD', aggregate, asc
   allocation: Array<{ symbol: string; value: number; percentage: number }>; // desc by value
-  holdings: Array<{ symbol: string; balance: number }>; // aggregate balance per symbol
+  // retrofit-28: aggregate per-symbol position summed across portfolios. `balance` is the
+  // summed raw quantity; `costBasis`/`realizedPnl` are summed across portfolios; `avgCost`
+  // is the balance-weighted average of the per-portfolio avgCost over cost-tracked assets
+  // (Σ(avgCost×balance)/Σ(balance) over avgCost!=null assets), null when none track cost.
+  // Lets the dashboard do aggregate live PnL without re-summing the portfolio rows.
+  holdings: Array<{
+    symbol: string;
+    balance: number;
+    avgCost: number | null;
+    costBasis: number;
+    realizedPnl: number;
+  }>;
   recentTransactions: TransactionListDTO[]; // most recent `txLimit`, desc by timestamp
   // retrofit-18: catalog tokens with a live `price:<SYMBOL>` tick, ranked by |24h change|
   // desc and capped at 6 (biggest movers in EITHER direction). Global (same for every

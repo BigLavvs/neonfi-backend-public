@@ -1,11 +1,17 @@
-// Neonfi backend — WebSocket server integration tests (Stage 10B).
+// Neonfi backend — WebSocket server integration tests (Stage 10B; retrofit-28 broadcast).
 //
 // Strategy: real WS server on an ephemeral HTTP server; real Redis for pub/sub.
-// Coinbase is mocked (no real Coinbase calls). getEffectivePlan is mocked
-// (defaults to 'pro'; tests that need 'free' override it per-call).
-// DB is real for user/session creation (register + login + ws-token flow).
+// getEffectivePlan is mocked (defaults to 'pro'; tests that need 'free' override it
+// per-call). DB is real for user/session creation (register + login + ws-token flow).
+//
+// retrofit-28: the server is now a BROADCAST FIREHOSE — it psubscribes `price:*`, buffers
+// the latest tick per symbol, and flushes ONE batched `price_update` frame to every open
+// socket every ~1s. There is no `subscribe` message, no per-symbol fan-out, no `subs:*`
+// sets. Tests assert: ticket auth + Pro gate (unchanged), the batched broadcast frame
+// reaches sockets that never subscribed, inbound frames are ignored, and the
+// plan_downgraded / reconnect control events still fire.
 
-import { it, beforeAll, afterAll, beforeEach, afterEach, expect, vi } from 'vitest';
+import { it, beforeAll, afterAll, beforeEach, expect, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -20,16 +26,11 @@ import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.
 // Mocks — hoisted so factories can reference them
 // ---------------------------------------------------------------------------
 
-const { mockSubscribeToSymbol, mockUnsubscribeFromSymbol } = vi.hoisted(() => ({
-  mockSubscribeToSymbol: vi.fn<[string], Promise<void>>(),
-  mockUnsubscribeFromSymbol: vi.fn<[string], Promise<void>>(),
-}));
-
+// retrofit-28: the server no longer imports coinbase. The mock stays only as a safety net
+// so no transitive import can open a real Coinbase WS during the test run.
 vi.mock('../src/lib/coinbase.js', () => ({
   coinbase: {
     isConnected: vi.fn().mockReturnValue(true),
-    subscribeToSymbol: mockSubscribeToSymbol,
-    unsubscribeFromSymbol: mockUnsubscribeFromSymbol,
     connect: vi.fn(),
   },
   CoinbaseClient: vi.fn(),
@@ -87,16 +88,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await truncateAllUserData();
   await clearRedisAuthKeys();
-  const subsKeys = await redis.keys('subs:*');
-  if (subsKeys.length) await redis.del(subsKeys);
-  mockSubscribeToSymbol.mockClear().mockResolvedValue(undefined);
-  mockUnsubscribeFromSymbol.mockClear().mockResolvedValue(undefined);
   mockGetEffectivePlan.mockResolvedValue('pro');
-});
-
-afterEach(async () => {
-  // No-op: beforeEach already calls truncateAllUserData() for next test's clean state.
-  // A second TRUNCATE here caused PostgreSQL deadlocks under Neon's serverless pooler.
 });
 
 // ---------------------------------------------------------------------------
@@ -138,14 +130,56 @@ function openWs(ticket: string): Promise<WebSocket> {
   });
 }
 
-/** Wait for the next message frame on a socket. */
-function nextMessage(ws: WebSocket, timeout = 3000): Promise<Record<string, unknown>> {
+interface Frame {
+  type?: string;
+  payload?: Record<string, unknown>;
+  timestamp?: unknown;
+  [k: string]: unknown;
+}
+
+/**
+ * Wait for the next frame of a given `type`, ignoring others. The firehose can deliver a
+ * stray `price_update` at any time (the flush loop is shared module state across the
+ * file), so control-event assertions filter for the type they expect.
+ */
+function nextMessageOfType(ws: WebSocket, type: string, timeout = 4000): Promise<Frame> {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('message timeout')), timeout);
-    ws.once('message', (data) => {
+    const t = setTimeout(() => {
+      ws.off('message', onMsg);
+      reject(new Error(`timed out waiting for "${type}" frame`));
+    }, timeout);
+    const onMsg = (data: WebSocket.RawData) => {
+      let frame: Frame;
+      try {
+        frame = JSON.parse(data.toString()) as Frame;
+      } catch {
+        return;
+      }
+      if (frame.type !== type) return;
       clearTimeout(t);
-      resolve(JSON.parse(data.toString()) as Record<string, unknown>);
-    });
+      ws.off('message', onMsg);
+      resolve(frame);
+    };
+    ws.on('message', onMsg);
+  });
+}
+
+/** Collect every frame received over `ms` (used to prove a quiet socket / batching). */
+function collectMessages(ws: WebSocket, ms: number): Promise<Frame[]> {
+  return new Promise((resolve) => {
+    const frames: Frame[] = [];
+    const onMsg = (data: WebSocket.RawData) => {
+      try {
+        frames.push(JSON.parse(data.toString()) as Frame);
+      } catch {
+        /* ignore non-JSON */
+      }
+    };
+    ws.on('message', onMsg);
+    setTimeout(() => {
+      ws.off('message', onMsg);
+      resolve(frames);
+    }, ms);
   });
 }
 
@@ -158,33 +192,6 @@ function waitClose(ws: WebSocket, timeout = 3000): Promise<{ code: number; reaso
       resolve({ code, reason: reason.toString() });
     });
   });
-}
-
-/** Poll until a vi.fn() has been called at least once. */
-async function waitForCall(
-  mock: ReturnType<typeof vi.fn>,
-  timeout = 8000,
-): Promise<void> {
-  const deadline = Date.now() + timeout;
-  while (mock.mock.calls.length === 0) {
-    if (Date.now() >= deadline) throw new Error('mock was never called within timeout');
-    await new Promise((r) => setTimeout(r, 100));
-  }
-}
-
-/** Poll until a Redis SET has at least minCount members. */
-async function waitForRedisSet(
-  key: string,
-  minCount = 1,
-  timeout = 8000,
-): Promise<void> {
-  const deadline = Date.now() + timeout;
-  while (true) {
-    const count = await redis.scard(key);
-    if (count >= minCount) return;
-    if (Date.now() >= deadline) throw new Error(`${key} never reached ${minCount} members`);
-    await new Promise((r) => setTimeout(r, 100));
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,79 +321,34 @@ it('256: free user ticket → 403 (free users rejected at handshake)', async () 
 });
 
 // ---------------------------------------------------------------------------
-// 257. Subscribe to BTC → coinbase.subscribeToSymbol called once
+// 257. Broadcast firehose: a price publish reaches EVERY open socket (no subscribe)
 // ---------------------------------------------------------------------------
 
-it('257: subscribe to BTC → coinbase.subscribeToSymbol called once for BTC', async () => {
-  const ticket = await getTicket();
-  const ws = await openWs(ticket);
-
-  ws.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
-  await waitForCall(mockSubscribeToSymbol);
-
-  expect(mockSubscribeToSymbol).toHaveBeenCalledOnce();
-  expect(mockSubscribeToSymbol).toHaveBeenCalledWith('BTC');
-
-  ws.close();
-  await waitClose(ws).catch(() => {});
-  await new Promise((r) => setTimeout(r, 200));
-});
-
-// ---------------------------------------------------------------------------
-// 258. Second socket subscribes to same BTC → subscribeToSymbol NOT called again
-// ---------------------------------------------------------------------------
-
-it('258: second socket subscribes to BTC → subscribeToSymbol NOT called again (refcount)', async () => {
+it('257: publish price:BTC → every open socket receives the batched price_update frame (no subscribe)', async () => {
   const ticket1 = await getTicket(TEST_EMAIL);
   const ticket2 = await getTicket(TEST_EMAIL2);
 
   const ws1 = await openWs(ticket1);
   const ws2 = await openWs(ticket2);
 
-  ws1.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
-  await waitForCall(mockSubscribeToSymbol);
-
-  ws2.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
-  await waitForRedisSet('subs:BTC', 2);
-
-  expect(mockSubscribeToSymbol).toHaveBeenCalledOnce();
-  expect(mockSubscribeToSymbol).toHaveBeenCalledWith('BTC');
-
-  ws1.close();
-  ws2.close();
-  await new Promise((r) => setTimeout(r, 300));
-});
-
-// ---------------------------------------------------------------------------
-// 259. Publish price:BTC → both subscribers receive price_update envelope
-// ---------------------------------------------------------------------------
-
-it('259: publish price:BTC → both subscribers receive price_update envelope with exact shape', async () => {
-  const ticket1 = await getTicket(TEST_EMAIL);
-  const ticket2 = await getTicket(TEST_EMAIL2);
-
-  const ws1 = await openWs(ticket1);
-  const ws2 = await openWs(ticket2);
-
-  ws1.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
-  ws2.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
-  await waitForRedisSet('subs:BTC', 2);
-
-  const msg1Promise = nextMessage(ws1);
-  const msg2Promise = nextMessage(ws2);
+  // Neither socket sent ANY subscribe frame — the firehose delivers everything.
+  const msg1Promise = nextMessageOfType(ws1, 'price_update');
+  const msg2Promise = nextMessageOfType(ws2, 'price_update');
 
   await redis.publish('price:BTC', JSON.stringify({ price: 50000, change24h: 1.5, timestamp: Date.now() }));
 
   const [msg1, msg2] = await Promise.all([msg1Promise, msg2Promise]);
 
   for (const msg of [msg1, msg2]) {
-    expect(msg).toMatchObject({
-      type: 'price_update',
-      payload: { symbol: 'BTC', price: 50000, change24h: 1.5 },
-    });
-    expect(typeof msg['timestamp']).toBe('string');
-    // Verify payload is nested, not flat (frontend reads msg.payload.symbol)
-    expect(msg['symbol']).toBeUndefined();
+    expect(msg.type).toBe('price_update');
+    const payload = msg.payload as { prices?: Array<{ symbol: string; price: number; change24h: number }> };
+    expect(Array.isArray(payload.prices)).toBe(true);
+    const btc = payload.prices!.find((p) => p.symbol === 'BTC')!;
+    expect(btc).toEqual({ symbol: 'BTC', price: 50000, change24h: 1.5 });
+    expect(typeof msg.timestamp).toBe('string');
+    // Prices are nested under payload.prices[] — NOT flat on the frame or the payload.
+    expect((msg as Record<string, unknown>)['symbol']).toBeUndefined();
+    expect((msg.payload as Record<string, unknown>)['symbol']).toBeUndefined();
   }
 
   ws1.close();
@@ -395,24 +357,31 @@ it('259: publish price:BTC → both subscribers receive price_update envelope wi
 });
 
 // ---------------------------------------------------------------------------
-// 260. Publish price:ETH (no subscribers) → no socket receives anything
+// 258. Batching: multiple symbols published in a window arrive in the prices[] array
 // ---------------------------------------------------------------------------
 
-it('260: publish price:ETH (no subscribers) → no socket receives anything', async () => {
+it('258: multiple symbols → delivered batched under one payload.prices[] (latest wins per symbol)', async () => {
   const ticket = await getTicket();
   const ws = await openWs(ticket);
 
-  // Subscribe to BTC only, not ETH
-  ws.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
-  await new Promise((r) => setTimeout(r, 200));
+  const framesPromise = collectMessages(ws, 1600); // ~1.5 flush windows
+  // Two distinct symbols + a second BTC tick (latest must win for BTC).
+  await redis.publish('price:BTC', JSON.stringify({ price: 50000, change24h: 1.5 }));
+  await redis.publish('price:ETH', JSON.stringify({ price: 3000, change24h: -2.0 }));
+  await redis.publish('price:BTC', JSON.stringify({ price: 50500, change24h: 1.7 }));
 
-  let received = false;
-  ws.once('message', () => { received = true; });
+  const frames = await framesPromise;
+  const priceFrames = frames.filter((f) => f.type === 'price_update');
+  expect(priceFrames.length).toBeGreaterThan(0);
 
-  await redis.publish('price:ETH', JSON.stringify({ price: 3000, change24h: 0.5, timestamp: Date.now() }));
-  await new Promise((r) => setTimeout(r, 300));
-
-  expect(received).toBe(false);
+  // Merge all delivered prices; both symbols must appear, BTC at its latest value.
+  const merged = new Map<string, { price: number; change24h: number }>();
+  for (const f of priceFrames) {
+    const prices = (f.payload as { prices: Array<{ symbol: string; price: number; change24h: number }> }).prices;
+    for (const p of prices) merged.set(p.symbol, { price: p.price, change24h: p.change24h });
+  }
+  expect(merged.get('BTC')).toEqual({ price: 50500, change24h: 1.7 });
+  expect(merged.get('ETH')).toEqual({ price: 3000, change24h: -2.0 });
 
   ws.close();
   await waitClose(ws).catch(() => {});
@@ -420,90 +389,23 @@ it('260: publish price:ETH (no subscribers) → no socket receives anything', as
 });
 
 // ---------------------------------------------------------------------------
-// 261. Disconnect socket → subs:BTC Redis SET no longer contains its socketId
+// 259. Inbound client frames are ignored (no protocol) — connection stays open, no reply
 // ---------------------------------------------------------------------------
 
-it('261: disconnect socket → subs:BTC Redis SET no longer contains its socketId', async () => {
+it('259: inbound frames are ignored (no subscribe protocol) → no reply, socket stays open', async () => {
   const ticket = await getTicket();
   const ws = await openWs(ticket);
 
-  ws.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
-  await waitForRedisSet('subs:BTC', 1);
-
-  const membersBefore = await redis.smembers('subs:BTC');
-  expect(membersBefore.length).toBeGreaterThan(0);
-
-  const closePromise = waitClose(ws);
-  ws.close();
-  await closePromise.catch(() => {});
-  await new Promise((r) => setTimeout(r, 300));
-
-  const membersAfter = await redis.smembers('subs:BTC');
-  expect(membersAfter.length).toBe(0);
-});
-
-// ---------------------------------------------------------------------------
-// 262. Last subscriber disconnects → coinbase.unsubscribeFromSymbol called
-// ---------------------------------------------------------------------------
-
-it('262: last subscriber disconnects → coinbase.unsubscribeFromSymbol called for BTC', async () => {
-  const ticket = await getTicket();
-  const ws = await openWs(ticket);
-
-  ws.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
-  await waitForCall(mockSubscribeToSymbol);
-
-  const closePromise = waitClose(ws);
-  ws.close();
-  await closePromise.catch(() => {});
-  await waitForCall(mockUnsubscribeFromSymbol);
-
-  expect(mockUnsubscribeFromSymbol).toHaveBeenCalledOnce();
-  expect(mockUnsubscribeFromSymbol).toHaveBeenCalledWith('BTC');
-});
-
-// ---------------------------------------------------------------------------
-// 263. Malformed subscribe message → error envelope; connection stays open
-// ---------------------------------------------------------------------------
-
-it('263: malformed subscribe message (not JSON) → error envelope; connection stays open', async () => {
-  const ticket = await getTicket();
-  const ws = await openWs(ticket);
-
+  // Clients send nothing now; whatever they send is dropped — no error envelope back.
   ws.send('not valid JSON {{{{{');
-  const msg = await nextMessage(ws);
+  ws.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['BTC'] } }));
 
-  expect(msg['type']).toBe('error');
-  expect((msg['payload'] as Record<string, unknown>)['code']).toBe('INVALID_SUBSCRIBE_MESSAGE');
+  const frames = await collectMessages(ws, 400);
+  expect(frames).toEqual([]); // no error frame, no echo — nothing came back
   expect(ws.readyState).toBe(WebSocket.OPEN);
 
   ws.close();
   await waitClose(ws).catch(() => {});
-});
-
-// ---------------------------------------------------------------------------
-// 264. Subscribe to unknown symbol → error with payload.invalid; valid still subscribed
-// ---------------------------------------------------------------------------
-
-it('264: subscribe to unknown symbol → error envelope with payload.invalid; valid symbols still subscribed', async () => {
-  const ticket = await getTicket();
-  const ws = await openWs(ticket);
-
-  ws.send(JSON.stringify({ type: 'subscribe', payload: { symbols: ['XYZ_FAKE_TOKEN', 'BTC'] } }));
-  const msg = await nextMessage(ws);
-
-  expect(msg['type']).toBe('error');
-  const payload = msg['payload'] as { code: string; invalid: string[] };
-  expect(payload.code).toBe('UNKNOWN_SYMBOL');
-  expect(payload.invalid).toContain('XYZ_FAKE_TOKEN');
-  expect(payload.invalid).not.toContain('BTC');
-
-  await waitForCall(mockSubscribeToSymbol);
-  expect(mockSubscribeToSymbol).toHaveBeenCalledWith('BTC');
-
-  ws.close();
-  await waitClose(ws).catch(() => {});
-  await new Promise((r) => setTimeout(r, 200));
 });
 
 // ---------------------------------------------------------------------------
@@ -519,15 +421,15 @@ it('265: user_events plan_changed for connected Pro user → plan_downgraded env
   // After connection, the plan check on the pub/sub event should return 'free'
   mockGetEffectivePlan.mockResolvedValue('free');
 
-  const msgPromise = nextMessage(ws);
+  const msgPromise = nextMessageOfType(ws, 'plan_downgraded');
   const closePromise = waitClose(ws);
 
   await redis.publish('user_events', JSON.stringify({ type: 'plan_changed', userId: user.id }));
 
   const [msg, close] = await Promise.all([msgPromise, closePromise]);
 
-  expect(msg['type']).toBe('plan_downgraded');
-  expect((msg['payload'] as Record<string, unknown>)['message']).toBe('Your Pro subscription has expired');
+  expect(msg.type).toBe('plan_downgraded');
+  expect((msg.payload as Record<string, unknown>)['message']).toBe('Your Pro subscription has expired');
   expect(close.code).toBe(4003);
 });
 
@@ -551,7 +453,7 @@ it('267: client_events reconnect → all connected sockets receive reconnect env
   const ticket = await getTicket();
   const ws = await openWs(ticket);
 
-  const msgPromise = nextMessage(ws);
+  const msgPromise = nextMessageOfType(ws, 'reconnect');
 
   await redis.publish(
     'client_events',
@@ -560,9 +462,9 @@ it('267: client_events reconnect → all connected sockets receive reconnect env
 
   const msg = await msgPromise;
 
-  expect(msg['type']).toBe('reconnect');
-  expect(msg['payload']).toMatchObject({ retryAfterMs: 1000, reason: 'coinbase_reconnecting' });
-  expect(typeof msg['timestamp']).toBe('string');
+  expect(msg.type).toBe('reconnect');
+  expect(msg.payload).toMatchObject({ retryAfterMs: 1000, reason: 'coinbase_reconnecting' });
+  expect(typeof msg.timestamp).toBe('string');
 
   ws.close();
   await waitClose(ws).catch(() => {});

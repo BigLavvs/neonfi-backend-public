@@ -17,7 +17,6 @@
 
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
-import { getLivePriceMap } from '../../lib/live-price.js';
 import { computeDerived } from '../portfolios/derive.js';
 import { findPortfoliosByUserId } from '../portfolios/portfolios.repository.js';
 import { slugify } from '../portfolios/slug.js';
@@ -253,36 +252,62 @@ async function buildOverview(
   const pnl24h = has24hBaseline && value24hAgo > 0 ? (pnl24hValue / value24hAgo) * 100 : 0;
 
   // ---- per-portfolio rows + allocation/holdings aggregation ----
-  // allocation: value (balance × price) summed per symbol; holdings: raw balance summed
-  // per symbol (quantity, for the frontend's live-price recalc). grandTotal drives the
-  // allocation %s. Only assets with balance > 0 contribute (matches assetCount and the
-  // analytics holdings filter).
+  // allocation: value (balance × price) summed per symbol; holdings: raw position data
+  // (balance + cost basis) summed per symbol, for the frontend's live-price recompute.
+  // grandTotal drives the allocation %s. Only assets with balance > 0 contribute (matches
+  // assetCount and the analytics holdings filter).
+  //
+  // retrofit-28: the per-request live-price overlay (getLivePriceMap) is removed from this
+  // read path — allocation/holdings now return the daily/stored currentPrice and the
+  // client owns the live overlay (it recomputes from the firehose × balance/avgCost with
+  // this daily fallback). NOTE: totals/per-portfolio totalValue still come from
+  // computeDerived, which keeps its own overlay (out of scope here, and test 390 asserts
+  // the live total) — so totals stay live while allocation is the daily fallback.
   const allocValueBySymbol = new Map<string, number>();
   const balanceBySymbol = new Map<string, number>();
+  // retrofit-28 aggregate cost accumulators (per symbol, cost-tracked = avgCost != null):
+  const costBasisBySymbol = new Map<string, number>(); // Σ Asset.costBasis
+  const realizedPnlBySymbol = new Map<string, number>(); // Σ Asset.realizedPnl
+  const avgCostNumeratorBySymbol = new Map<string, number>(); // Σ avgCost × balance
+  const costTrackedQtyBySymbol = new Map<string, number>(); // Σ balance over cost-tracked
   let grandTotal = 0;
   // retrofit-27: Σ(costBasis) across every cost-tracked asset → the unrealized %-base.
   let unrealizedCostBasisSum = 0;
-
-  // retrofit-15: overlay live `price:<SYMBOL>` ticks on the allocation/grandTotal math
-  // (the `totals`/per-portfolio totalValue already come from computeDerived, which the
-  // derive.ts overlay fixes — don't double-apply there). One mget across every symbol
-  // held in any of this user's portfolios; a miss falls back to currentPrice.
-  const liveMap = await getLivePriceMap(assetsList.flat().map((a) => a.token.symbol));
 
   const portfoliosDTO = portfolios.map((p, i) => {
     const d = derivedList[i]!;
     const assets = assetsList[i]!;
     let assetCount = 0;
+    // retrofit-28: raw per-portfolio holdings (balance > 0 only), for client recompute.
+    const holdings: OverviewDTO['portfolios'][number]['holdings'] = [];
     for (const a of assets) {
       const balance = Number(a.balance.toString());
       if (balance <= 0) continue;
       assetCount += 1;
-      const price = liveMap.get(a.token.symbol) ?? Number(a.token.currentPrice.toString());
+      const symbol = a.token.symbol;
+      const price = Number(a.token.currentPrice.toString());
       const value = balance * price;
-      allocValueBySymbol.set(a.token.symbol, (allocValueBySymbol.get(a.token.symbol) ?? 0) + value);
-      balanceBySymbol.set(a.token.symbol, (balanceBySymbol.get(a.token.symbol) ?? 0) + balance);
+      allocValueBySymbol.set(symbol, (allocValueBySymbol.get(symbol) ?? 0) + value);
+      balanceBySymbol.set(symbol, (balanceBySymbol.get(symbol) ?? 0) + balance);
       grandTotal += value;
-      if (a.avgCost !== null) unrealizedCostBasisSum += Number(a.costBasis.toString());
+
+      // retrofit-28: cost fields straight off the Asset (maintained by recalc). avgCost is
+      // null for cost-unknown holdings. Full precision — these feed the client's recompute.
+      const avgCost = a.avgCost !== null ? Number(a.avgCost.toString()) : null;
+      const costBasis = Number(a.costBasis.toString());
+      const realizedPnl = Number(a.realizedPnl.toString());
+      holdings.push({ symbol, balance, avgCost, costBasis, realizedPnl });
+
+      costBasisBySymbol.set(symbol, (costBasisBySymbol.get(symbol) ?? 0) + costBasis);
+      realizedPnlBySymbol.set(symbol, (realizedPnlBySymbol.get(symbol) ?? 0) + realizedPnl);
+      if (avgCost !== null) {
+        avgCostNumeratorBySymbol.set(
+          symbol,
+          (avgCostNumeratorBySymbol.get(symbol) ?? 0) + avgCost * balance,
+        );
+        costTrackedQtyBySymbol.set(symbol, (costTrackedQtyBySymbol.get(symbol) ?? 0) + balance);
+        unrealizedCostBasisSum += costBasis;
+      }
     }
     return {
       id: p.id,
@@ -301,6 +326,7 @@ async function buildOverview(
       unrealizedPnlPct: round(d.unrealizedPnlPct),
       realizedPnlValue: round(d.realizedPnlValue),
       allTimePnlValue: round(d.allTimePnlValue),
+      holdings,
     };
   });
 
@@ -321,10 +347,23 @@ async function buildOverview(
     .sort((a, b) => b.value - a.value)
     .map((a) => ({ symbol: a.symbol, value: round(a.value), percentage: round(a.percentage) }));
 
-  // holdings: aggregate balance per symbol (raw quantity). Sorted by symbol for a stable
-  // wire order — the frontend keys by symbol, not position.
+  // holdings: aggregate per symbol (raw quantity + summed cost basis). avgCost is the
+  // balance-weighted average over cost-tracked assets (Σ(avgCost×balance)/Σ(balance)),
+  // null when no portfolio tracks cost for that symbol. Sorted by symbol for a stable
+  // wire order — the frontend keys by symbol, not position. retrofit-28.
   const holdings = [...balanceBySymbol.entries()]
-    .map(([symbol, balance]) => ({ symbol, balance }))
+    .map(([symbol, balance]) => {
+      const trackedQty = costTrackedQtyBySymbol.get(symbol) ?? 0;
+      const avgCost =
+        trackedQty > 0 ? (avgCostNumeratorBySymbol.get(symbol) ?? 0) / trackedQty : null;
+      return {
+        symbol,
+        balance,
+        avgCost,
+        costBasis: costBasisBySymbol.get(symbol) ?? 0,
+        realizedPnl: realizedPnlBySymbol.get(symbol) ?? 0,
+      };
+    })
     .sort((a, b) => a.symbol.localeCompare(b.symbol));
 
   // ---- value history (aggregate chart, forward-filled) ----

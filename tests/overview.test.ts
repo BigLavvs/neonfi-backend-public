@@ -67,10 +67,25 @@ interface OverviewData {
     pnl24hValue: number;
     pnlAllTime: number;
     pnlAllTimeValue: number;
+    // retrofit-28: raw per-portfolio position data for client recompute.
+    holdings: Array<{
+      symbol: string;
+      balance: number;
+      avgCost: number | null;
+      costBasis: number;
+      realizedPnl: number;
+    }>;
   }>;
   valueHistory: Array<{ date: string; value: number }>;
   allocation: Array<{ symbol: string; value: number; percentage: number }>;
-  holdings: Array<{ symbol: string; balance: number }>;
+  // retrofit-28: aggregate holdings carry cost fields too.
+  holdings: Array<{
+    symbol: string;
+    balance: number;
+    avgCost: number | null;
+    costBasis: number;
+    realizedPnl: number;
+  }>;
   recentTransactions: Array<{ id: number; portfolioId: number; timestamp: string }>;
   topMovers: Array<{ symbol: string; name: string; change24h: number; spark: number[] }>;
 }
@@ -150,6 +165,27 @@ async function createManualPortfolio(
 async function seedAsset(portfolioId: number, tokenId: number, balance: number): Promise<void> {
   await prisma.asset.create({
     data: { portfolioId, tokenId, balance: balance.toString() },
+  });
+}
+
+// retrofit-28: seed an asset with the recalc-maintained cost fields set directly, so the
+// holdings[] assertions exercise the raw position data the /overview now exposes.
+// avgCost null = cost-unknown holding (excluded from aggregate avgCost).
+async function seedAssetWithCost(
+  portfolioId: number,
+  tokenId: number,
+  balance: number,
+  opts: { avgCost?: number | null; costBasis?: number; realizedPnl?: number } = {},
+): Promise<void> {
+  await prisma.asset.create({
+    data: {
+      portfolioId,
+      tokenId,
+      balance: balance.toString(),
+      ...(opts.avgCost != null ? { avgCost: opts.avgCost.toString() } : {}),
+      costBasis: (opts.costBasis ?? 0).toString(),
+      realizedPnl: (opts.realizedPnl ?? 0).toString(),
+    },
   });
 }
 
@@ -568,4 +604,66 @@ it('391: topMovers attach the sampled price_hist series as spark (oldest→newes
   const eth = d.topMovers.find((m) => m.symbol === 'ETH')!;
   expect(btc.spark).toEqual([101, 103, 105]); // oldest→newest (reversed from stored)
   expect(eth.spark).toEqual([]); // no history list → flat/empty
+});
+
+// ---------------------------------------------------------------------------
+// 392 — raw position holdings: per-portfolio + aggregate cost fields (retrofit-28)
+// ---------------------------------------------------------------------------
+
+it('392: each portfolio row carries holdings[] (excl. balance<=0); aggregate holdings sum cost + weight avgCost', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const p1 = await createManualPortfolio(userId, 'P1');
+  const p2 = await createManualPortfolio(userId, 'P2');
+
+  // P1: BTC 1.0 (avgCost 90000, costBasis 90000, realized +500) + ETH 0.0 (excluded)
+  await seedAssetWithCost(p1, btcId, 1.0, { avgCost: 90000, costBasis: 90000, realizedPnl: 500 });
+  await seedAsset(p1, ethId, 0); // balance 0 → must NOT appear in holdings
+  // P2: BTC 2.0 (avgCost 96000, costBasis 192000, realized -100) + USDT 1000 (cost-unknown)
+  await seedAssetWithCost(p2, btcId, 2.0, { avgCost: 96000, costBasis: 192000, realizedPnl: -100 });
+  await seedAssetWithCost(p2, usdtId, 1000, { avgCost: null, costBasis: 0, realizedPnl: 0 });
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // ---- per-portfolio holdings ----
+  const r1 = d.portfolios.find((p) => p.name === 'P1')!;
+  const r2 = d.portfolios.find((p) => p.name === 'P2')!;
+
+  // P1: only BTC (ETH at balance 0 is excluded)
+  expect(r1.holdings.map((h) => h.symbol)).toEqual(['BTC']);
+  const r1Btc = r1.holdings[0]!;
+  expect(r1Btc.balance).toBeCloseTo(1.0, 8);
+  expect(r1Btc.avgCost).toBeCloseTo(90000, 2);
+  expect(r1Btc.costBasis).toBeCloseTo(90000, 2);
+  expect(r1Btc.realizedPnl).toBeCloseTo(500, 2);
+
+  // P2: BTC + USDT; USDT is cost-unknown → avgCost null
+  const r2Btc = r2.holdings.find((h) => h.symbol === 'BTC')!;
+  const r2Usdt = r2.holdings.find((h) => h.symbol === 'USDT')!;
+  expect(r2Btc.balance).toBeCloseTo(2.0, 8);
+  expect(r2Btc.avgCost).toBeCloseTo(96000, 2);
+  expect(r2Btc.costBasis).toBeCloseTo(192000, 2);
+  expect(r2Btc.realizedPnl).toBeCloseTo(-100, 2);
+  expect(r2Usdt.balance).toBeCloseTo(1000, 8);
+  expect(r2Usdt.avgCost).toBeNull();
+  expect(r2Usdt.costBasis).toBeCloseTo(0, 8);
+
+  // ---- aggregate holdings (summed across portfolios) ----
+  const aggBtc = d.holdings.find((h) => h.symbol === 'BTC')!;
+  expect(aggBtc.balance).toBeCloseTo(3.0, 8); // 1.0 + 2.0
+  expect(aggBtc.costBasis).toBeCloseTo(282000, 2); // 90000 + 192000
+  expect(aggBtc.realizedPnl).toBeCloseTo(400, 2); // 500 + (-100)
+  // balance-weighted avgCost = (90000*1 + 96000*2) / (1 + 2) = 94000
+  expect(aggBtc.avgCost).toBeCloseTo(94000, 2);
+
+  // USDT aggregate: cost-unknown only → avgCost null, costBasis 0
+  const aggUsdt = d.holdings.find((h) => h.symbol === 'USDT')!;
+  expect(aggUsdt.balance).toBeCloseTo(1000, 8);
+  expect(aggUsdt.avgCost).toBeNull();
+  expect(aggUsdt.costBasis).toBeCloseTo(0, 8);
+
+  // ETH (balance 0) is absent everywhere.
+  expect(d.holdings.map((h) => h.symbol)).not.toContain('ETH');
 });
