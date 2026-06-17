@@ -51,10 +51,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  // Restore seed values for the tokens used across these tests
-  await prisma.token.update({ where: { symbol: 'BTC' }, data: BTC_SEED });
-  await prisma.token.update({ where: { symbol: 'ETH' }, data: ETH_SEED });
-  await prisma.token.update({ where: { symbol: 'USDT' }, data: USDT_SEED });
+  // Restore seed values for the tokens used across these tests. change24h is null in the
+  // seed (retrofit-39 column) — reset it too so a test that writes it can't bleed a stale
+  // 24h change into the live-price / assets suites (all files share one DB).
+  await prisma.token.update({ where: { symbol: 'BTC' }, data: { ...BTC_SEED, change24h: null } });
+  await prisma.token.update({ where: { symbol: 'ETH' }, data: { ...ETH_SEED, change24h: null } });
+  await prisma.token.update({ where: { symbol: 'USDT' }, data: { ...USDT_SEED, change24h: null } });
   const keys = await redis.keys('token_meta:*');
   if (keys.length > 0) await redis.del(keys);
 });
@@ -231,6 +233,27 @@ it('232: stats reporting — return value has correct shape; durationMs > 0', as
 });
 
 // ---------------------------------------------------------------------------
+// 398. retrofit-39 — sync persists change24h and never nulls it on a change-less sync
+// ---------------------------------------------------------------------------
+
+it('398: sync persists change24h and preserves it when a later sync omits it', async () => {
+  // First sync writes change24h.
+  await runTokenMetadataSync(makeMockProvider('mock', new Map<string, TokenMetadata>([
+    ['BTC', { symbol: 'BTC', currentPrice: '98000.00', marketCap: '1900000000000.00', rank: 1, change24h: 7.25 }],
+  ])));
+  let btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  expect(Number(btc.change24h!.toString())).toBeCloseTo(7.25);
+
+  // A later sync that OMITS change24h must NOT clear the persisted value (mirrors rank:null).
+  await runTokenMetadataSync(makeMockProvider('mock', new Map<string, TokenMetadata>([
+    ['BTC', { symbol: 'BTC', currentPrice: '99000.00', marketCap: '1910000000000.00', rank: 1 }],
+  ])));
+  btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  expect(Number(btc.currentPrice.toString())).toBeCloseTo(99000); // price refreshed
+  expect(Number(btc.change24h!.toString())).toBeCloseTo(7.25); // change24h preserved
+});
+
+// ---------------------------------------------------------------------------
 // 302. CMC adapter batches symbols >50 per call (A23)
 // ---------------------------------------------------------------------------
 
@@ -291,6 +314,7 @@ it('303: fetchMetadata with a null-price symbol skips it and returns the others 
 
     expect(result.has('BTC')).toBe(true);
     expect(result.get('BTC')!.currentPrice).toBe('93000.00000000');
+    expect(result.get('BTC')!.change24h).toBe(1.5); // retrofit-39: percent_change_24h parsed
     // The null-price symbol is absent — skipped, not crashed.
     expect(result.has('NULLCOIN')).toBe(false);
     expect(result.size).toBe(1);

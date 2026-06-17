@@ -49,6 +49,7 @@ export async function runTokenCatalogIngest(
         marketCap: t.marketCap,
         rank: t.rank,
         logoUrl: t.logoUrl,
+        change24h: t.change24h, // retrofit-39: cold-cache badge fallback
       },
       // Don't overwrite an existing logoUrl with null, and keep rank only when provided.
       update: {
@@ -57,6 +58,8 @@ export async function runTokenCatalogIngest(
         marketCap: t.marketCap,
         ...(t.rank != null ? { rank: t.rank } : {}),
         ...(t.logoUrl ? { logoUrl: t.logoUrl } : {}),
+        // retrofit-39: refresh the persisted change when provided; never null out a prior.
+        ...(t.change24h != null ? { change24h: t.change24h } : {}),
       },
     });
     if (existing) updated++;

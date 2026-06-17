@@ -44,6 +44,9 @@ export async function runTokenMetadataSync(
             // undefined means "don't overwrite" in Prisma — rank:null from provider
             // should not clear an existing rank value.
             ...(meta.rank !== null ? { rank: meta.rank } : {}),
+            // retrofit-39: persist the 24h change as the cold-cache badge fallback. Like
+            // rank, only write a real value — a missing change must not null out the prior.
+            ...(meta.change24h != null ? { change24h: meta.change24h } : {}),
           },
         });
         await redis.del(`token_meta:${symbol}`);

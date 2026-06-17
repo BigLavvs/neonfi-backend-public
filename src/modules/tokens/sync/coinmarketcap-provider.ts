@@ -26,6 +26,8 @@ export interface TopToken {
   currentPrice: string;
   marketCap: string | null;
   logoUrl: string | null;
+  // retrofit-39: 24h % change persisted on catalog ingest (cold-cache wallet-badge fallback).
+  change24h: number | null;
 }
 
 interface CmcListing {
@@ -33,7 +35,7 @@ interface CmcListing {
   name: string;
   symbol: string;
   cmc_rank: number | null;
-  quote: { USD: { price: number | null; market_cap: number | null } };
+  quote: { USD: { price: number | null; market_cap: number | null; percent_change_24h?: number | null } };
 }
 
 interface CmcQuoteUsd {
@@ -119,6 +121,7 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
         currentPrice: usd.price.toFixed(8),
         marketCap: usd.market_cap != null ? usd.market_cap.toFixed(2) : null,
         rank: entry.cmc_rank ?? null,
+        change24h: usd.percent_change_24h ?? null, // retrofit-39
       });
     }
     return out;
@@ -160,6 +163,7 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
         currentPrice: usd.price.toFixed(8),
         marketCap: usd.market_cap != null ? usd.market_cap.toFixed(2) : null,
         logoUrl: `https://s2.coinmarketcap.com/static/img/coins/64x64/${c.id}.png`,
+        change24h: usd.percent_change_24h ?? null, // retrofit-39
         _mc: mc,
       });
     }

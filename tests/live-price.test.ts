@@ -18,7 +18,7 @@ import { it, beforeAll, beforeEach, afterAll, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
-import { getLivePriceMap } from '../src/lib/live-price.js';
+import { getLivePriceMap, getLiveChangeMap } from '../src/lib/live-price.js';
 import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -300,4 +300,96 @@ it('385: a tick for one symbol overlays only that symbol; the other uses seeded 
   const json = (await res.json()) as { data: { portfolio: { totalValue: number } } };
   // live BTC + seeded ETH: 1*100000 + 2*3200 = 106400
   expect(json.data.portfolio.totalValue).toBeCloseTo(106400, 2);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-39 — 24h change overlay (getLiveChangeMap + asset DTO priceChange24h)
+// ---------------------------------------------------------------------------
+
+// 394 — getLiveChangeMap: finite changes (incl. 0 / negative) survive; everything
+// else (absent, malformed, missing field, non-number) is omitted.
+it('394: getLiveChangeMap keeps finite changes (incl. 0 and negative) and omits malformed/absent/non-number', async () => {
+  await seedTick('AAA', 100, 5.5); // positive → included
+  await seedTick('BBB', 100, 0); // zero is a real reading → included
+  await seedTick('CCC', 100, -3.2); // negative → included
+  // DDD: no key at all → omitted
+  await redis.set('price:EEE', 'not-json', 'EX', 60); // malformed JSON → omitted
+  await redis.set('price:FFF', JSON.stringify({ price: 100 }), 'EX', 60); // no change24h field → omitted
+  await redis.set('price:GGG', JSON.stringify({ price: 100, change24h: '5' }), 'EX', 60); // string → omitted
+
+  const map = await getLiveChangeMap(['AAA', 'BBB', 'CCC', 'DDD', 'EEE', 'FFF', 'GGG']);
+
+  expect(map.get('AAA')).toBe(5.5);
+  expect(map.get('BBB')).toBe(0);
+  expect(map.get('CCC')).toBe(-3.2);
+  expect(map.has('DDD')).toBe(false);
+  expect(map.has('EEE')).toBe(false);
+  expect(map.has('FFF')).toBe(false);
+  expect(map.has('GGG')).toBe(false);
+  expect(map.size).toBe(3);
+
+  // Empty input short-circuits to an empty map (no Redis round-trip).
+  expect((await getLiveChangeMap([])).size).toBe(0);
+});
+
+// 395 — asset DTO priceChange24h comes from the fresh tick; live wins over a persisted value.
+it('395: GET /assets sets priceChange24h from the fresh tick (live wins over persisted Token.change24h)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await createManualPortfolio(userId);
+  await seedAsset(portfolioId, btcId, 1.0);
+
+  // A persisted (cold) value exists, but a fresh tick must take precedence.
+  await prisma.token.update({ where: { symbol: 'BTC' }, data: { change24h: '1.2345' } });
+  try {
+    await seedTick('BTC', 100000, 4.56);
+
+    const res = await assetsGet(portfolioId, cookies);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      data: { assets: Array<{ symbol: string; priceChange24h: number | null }> };
+    };
+    const btc = json.data.assets.find((a) => a.symbol === 'BTC')!;
+    expect(btc.priceChange24h).toBeCloseTo(4.56, 4); // live, not persisted 1.2345
+  } finally {
+    await prisma.token.update({ where: { symbol: 'BTC' }, data: { change24h: null } });
+  }
+});
+
+// 396 — cold cache (no tick): priceChange24h falls back to the persisted Token.change24h.
+it('396: GET /assets falls back to persisted Token.change24h when the live cache is cold', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await createManualPortfolio(userId);
+  await seedAsset(portfolioId, btcId, 1.0);
+
+  // No price:* tick (beforeEach flushed). Persisted CMC value present (negative is valid).
+  await prisma.token.update({ where: { symbol: 'BTC' }, data: { change24h: '-2.5' } });
+  try {
+    const res = await assetsGet(portfolioId, cookies);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      data: { assets: Array<{ symbol: string; priceChange24h: number | null }> };
+    };
+    const btc = json.data.assets.find((a) => a.symbol === 'BTC')!;
+    expect(btc.priceChange24h).toBeCloseTo(-2.5, 4);
+  } finally {
+    await prisma.token.update({ where: { symbol: 'BTC' }, data: { change24h: null } });
+  }
+});
+
+// 397 — neither a live tick nor a persisted value → priceChange24h is null (true "—").
+it('397: GET /assets priceChange24h is null when neither a tick nor a persisted value exists', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await createManualPortfolio(userId);
+  await seedAsset(portfolioId, ethId, 2.0); // ETH: no tick, Token.change24h null (column default)
+
+  const res = await assetsGet(portfolioId, cookies);
+  expect(res.status).toBe(200);
+  const json = (await res.json()) as {
+    data: { assets: Array<{ symbol: string; priceChange24h: number | null }> };
+  };
+  const eth = json.data.assets.find((a) => a.symbol === 'ETH')!;
+  expect(eth.priceChange24h).toBeNull();
 });

@@ -39,3 +39,32 @@ export async function getLivePriceMap(symbols: string[]): Promise<Map<string, nu
   }
   return out;
 }
+
+// retrofit-39: symbol → live 24h % change, sibling to getLivePriceMap. Reads `change24h`
+// from the SAME canonical `price:<SYM>` payloads the resolver writes
+// ({price, change24h, source, ts}, 60s TTL) — so any symbol with a fresh tick carries its
+// 24h change on load (powers the wallet badge instead of a bare "—"). Unlike price, a 24h
+// change of exactly 0 or a negative value is a legitimate reading, so only NON-finite or
+// absent values are omitted (a miss → caller falls back to the persisted Token.change24h,
+// then null). Never throws — a Redis failure yields an empty map.
+export async function getLiveChangeMap(symbols: string[]): Promise<Map<string, number>> {
+  const unique = [...new Set(symbols)];
+  if (unique.length === 0) return new Map();
+  const out = new Map<string, number>();
+  try {
+    const raw = await redis.mget(...unique.map((s) => `price:${s}`));
+    unique.forEach((sym, i) => {
+      const v = raw[i];
+      if (!v) return;
+      try {
+        const c = (JSON.parse(v) as { change24h?: unknown }).change24h;
+        if (typeof c === 'number' && Number.isFinite(c)) out.set(sym, c);
+      } catch {
+        /* skip malformed payload — caller falls back to persisted change / null */
+      }
+    });
+  } catch {
+    /* Redis down/unreachable — return whatever we have (possibly empty) */
+  }
+  return out;
+}

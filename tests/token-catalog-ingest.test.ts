@@ -29,12 +29,12 @@ describe('fetchTopTokens (CMC listings) parsing', () => {
       ok: true,
       json: async () => ({
         data: [
-          { id: 1,    name: 'Bitcoin',  symbol: 'BTC',  cmc_rank: 1,    quote: { USD: { price: 90000, market_cap: 1_800_000_000_000 } } },
+          { id: 1,    name: 'Bitcoin',  symbol: 'BTC',  cmc_rank: 1,    quote: { USD: { price: 90000, market_cap: 1_800_000_000_000, percent_change_24h: 2.5 } } },
           // duplicate BTC ticker with a SMALLER market cap → must be ignored
-          { id: 9001, name: 'BitcoinX', symbol: 'BTC',  cmc_rank: 999,  quote: { USD: { price: 5,     market_cap: 1_000 } } },
-          { id: 1027, name: 'Ethereum', symbol: 'ETH',  cmc_rank: 2,    quote: { USD: { price: 3000,  market_cap: 360_000_000_000 } } },
+          { id: 9001, name: 'BitcoinX', symbol: 'BTC',  cmc_rank: 999,  quote: { USD: { price: 5,     market_cap: 1_000, percent_change_24h: -9 } } },
+          { id: 1027, name: 'Ethereum', symbol: 'ETH',  cmc_rank: 2,    quote: { USD: { price: 3000,  market_cap: 360_000_000_000, percent_change_24h: -1.2 } } },
           // null price → skipped entirely
-          { id: 5,    name: 'NullCoin', symbol: 'NULL', cmc_rank: null, quote: { USD: { price: null,  market_cap: null } } },
+          { id: 5,    name: 'NullCoin', symbol: 'NULL', cmc_rank: null, quote: { USD: { price: null,  market_cap: null, percent_change_24h: 0 } } },
         ],
       }),
     } as Response));
@@ -55,6 +55,8 @@ describe('fetchTopTokens (CMC listings) parsing', () => {
       expect(btc.marketCap).toBe('1800000000000.00');
       expect(btc.rank).toBe(1);
       expect(btc.logoUrl).toBe('https://s2.coinmarketcap.com/static/img/coins/64x64/1.png');
+      expect(btc.change24h).toBe(2.5); // retrofit-39: percent_change_24h flows into TopToken
+      expect(bySym.get('ETH')!.change24h).toBe(-1.2);
 
       // Request is shaped as a market-cap-ranked listings call carrying the limit.
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -100,9 +102,9 @@ describe('runTokenCatalogIngest', () => {
 
     const fakeProvider: TopTokenProvider = {
       fetchTopTokens: async () => [
-        { symbol: 'AAA', name: 'Alpha', rank: 10, currentPrice: '1.00000000', marketCap: '100.00', logoUrl: 'http://x/1.png' },
-        { symbol: 'BBB', name: 'Beta',  rank: 11, currentPrice: '2.00000000', marketCap: '200.00', logoUrl: null },
-        { symbol: 'CCC', name: 'Gamma', rank: 12, currentPrice: '3.00000000', marketCap: null,     logoUrl: 'http://x/3.png' },
+        { symbol: 'AAA', name: 'Alpha', rank: 10, currentPrice: '1.00000000', marketCap: '100.00', logoUrl: 'http://x/1.png', change24h: 3.3 },
+        { symbol: 'BBB', name: 'Beta',  rank: 11, currentPrice: '2.00000000', marketCap: '200.00', logoUrl: null,            change24h: null },
+        { symbol: 'CCC', name: 'Gamma', rank: 12, currentPrice: '3.00000000', marketCap: null,     logoUrl: 'http://x/3.png', change24h: -4.4 },
       ],
     };
 
@@ -111,14 +113,20 @@ describe('runTokenCatalogIngest', () => {
     expect(result).toEqual({ inserted: 2, updated: 1 });
     expect(tokenUpsert).toHaveBeenCalledTimes(3);
 
-    // BBB (new, null logo): create carries logoUrl:null; update OMITS logoUrl (null not written)
-    // but keeps rank (provided).
+    // AAA (new): create carries the retrofit-39 change24h.
+    const aaaCall = tokenUpsert.mock.calls.find((c) => c[0].where.symbol === 'AAA')![0];
+    expect(aaaCall.create.change24h).toBe(3.3);
+
+    // BBB (new, null logo + null change): create carries logoUrl:null AND change24h:null;
+    // update OMITS logoUrl (null not written) but keeps rank (provided).
     const bbbCall = tokenUpsert.mock.calls.find((c) => c[0].where.symbol === 'BBB')![0];
-    expect(bbbCall.create).toMatchObject({ symbol: 'BBB', name: 'Beta', currentPrice: '2.00000000', logoUrl: null });
+    expect(bbbCall.create).toMatchObject({ symbol: 'BBB', name: 'Beta', currentPrice: '2.00000000', logoUrl: null, change24h: null });
     expect(bbbCall.update.logoUrl).toBeUndefined();
+    expect(bbbCall.update.change24h).toBeUndefined(); // null change must not null out the prior on update
     expect(bbbCall.update.rank).toBe(11);
 
-    // CCC (existing, null marketCap): update keeps the truthy logoUrl + rank, writes marketCap null.
+    // CCC (existing, null marketCap): update keeps the truthy logoUrl + rank, writes marketCap
+    // null, and refreshes change24h with the provided value (retrofit-39).
     const cccCall = tokenUpsert.mock.calls.find((c) => c[0].where.symbol === 'CCC')![0];
     expect(cccCall.update).toMatchObject({
       name: 'Gamma',
@@ -126,6 +134,7 @@ describe('runTokenCatalogIngest', () => {
       marketCap: null,
       logoUrl: 'http://x/3.png',
       rank: 12,
+      change24h: -4.4,
     });
   });
 

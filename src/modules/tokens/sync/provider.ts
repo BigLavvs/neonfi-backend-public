@@ -7,6 +7,10 @@ export interface TokenMetadata {
   currentPrice: string;   // decimal string preserves precision
   marketCap: string | null;
   rank: number | null;
+  // retrofit-39: CMC percent_change_24h, persisted to Token.change24h as a cold-cache
+  // fallback for the wallet badge. Optional — older mock providers may omit it; a miss
+  // leaves the existing Token.change24h untouched (see sync.ts).
+  change24h?: number | null;
 }
 
 export interface TokenMetadataProvider {

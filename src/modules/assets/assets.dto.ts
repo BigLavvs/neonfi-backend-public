@@ -26,6 +26,9 @@ export interface AssetDTO {
   unrealizedPnlValue: number;
   unrealizedPnlPct: number;
   realizedPnlValue: number;
+  // retrofit-39: 24h % change for the wallet badge. Live cache first (freshest), then the
+  // CMC-persisted Token.change24h as a cold-cache fallback; null only when neither knows.
+  priceChange24h: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -33,10 +36,12 @@ export interface AssetDTO {
 // retrofit-15: `priceMap` overlays the live `price:<SYMBOL>` tick over the seeded
 // currentPrice. Resolved once in the service (assets.service) and threaded in; a miss
 // (or no map) falls back to currentPrice. Optional so non-overlay callers stay valid.
+// retrofit-39: `changeMap` is the parallel live 24h-change overlay (getLiveChangeMap).
 export function toAssetDTO(
   asset: AssetWithToken,
   portfolioTotalValue: number,
   priceMap?: Map<string, number>,
+  changeMap?: Map<string, number>,
 ): AssetDTO {
   const balance = Number(asset.balance.toString());
   const price = priceMap?.get(asset.token.symbol) ?? Number(asset.token.currentPrice.toString());
@@ -54,6 +59,13 @@ export function toAssetDTO(
   const unrealizedPnlValue = costTracked ? balance * (price - avgCost) : 0;
   const unrealizedPnlPct = costBasis !== 0 ? (unrealizedPnlValue / costBasis) * 100 : 0;
   const realizedPnlValue = Number(asset.realizedPnl.toString());
+
+  // retrofit-39: 24h change for the badge. Live cache first (freshest); fall back to the
+  // CMC-persisted Token.change24h (Part B) for a cold cache; null only when neither knows.
+  // `??` (not `||`) so a live or persisted change of exactly 0 is preserved, not dropped.
+  const persistedChange =
+    asset.token.change24h !== null ? Number(asset.token.change24h.toString()) : null;
+  const priceChange24h = changeMap?.get(asset.token.symbol) ?? persistedChange;
 
   return {
     id: asset.id,
@@ -75,6 +87,7 @@ export function toAssetDTO(
     unrealizedPnlValue,
     unrealizedPnlPct,
     realizedPnlValue,
+    priceChange24h,
     createdAt: asset.createdAt,
     updatedAt: asset.updatedAt,
   };

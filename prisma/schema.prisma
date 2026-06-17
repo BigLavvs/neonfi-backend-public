@@ -239,6 +239,10 @@ model Token {
   currentPrice Decimal  @db.Decimal(20, 8)
   marketCap    Decimal? @db.Decimal(30, 2)
   rank         Int?
+  // retrofit-39: last-known 24h % change from CMC (6-hourly sync + catalog ingest). A
+  // cold-cache fallback so the wallet badge shows a (slightly stale) change even for a
+  // token with no fresh live `price:<SYM>` tick. Nullable — unknown until first written.
+  change24h    Decimal? @db.Decimal(10, 4)
   assets       Asset[]
   // retrofit-21: daily price-history rows (powers the token-detail chart + ATH/ATL).
   priceSnapshots TokenPriceSnapshot[]
