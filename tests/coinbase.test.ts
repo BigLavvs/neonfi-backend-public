@@ -22,6 +22,19 @@ vi.mock('../src/lib/redis.js', () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// Mock the resolver — the Advanced Trade ticker parser (retrofit-30) hands each
+// tick to recordTick(); the parse tests assert ITS args (base/price/change/quote)
+// rather than reaching through to Redis. recordTick returns a promise (the client
+// `.catch`-es it), so the mock must resolve.
+// ---------------------------------------------------------------------------
+
+const { mockRecordTick } = vi.hoisted(() => ({ mockRecordTick: vi.fn(() => Promise.resolve()) }));
+
+vi.mock('../src/lib/price-resolver.js', () => ({
+  recordTick: mockRecordTick,
+}));
+
+// ---------------------------------------------------------------------------
 // Shared WS server
 // ---------------------------------------------------------------------------
 
@@ -204,3 +217,129 @@ it('238: connection drop — client transitions to reconnecting; reconnects afte
 
   client.disconnect();
 }, 5000);
+
+// ---------------------------------------------------------------------------
+// 239. Advanced Trade ticker parse (retrofit-30) → recordTick per nested ticker
+// ---------------------------------------------------------------------------
+
+it('239: channel:ticker frame (events[].tickers[]) → recordTick per ticker with right base/price/change', () => {
+  mockRecordTick.mockClear();
+  const client = new CoinbaseClient(serverUrl);
+
+  // Captured Advanced Trade shape: routing key is `channel` (not `type`); tickers are
+  // nested under events[].tickers[]; the 24h change field is `price_percent_chg_24_h`.
+  const frame = JSON.stringify({
+    channel: 'ticker',
+    timestamp: '2026-06-17T00:00:00Z',
+    sequence_num: 0,
+    events: [
+      {
+        type: 'snapshot',
+        tickers: [
+          { type: 'ticker', product_id: 'BTC-USD', price: '64899.54', price_percent_chg_24_h: '-2.3265998' },
+          { type: 'ticker', product_id: 'ETH-USD', price: '3201.10', price_percent_chg_24_h: '1.5' },
+        ],
+      },
+    ],
+  });
+
+  client.handleMessage(frame);
+
+  expect(mockRecordTick).toHaveBeenCalledTimes(2);
+  expect(mockRecordTick).toHaveBeenNthCalledWith(1, 'BTC', 'coinbase', 64899.54, -2.3265998, 'USD');
+  expect(mockRecordTick).toHaveBeenNthCalledWith(2, 'ETH', 'coinbase', 3201.1, 1.5, 'USD');
+});
+
+// ---------------------------------------------------------------------------
+// 240. The 24h change comes from price_percent_chg_24_h, NOT the legacy field
+// ---------------------------------------------------------------------------
+
+it('240: reads price_percent_chg_24_h (Advanced Trade), not the legacy price_percent_chg_24h', () => {
+  mockRecordTick.mockClear();
+  const client = new CoinbaseClient(serverUrl);
+
+  client.handleMessage(JSON.stringify({
+    channel: 'ticker',
+    events: [
+      {
+        type: 'update',
+        tickers: [
+          {
+            product_id: 'SOL-USD',
+            price: '150.00',
+            price_percent_chg_24h: '99.9', // legacy (wrong) — must be ignored
+            price_percent_chg_24_h: '3.25', // Advanced Trade (correct) — must win
+          },
+        ],
+      },
+    ],
+  }));
+
+  expect(mockRecordTick).toHaveBeenCalledTimes(1);
+  // change24h is 3.25 (the underscored field), never 99.9 — locks the field-name regression out.
+  expect(mockRecordTick).toHaveBeenCalledWith('SOL', 'coinbase', 150, 3.25, 'USD');
+});
+
+// ---------------------------------------------------------------------------
+// 241. channel:subscriptions ack → no recordTick
+// ---------------------------------------------------------------------------
+
+it('241: channel:subscriptions ack → no recordTick', () => {
+  mockRecordTick.mockClear();
+  const client = new CoinbaseClient(serverUrl);
+
+  client.handleMessage(JSON.stringify({
+    channel: 'subscriptions',
+    events: [{ subscriptions: { ticker: ['BTC-USD', 'ETH-USD'] } }],
+  }));
+
+  expect(mockRecordTick).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 242. Malformed / non-ticker / incomplete frames → no throw, no recordTick
+// ---------------------------------------------------------------------------
+
+it('242: malformed, non-ticker, and incomplete-ticker frames → no throw, no recordTick', () => {
+  mockRecordTick.mockClear();
+  const client = new CoinbaseClient(serverUrl);
+
+  expect(() => client.handleMessage('not json {{{{{')).not.toThrow();
+  expect(() => client.handleMessage(JSON.stringify({ channel: 'heartbeats' }))).not.toThrow();
+  // ticker channel but no events / empty tickers
+  expect(() => client.handleMessage(JSON.stringify({ channel: 'ticker' }))).not.toThrow();
+  expect(() => client.handleMessage(JSON.stringify({ channel: 'ticker', events: [{ tickers: [] }] }))).not.toThrow();
+  // tickers present but each unusable (no product_id / non-numeric price) → skipped
+  expect(() =>
+    client.handleMessage(JSON.stringify({
+      channel: 'ticker',
+      events: [{ tickers: [{ price: '100' }, { product_id: 'BTC-USD', price: 'abc' }] }],
+    })),
+  ).not.toThrow();
+
+  expect(mockRecordTick).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 243. Subscribe frame uses singular channel:"ticker" (Advanced Trade), not channels[]
+// ---------------------------------------------------------------------------
+
+it('243: subscribe frame uses singular channel:"ticker", not the legacy channels[] array', async () => {
+  const client = new CoinbaseClient(serverUrl);
+
+  const serverConn = new Promise<WsServer>((r) => wss.once('connection', (ws) => r(ws)));
+  client.connect();
+  const serverSocket = await serverConn;
+  await sleep(50);
+
+  const msgPromise = new Promise<string>((r) => serverSocket.once('message', (d) => r(d.toString())));
+  await client.subscribeToSymbol('BTC');
+  const msg = JSON.parse(await msgPromise) as Record<string, unknown>;
+
+  expect(msg['type']).toBe('subscribe');
+  expect(msg['channel']).toBe('ticker'); // singular field present
+  expect(msg['channels']).toBeUndefined(); // legacy array field gone — regression guard
+  expect(msg['product_ids']).toContain('BTC-USD');
+
+  client.disconnect();
+});

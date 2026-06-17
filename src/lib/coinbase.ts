@@ -28,8 +28,9 @@ export class CoinbaseClient {
   private state: ClientState = 'disconnected';
   private subscriptions: Map<string, number> = new Map();
   // Breadth coverage (retrofit-16): catalog products subscribed at boot on the
-  // lighter `ticker_batch` channel (~5s). Separate from the ref-counted
-  // real-time `ticker` subscriptions a Pro client actively watches.
+  // real-time `ticker` channel (retrofit-30 — was `ticker_batch` ~5s; now per-trade,
+  // sub-second). Separate from the ref-counted subscriptions a Pro client watches,
+  // but on the same channel, so they're effectively redundant — kept as documented.
   private coverageProducts: Set<string> = new Set();
   private reconnectAttempts = 0;
   private pingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,39 +91,70 @@ export class CoinbaseClient {
   }
 
   private _onMessage(raw: WebSocket.RawData): void {
+    // retrofit-30: ANY inbound frame proves liveness. Advanced Trade sends
+    // `channel:'heartbeats'`/`'subscriptions'`/`'ticker'` — never the legacy
+    // `type:'heartbeat'` — so reset the pong timer here, not in a dead message branch.
+    this._clearPongTimer();
+    this.handleMessage(raw.toString());
+  }
+
+  /**
+   * Parse a Coinbase Advanced Trade frame and push each USD ticker to the resolver.
+   * Public so tests can feed a captured frame without a live socket (mirrors the
+   * Kraken/Binance clients).
+   *
+   * retrofit-30: Advanced Trade routes on `msg.channel` (NOT `msg.type`) and nests
+   * tickers under `events[].tickers[]`; the 24h change field is `price_percent_chg_24_h`
+   * (underscores around `24` and `h`). The old code read the legacy Coinbase Pro shape
+   * and therefore recorded ZERO ticks against `wss://advanced-trade-ws.coinbase.com`.
+   */
+  handleMessage(raw: string): void {
     let msg: Record<string, unknown>;
     try {
-      msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+      msg = JSON.parse(raw) as Record<string, unknown>;
     } catch {
       return;
     }
 
-    switch (msg['type'] as string) {
-      case 'heartbeat':
-        // JSON-level heartbeat from Coinbase also resets the pong timer
-        this._clearPongTimer();
-        break;
-
+    switch (msg['channel'] as string) {
       case 'ticker': {
-        const productId = msg['product_id'] as string | undefined;
-        if (!productId) break;
-        const [base, quote] = productId.split('-');
-        if (!base) break;
-        const symbol = base.toUpperCase();
-        const rawPrice = msg['price'] as string | undefined;
-        if (!rawPrice) break;
-        const price = parseFloat(rawPrice);
-        // Coinbase Advanced Trade uses price_percent_chg_24h; fallback to 0
-        const rawChange = msg['price_percent_chg_24h'] as string | undefined;
-        const change24h = rawChange ? parseFloat(rawChange) : 0;
+        const events = Array.isArray(msg['events']) ? (msg['events'] as unknown[]) : [];
+        for (const evRaw of events) {
+          if (!evRaw || typeof evRaw !== 'object') continue;
+          const tickers = (evRaw as Record<string, unknown>)['tickers'];
+          if (!Array.isArray(tickers)) continue;
+          for (const tRaw of tickers) {
+            if (!tRaw || typeof tRaw !== 'object') continue;
+            const t = tRaw as Record<string, unknown>;
 
-        // retrofit-16: write the per-exchange key and let the resolver own the
-        // canonical `price:<SYMBOL>` key + channel (no longer written here).
-        recordTick(symbol, 'coinbase', price, change24h, (quote ?? 'USD').toUpperCase()).catch(
-          (e: Error) => console.error(`[coinbase] recordTick ${symbol} error:`, e.message),
-        );
+            const productId = t['product_id'] as string | undefined;
+            if (!productId) continue;
+            const [base, quote] = productId.split('-');
+            if (!base) continue;
+
+            const price = parseFloat(t['price'] as string);
+            if (!Number.isFinite(price)) continue;
+
+            const rawChange = t['price_percent_chg_24_h'];
+            const change24h = rawChange != null ? parseFloat(String(rawChange)) : 0;
+
+            // retrofit-16: write the per-exchange key and let the resolver own the
+            // canonical `price:<SYMBOL>` key + channel (no longer written here).
+            recordTick(
+              base.toUpperCase(),
+              'coinbase',
+              price,
+              Number.isFinite(change24h) ? change24h : 0,
+              (quote ?? 'USD').toUpperCase(),
+            ).catch((e: Error) => console.error(`[coinbase] recordTick ${base} error:`, e.message));
+          }
+        }
         break;
       }
+
+      case 'subscriptions':
+        // Subscribe acknowledgement — nothing to record.
+        break;
 
       default:
         break;
@@ -218,10 +250,11 @@ export class CoinbaseClient {
   }
 
   private _sendSubscribe(symbol: string): void {
+    // retrofit-30: Advanced Trade uses singular `channel` (not the legacy `channels[]`).
     this.ws?.send(JSON.stringify({
       type: 'subscribe',
       product_ids: [`${symbol}-USD`],
-      channels: ['ticker'],
+      channel: 'ticker',
     }));
   }
 
@@ -229,16 +262,17 @@ export class CoinbaseClient {
     this.ws?.send(JSON.stringify({
       type: 'unsubscribe',
       product_ids: [`${symbol}-USD`],
-      channels: ['ticker'],
+      channel: 'ticker',
     }));
   }
 
   /**
    * Breadth coverage (retrofit-16): subscribe a set of Coinbase-listed catalog
-   * symbols on the lighter `ticker_batch` channel (~5s) so the canonical cache
-   * carries true-USD prices beyond just the symbols Pro clients actively watch.
-   * Pass the intersection of the catalog with Coinbase's product list so we
-   * don't generate dead-product subscribe errors. Resubscribed on reconnect.
+   * symbols so the canonical cache carries true-USD prices beyond just the symbols
+   * Pro clients actively watch. retrofit-30: uses the real-time `ticker` channel
+   * (per-trade, sub-second) — NOT the old `ticker_batch` (~5s) — so the firehose
+   * updates live. Pass the intersection of the catalog with Coinbase's product list
+   * so we don't generate dead-product subscribe errors. Resubscribed on reconnect.
    */
   subscribeForCoverage(symbols: string[]): void {
     const fresh: string[] = [];
@@ -259,10 +293,11 @@ export class CoinbaseClient {
     // Chunk to keep each subscribe frame well under Coinbase's payload limit.
     const CHUNK = 100;
     for (let i = 0; i < productIds.length; i += CHUNK) {
+      // retrofit-30: real-time `ticker` channel (singular `channel`), not `ticker_batch`.
       this.ws.send(JSON.stringify({
         type: 'subscribe',
         product_ids: productIds.slice(i, i + CHUNK),
-        channels: ['ticker_batch'],
+        channel: 'ticker',
       }));
     }
   }
