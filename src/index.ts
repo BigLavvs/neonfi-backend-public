@@ -45,6 +45,8 @@ import { binance } from './lib/binance.js';
 import { kraken, krakenBbo } from './lib/kraken.js';
 import { gate, fetchGateUsdtBaseSymbols, buildGateCoverage } from './lib/gate.js';
 import { kucoin } from './lib/kucoin.js';
+import { okx, fetchOkxUsdtBaseSymbols, buildOkxCoverage } from './lib/okx.js';
+import { bybit, fetchBybitUsdtBaseSymbols, buildBybitCoverage } from './lib/bybit.js';
 import { loadCatalogSymbols, getCatalogSymbols, getKrakenCoverage } from './lib/price-symbols.js';
 import { startWsServer } from './ws/server.js';
 
@@ -104,6 +106,8 @@ async function startPriceFeeds(): Promise<void> {
       binanceEnabled: config.BINANCE_ENABLED,
       gateEnabled: config.GATE_ENABLED,
       kucoinEnabled: config.KUCOIN_ENABLED,
+      okxEnabled: config.OKX_ENABLED,
+      bybitEnabled: config.BYBIT_ENABLED,
       catalog: getCatalogSymbols().size,
       coinbaseListed: coinbaseListed.size,
       coinbaseCoverage: coverage.length,
@@ -164,6 +168,38 @@ async function startPriceFeeds(): Promise<void> {
     }
   } catch (e) {
     console.error('[neonfi-backend] kucoin connect failed', e);
+  }
+
+  // OKX — per-symbol coverage (catalog ∩ OKX SPOT USDT instruments; falls back to the
+  // catalog directly if the REST list is unreachable) (retrofit-37).
+  try {
+    if (config.OKX_ENABLED) {
+      const okxListed = await fetchOkxUsdtBaseSymbols();
+      const instIds = buildOkxCoverage(okxListed);
+      console.log(JSON.stringify({ event: 'okx_boot', listed: okxListed.size, coverage: instIds.length }));
+      okx.connect();
+      okx.subscribeForCoverage(instIds);
+    } else {
+      console.log('[neonfi-backend] OKX_ENABLED=false — skipping OKX feed');
+    }
+  } catch (e) {
+    console.error('[neonfi-backend] okx connect failed', e);
+  }
+
+  // Bybit — per-symbol coverage (catalog ∩ Bybit SPOT USDT instruments; falls back to the
+  // catalog directly if the REST list is unreachable) (retrofit-37).
+  try {
+    if (config.BYBIT_ENABLED) {
+      const bybitListed = await fetchBybitUsdtBaseSymbols();
+      const topics = buildBybitCoverage(bybitListed);
+      console.log(JSON.stringify({ event: 'bybit_boot', listed: bybitListed.size, coverage: topics.length }));
+      bybit.connect();
+      bybit.subscribeForCoverage(topics);
+    } else {
+      console.log('[neonfi-backend] BYBIT_ENABLED=false — skipping Bybit feed');
+    }
+  } catch (e) {
+    console.error('[neonfi-backend] bybit connect failed', e);
   }
 }
 
@@ -228,6 +264,18 @@ async function shutdown(signal: string): Promise<void> {
     kucoin.disconnect();
   } catch (e) {
     console.error('[neonfi-backend] kucoin disconnect error:', e);
+  }
+
+  try {
+    okx.disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] okx disconnect error:', e);
+  }
+
+  try {
+    bybit.disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] bybit disconnect error:', e);
   }
 
   try {

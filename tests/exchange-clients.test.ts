@@ -31,6 +31,8 @@ import { KrakenClient } from '../src/lib/kraken.js';
 import { CoinbaseClient } from '../src/lib/coinbase.js';
 import { GateClient } from '../src/lib/gate.js';
 import { KucoinClient } from '../src/lib/kucoin.js';
+import { OkxClient } from '../src/lib/okx.js';
+import { BybitClient } from '../src/lib/bybit.js';
 import { setCatalogSymbols } from '../src/lib/price-symbols.js';
 import { __resetThrottleForTest } from '../src/lib/price-resolver.js';
 
@@ -355,6 +357,107 @@ describe('kucoin: connect sequence (retrofit-36)', () => {
 
     client.disconnect();
   }, 5000);
+});
+
+// ---------------------------------------------------------------------------
+// OKX — parse a captured tickers frame (retrofit-37)
+// ---------------------------------------------------------------------------
+
+describe('okx: tickers parse (retrofit-37)', () => {
+  it('records price:<BASE>:okx with last + computed (last-open24h)/open24h*100; drops non-USDT/non-catalog', async () => {
+    setCatalogSymbols(['BTC', 'ETH']);
+    const client = new OkxClient('ws://unused');
+
+    client.handleMessage(JSON.stringify({
+      arg: { channel: 'tickers', instId: 'BTC-USDT' },
+      data: [{ instId: 'BTC-USDT', last: '65000', open24h: '64000' }],
+    }));
+    client.handleMessage(JSON.stringify({
+      arg: { channel: 'tickers', instId: 'ETH-BTC' }, // non-USDT → skip
+      data: [{ instId: 'ETH-BTC', last: '0.05', open24h: '0.05' }],
+    }));
+    client.handleMessage(JSON.stringify({
+      arg: { channel: 'tickers', instId: 'XYZ-USDT' }, // not catalog → skip
+      data: [{ instId: 'XYZ-USDT', last: '1', open24h: '1' }],
+    }));
+    await sleep(20);
+
+    // (65000 - 64000) / 64000 * 100 = 1.5625
+    const btc = perExchange('BTC', 'okx');
+    expect(btc?.price).toBe(65000);
+    expect(btc?.change24h).toBeCloseTo(1.5625, 4);
+    expect(btc?.quote).toBe('USDT');
+    expect(perExchange('ETH', 'okx')).toBeNull();
+    expect(store.get('price:XYZ:okx')).toBeUndefined();
+  });
+
+  it('change24h is 0 when open24h is missing/zero (no divide-by-zero)', async () => {
+    setCatalogSymbols(['BTC']);
+    const client = new OkxClient('ws://unused');
+    client.handleMessage(JSON.stringify({
+      arg: { channel: 'tickers', instId: 'BTC-USDT' },
+      data: [{ instId: 'BTC-USDT', last: '65000', open24h: '0' }],
+    }));
+    await sleep(20);
+    expect(perExchange('BTC', 'okx')).toMatchObject({ price: 65000, change24h: 0 });
+  });
+
+  it('ignores the literal "pong" keepalive and non-tickers frames (no throw)', async () => {
+    setCatalogSymbols(['BTC']);
+    const client = new OkxClient('ws://unused');
+    expect(() => client.handleMessage('pong')).not.toThrow();
+    expect(() => client.handleMessage(JSON.stringify({ event: 'subscribe', arg: { channel: 'tickers' } }))).not.toThrow();
+    await sleep(10);
+    expect(store.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bybit — parse a captured tickers snapshot (retrofit-37)
+// ---------------------------------------------------------------------------
+
+describe('bybit: tickers snapshot parse (retrofit-37)', () => {
+  it('records price:<BASE>:bybit with lastPrice + price24hPcnt*100; BASEQUOTE suffix parse', async () => {
+    setCatalogSymbols(['BTC', 'ETH']);
+    const client = new BybitClient('ws://unused');
+
+    client.handleMessage(JSON.stringify({
+      topic: 'tickers.BTCUSDT', type: 'snapshot',
+      data: { symbol: 'BTCUSDT', lastPrice: '65000.5', price24hPcnt: '-0.0182' },
+    }));
+    await sleep(20);
+
+    // price24hPcnt is a FRACTION → -0.0182 becomes -1.82%.
+    const btc = perExchange('BTC', 'bybit');
+    expect(btc?.price).toBe(65000.5);
+    expect(btc?.change24h).toBeCloseTo(-1.82, 4);
+    expect(btc?.quote).toBe('USDT');
+  });
+
+  it('drops non-USDT (e.g. USDC) and non-catalog symbols', async () => {
+    setCatalogSymbols(['ETH']);
+    const client = new BybitClient('ws://unused');
+    client.handleMessage(JSON.stringify({
+      topic: 'tickers.XYZUSDT', type: 'snapshot',
+      data: { symbol: 'XYZUSDT', lastPrice: '1', price24hPcnt: '0.01' }, // not catalog
+    }));
+    client.handleMessage(JSON.stringify({
+      topic: 'tickers.ETHUSDC', type: 'snapshot',
+      data: { symbol: 'ETHUSDC', lastPrice: '3200', price24hPcnt: '0.01' }, // USDC → skip
+    }));
+    await sleep(10);
+    expect(store.get('price:XYZ:bybit')).toBeUndefined();
+    expect(perExchange('ETH', 'bybit')).toBeNull();
+  });
+
+  it('ignores pong / subscribe-ack frames (no tickers topic)', async () => {
+    setCatalogSymbols(['BTC']);
+    const client = new BybitClient('ws://unused');
+    client.handleMessage(JSON.stringify({ op: 'pong', ret_msg: 'pong', success: true }));
+    client.handleMessage(JSON.stringify({ op: 'subscribe', success: true, ret_msg: '' }));
+    await sleep(10);
+    expect(store.size).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

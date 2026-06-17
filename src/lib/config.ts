@@ -93,6 +93,20 @@ const schema = z
     // KuCoin's connect flow is token-gated: POST bullet-public for a short-lived token +
     // WS endpoint, then connect to `${endpoint}?token=...`. This is the bullet URL.
     KUCOIN_BULLET_URL: z.string().min(1).default('https://api.kucoin.com/api/v1/bullet-public'),
+
+    // --- OKX + Bybit deep/redundant streaming (retrofit-37) ---
+    // Deep, fast coverage of majors/mid-caps that also keeps prices flowing when one venue
+    // is down. Same explicit-transform boolean pattern as BINANCE_ENABLED; default ON.
+    OKX_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    OKX_WS_URL: z.string().min(1).default('wss://ws.okx.com:8443/ws/v5/public'),
+    BYBIT_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    BYBIT_WS_URL: z.string().min(1).default('wss://stream.bybit.com/v5/public/spot'),
     // Stage 12: COINMARKETCAP_API_KEY is now required. Stage 9B's CMC sync is the
     // authoritative token-catalog source; booting without the key silently disables
     // price refreshes in a way that's hard to notice in production.

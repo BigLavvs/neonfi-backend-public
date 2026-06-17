@@ -256,6 +256,39 @@ describe('long-tail sources (gate/kucoin, retrofit-36)', () => {
   });
 });
 
+describe('depth sources (okx/bybit, retrofit-37)', () => {
+  it('a symbol fresh ONLY on okx resolves from okx', async () => {
+    const now = 17_000_000;
+    await recordTick('AVAX', 'okx', 40.5, 1, 'USDT', now);
+    expect(canonical('AVAX')).toMatchObject({ price: 40.5, source: 'okx' });
+  });
+
+  it('a symbol fresh ONLY on bybit resolves from bybit', async () => {
+    const now = 17_500_000;
+    await recordTick('AVAX', 'bybit', 41.0, 1, 'USDT', now);
+    expect(canonical('AVAX')).toMatchObject({ price: 41.0, source: 'bybit' });
+  });
+
+  it('binance/coinbase win over okx/bybit when fresh (priority 0/1 < 2/3)', async () => {
+    const now = 18_000_000;
+    store.set('price:AVAX:okx', JSON.stringify({ price: 40.5, change24h: 1, quote: 'USDT', ts: now }));
+    store.set('price:AVAX:bybit', JSON.stringify({ price: 40.6, change24h: 1, quote: 'USDT', ts: now }));
+
+    await recordTick('AVAX', 'coinbase', 40.7, 2, 'USD', now);
+
+    expect(canonical('AVAX')).toMatchObject({ price: 40.7, source: 'coinbase' });
+  });
+
+  it('okx outranks bybit when both are fresh (okx:2 < bybit:3)', async () => {
+    const now = 18_500_000;
+    store.set('price:AVAX:bybit', JSON.stringify({ price: 40.6, change24h: 1, quote: 'USDT', ts: now }));
+
+    await recordTick('AVAX', 'okx', 40.5, 2, 'USDT', now);
+
+    expect(canonical('AVAX')).toMatchObject({ price: 40.5, source: 'okx' });
+  });
+});
+
 describe('change-dedupe (replaces the old time throttle)', () => {
   it('rapid CHANGING ticks each publish — no time-gate collapses them', async () => {
     const base = 6_000_000;
