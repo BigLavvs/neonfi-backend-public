@@ -10,6 +10,9 @@ import {
   toBinanceBase,
   fromKrakenName,
   toKrakenPair,
+  fromGatePair,
+  toGatePair,
+  fromKucoinSymbol,
   PREFERRED_BINANCE_QUOTES,
   setCatalogSymbols,
   isCatalogSymbol,
@@ -72,6 +75,39 @@ describe('kraken pair normalization', () => {
 
   it('malformed name (no slash) → null', () => {
     expect(fromKrakenName('BTCUSD')).toBeNull();
+  });
+});
+
+describe('gate.io pair normalization (retrofit-36)', () => {
+  it('BTC_USDT → {BTC, USDT}', () => {
+    expect(fromGatePair('BTC_USDT')).toEqual({ base: 'BTC', quote: 'USDT' });
+  });
+
+  it('lowercase input is normalized', () => {
+    expect(fromGatePair('sol_usdt')).toEqual({ base: 'SOL', quote: 'USDT' });
+  });
+
+  it('malformed pair (no underscore) → null', () => {
+    expect(fromGatePair('BTCUSDT')).toBeNull();
+  });
+
+  it('toGatePair BTC → BTC_USDT', () => {
+    expect(toGatePair('BTC')).toBe('BTC_USDT');
+    expect(toGatePair('eth')).toBe('ETH_USDT');
+  });
+});
+
+describe('kucoin symbol normalization (retrofit-36)', () => {
+  it('BTC-USDT → {BTC, USDT}', () => {
+    expect(fromKucoinSymbol('BTC-USDT')).toEqual({ base: 'BTC', quote: 'USDT' });
+  });
+
+  it('lowercase input is normalized', () => {
+    expect(fromKucoinSymbol('eth-usdt')).toEqual({ base: 'ETH', quote: 'USDT' });
+  });
+
+  it('malformed symbol (no hyphen) → null', () => {
+    expect(fromKucoinSymbol('BTCUSDT')).toBeNull();
   });
 });
 

@@ -43,6 +43,8 @@ import { startDbKeepalive, stopDbKeepalive } from './jobs/db-keepalive.job.js';
 import { coinbase, fetchCoinbaseUsdBaseSymbols } from './lib/coinbase.js';
 import { binance } from './lib/binance.js';
 import { kraken, krakenBbo } from './lib/kraken.js';
+import { gate, fetchGateUsdtBaseSymbols, buildGateCoverage } from './lib/gate.js';
+import { kucoin } from './lib/kucoin.js';
 import { loadCatalogSymbols, getCatalogSymbols, getKrakenCoverage } from './lib/price-symbols.js';
 import { startWsServer } from './ws/server.js';
 
@@ -100,6 +102,8 @@ async function startPriceFeeds(): Promise<void> {
     console.log(JSON.stringify({
       event: 'price_feeds_boot',
       binanceEnabled: config.BINANCE_ENABLED,
+      gateEnabled: config.GATE_ENABLED,
+      kucoinEnabled: config.KUCOIN_ENABLED,
       catalog: getCatalogSymbols().size,
       coinbaseListed: coinbaseListed.size,
       coinbaseCoverage: coverage.length,
@@ -132,6 +136,34 @@ async function startPriceFeeds(): Promise<void> {
     krakenBbo.subscribe(getKrakenCoverage());
   } catch (e) {
     console.error('[neonfi-backend] kraken connect failed', e);
+  }
+
+  // Gate.io — long-tail USDT coverage (catalog ∩ Gate USDT pairs; falls back to the
+  // catalog directly if the REST list is unreachable). Reachable in dev (retrofit-36).
+  try {
+    if (config.GATE_ENABLED) {
+      const gateListed = await fetchGateUsdtBaseSymbols();
+      const coverage = buildGateCoverage(gateListed);
+      console.log(JSON.stringify({ event: 'gate_boot', listed: gateListed.size, coverage: coverage.length }));
+      gate.connect();
+      gate.subscribeForCoverage(coverage);
+    } else {
+      console.log('[neonfi-backend] GATE_ENABLED=false — skipping Gate feed');
+    }
+  } catch (e) {
+    console.error('[neonfi-backend] gate connect failed', e);
+  }
+
+  // KuCoin — streams the whole market over one topic and filters to the catalog in
+  // handleMessage, so there's no coverage list (retrofit-36).
+  try {
+    if (config.KUCOIN_ENABLED) {
+      kucoin.connect();
+    } else {
+      console.log('[neonfi-backend] KUCOIN_ENABLED=false — skipping KuCoin feed');
+    }
+  } catch (e) {
+    console.error('[neonfi-backend] kucoin connect failed', e);
   }
 }
 
@@ -184,6 +216,18 @@ async function shutdown(signal: string): Promise<void> {
     krakenBbo.disconnect();
   } catch (e) {
     console.error('[neonfi-backend] krakenBbo disconnect error:', e);
+  }
+
+  try {
+    gate.disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] gate disconnect error:', e);
+  }
+
+  try {
+    kucoin.disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] kucoin disconnect error:', e);
   }
 
   try {

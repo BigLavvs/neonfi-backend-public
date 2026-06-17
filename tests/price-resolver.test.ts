@@ -223,6 +223,39 @@ describe('cross-source outlier guard (retrofit-35)', () => {
   });
 });
 
+describe('long-tail sources (gate/kucoin, retrofit-36)', () => {
+  it('a symbol fresh ONLY on gate resolves from gate', async () => {
+    const now = 15_000_000;
+    await recordTick('PEPE', 'gate', 0.0000123, 1, 'USDT', now);
+    expect(canonical('PEPE')).toMatchObject({ price: 0.0000123, source: 'gate' });
+  });
+
+  it('a symbol fresh ONLY on kucoin resolves from kucoin', async () => {
+    const now = 15_500_000;
+    await recordTick('SHIB', 'kucoin', 0.00002, 1, 'USDT', now);
+    expect(canonical('SHIB')).toMatchObject({ price: 0.00002, source: 'kucoin' });
+  });
+
+  it('binance outranks gate/kucoin when all are fresh (priority)', async () => {
+    const now = 16_000_000;
+    store.set('price:DOGE:gate', JSON.stringify({ price: 0.16, change24h: 1, quote: 'USDT', ts: now }));
+    store.set('price:DOGE:kucoin', JSON.stringify({ price: 0.161, change24h: 1, quote: 'USDT', ts: now }));
+
+    await recordTick('DOGE', 'binance', 0.162, 2, 'USDT', now);
+
+    expect(canonical('DOGE')).toMatchObject({ price: 0.162, source: 'binance' });
+  });
+
+  it('gate outranks kucoin when both are fresh (gate:4 < kucoin:5)', async () => {
+    const now = 16_500_000;
+    store.set('price:DOGE:kucoin', JSON.stringify({ price: 0.161, change24h: 1, quote: 'USDT', ts: now }));
+
+    await recordTick('DOGE', 'gate', 0.160, 2, 'USDT', now);
+
+    expect(canonical('DOGE')).toMatchObject({ price: 0.160, source: 'gate' });
+  });
+});
+
 describe('change-dedupe (replaces the old time throttle)', () => {
   it('rapid CHANGING ticks each publish — no time-gate collapses them', async () => {
     const base = 6_000_000;

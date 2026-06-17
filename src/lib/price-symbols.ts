@@ -73,6 +73,31 @@ export function toKrakenPair(sym: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Gate.io (retrofit-36) — underscore-delimited `BASE_QUOTE`, USDT-quoted.
+// ---------------------------------------------------------------------------
+
+/** Parse a Gate.io pair (`BTC_USDT`) into catalog base + quote, or null. */
+export function fromGatePair(pair: string): { base: string; quote: string } | null {
+  const [base, quote] = pair.toUpperCase().split('_');
+  return base && quote ? { base, quote } : null;
+}
+
+/** Catalog symbol → Gate.io USDT pair (`BTC` → `BTC_USDT`). */
+export function toGatePair(sym: string): string {
+  return `${sym.toUpperCase()}_USDT`;
+}
+
+// ---------------------------------------------------------------------------
+// KuCoin (retrofit-36) — hyphen-delimited `BASE-QUOTE`, USDT-quoted.
+// ---------------------------------------------------------------------------
+
+/** Parse a KuCoin symbol (`BTC-USDT`) into catalog base + quote, or null. */
+export function fromKucoinSymbol(symbol: string): { base: string; quote: string } | null {
+  const [base, quote] = symbol.toUpperCase().split('-');
+  return base && quote ? { base, quote } : null;
+}
+
+// ---------------------------------------------------------------------------
 // Catalog working set (loaded once at boot from the Token table)
 // ---------------------------------------------------------------------------
 

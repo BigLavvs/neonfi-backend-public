@@ -29,6 +29,8 @@ vi.mock('../src/lib/redis.js', () => ({
 import { BinanceClient } from '../src/lib/binance.js';
 import { KrakenClient } from '../src/lib/kraken.js';
 import { CoinbaseClient } from '../src/lib/coinbase.js';
+import { GateClient } from '../src/lib/gate.js';
+import { KucoinClient } from '../src/lib/kucoin.js';
 import { setCatalogSymbols } from '../src/lib/price-symbols.js';
 import { __resetThrottleForTest } from '../src/lib/price-resolver.js';
 
@@ -217,6 +219,142 @@ describe('kraken: bbo sub-feed parse (retrofit-35)', () => {
     expect(frame.params.channel).toBe('ticker');
     expect(frame.params.event_trigger).toBe('bbo');
   });
+});
+
+// ---------------------------------------------------------------------------
+// Gate.io — parse a captured spot.tickers update (retrofit-36)
+// ---------------------------------------------------------------------------
+
+describe('gate.io: spot.tickers parse (retrofit-36)', () => {
+  it('records price:<BASE>:gate for catalog USDT pairs; drops non-USDT / non-catalog', async () => {
+    setCatalogSymbols(['BTC', 'ETH', 'PEPE']);
+    const client = new GateClient('ws://unused');
+
+    client.handleMessage(JSON.stringify({
+      time: 1, channel: 'spot.tickers', event: 'update',
+      result: { currency_pair: 'BTC_USDT', last: '65000.5', change_percentage: '2.5' },
+    }));
+    client.handleMessage(JSON.stringify({
+      channel: 'spot.tickers', event: 'update',
+      result: { currency_pair: 'ETH_BTC', last: '0.05', change_percentage: '1' }, // non-USDT → skip
+    }));
+    client.handleMessage(JSON.stringify({
+      channel: 'spot.tickers', event: 'update',
+      result: { currency_pair: 'XYZ_USDT', last: '1', change_percentage: '1' }, // not in catalog → skip
+    }));
+    await sleep(20);
+
+    expect(perExchange('BTC', 'gate')).toMatchObject({ price: 65000.5, change24h: 2.5, quote: 'USDT' });
+    expect(perExchange('ETH', 'gate')).toBeNull();
+    expect(store.get('price:XYZ:gate')).toBeUndefined();
+  });
+
+  it('ignores subscribe-ack frames (event !== "update")', async () => {
+    setCatalogSymbols(['BTC']);
+    const client = new GateClient('ws://unused');
+    client.handleMessage(JSON.stringify({
+      channel: 'spot.tickers', event: 'subscribe', result: { status: 'success' },
+    }));
+    await sleep(10);
+    expect(store.size).toBe(0);
+  });
+
+  it('ignores non-spot.tickers channels (spot.pong)', async () => {
+    setCatalogSymbols(['BTC']);
+    const client = new GateClient('ws://unused');
+    client.handleMessage(JSON.stringify({ channel: 'spot.pong', event: 'update' }));
+    await sleep(10);
+    expect(store.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// KuCoin — parse a captured /market/snapshot:all message (retrofit-36)
+// ---------------------------------------------------------------------------
+
+describe('kucoin: snapshot:all parse (retrofit-36)', () => {
+  it('records price:<BASE>:kucoin with lastTradedPrice + changeRate*100; drops non-catalog', async () => {
+    setCatalogSymbols(['BTC', 'ETH']);
+    const client = new KucoinClient();
+
+    client.handleMessage(JSON.stringify({
+      type: 'message', topic: '/market/snapshot:all', subject: 'BTC-USDT',
+      data: { data: { symbol: 'BTC-USDT', lastTradedPrice: '65000.5', changeRate: '0.025' } },
+    }));
+    client.handleMessage(JSON.stringify({
+      type: 'message', topic: '/market/snapshot:all', subject: 'XYZ-USDT',
+      data: { data: { symbol: 'XYZ-USDT', lastTradedPrice: '1', changeRate: '0.01' } }, // not catalog
+    }));
+    await sleep(20);
+
+    // changeRate is a FRACTION → 0.025 becomes +2.5%.
+    expect(perExchange('BTC', 'kucoin')).toMatchObject({ price: 65000.5, change24h: 2.5, quote: 'USDT' });
+    expect(store.get('price:XYZ:kucoin')).toBeUndefined();
+  });
+
+  it('drops non-USDT symbols', async () => {
+    setCatalogSymbols(['ETH']);
+    const client = new KucoinClient();
+    client.handleMessage(JSON.stringify({
+      type: 'message', topic: '/market/snapshot:all', subject: 'ETH-BTC',
+      data: { data: { symbol: 'ETH-BTC', lastTradedPrice: '0.05', changeRate: '0.01' } },
+    }));
+    await sleep(10);
+    expect(perExchange('ETH', 'kucoin')).toBeNull();
+  });
+
+  it('ignores pong/ack frames (no tick)', async () => {
+    setCatalogSymbols(['BTC']);
+    const client = new KucoinClient();
+    client.handleMessage(JSON.stringify({ type: 'pong' }));
+    client.handleMessage(JSON.stringify({ type: 'ack', id: '1' }));
+    await sleep(10);
+    expect(store.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// KuCoin — bullet → connect → welcome → subscribe sequence (retrofit-36)
+// ---------------------------------------------------------------------------
+
+describe('kucoin: connect sequence (retrofit-36)', () => {
+  let kcServer: WebSocketServer;
+  let kcUrl: string;
+
+  beforeAll(async () => {
+    kcServer = new WebSocketServer({ port: 0 });
+    await new Promise<void>((r) => kcServer.once('listening', r));
+    kcUrl = `ws://127.0.0.1:${(kcServer.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((res, rej) => kcServer.close((e) => (e ? rej(e) : res())));
+  });
+
+  it('fetches bullet, connects to the endpoint, and subscribes snapshot:all on welcome', async () => {
+    const client = new KucoinClient({
+      fetchBullet: async () => ({ token: 'tkn', endpoint: kcUrl, pingIntervalMs: 10_000 }),
+    });
+
+    const sub = new Promise<Record<string, unknown>>((resolve) => {
+      kcServer.once('connection', (ws: WsServer) => {
+        ws.send(JSON.stringify({ type: 'welcome', id: 'hello' })); // KuCoin greets on connect
+        ws.on('message', (d) => {
+          const m = JSON.parse(d.toString()) as Record<string, unknown>;
+          if (m['type'] === 'subscribe') resolve(m);
+        });
+      });
+    });
+
+    client.connect();
+    const frame = await sub;
+
+    expect(frame['type']).toBe('subscribe');
+    expect(frame['topic']).toBe('/market/snapshot:all');
+    expect(client.isConnected()).toBe(true);
+
+    client.disconnect();
+  }, 5000);
 });
 
 // ---------------------------------------------------------------------------

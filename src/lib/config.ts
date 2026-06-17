@@ -76,6 +76,23 @@ const schema = z
     // above or ÷ratio below) is dropped as a likely collision / bad print. Default 5 —
     // generous for real volatility, tight enough to catch gross collisions.
     PRICE_OUTLIER_RATIO: z.coerce.number().min(1).default(5),
+
+    // --- Gate.io + KuCoin long-tail streaming (retrofit-36) ---
+    // Reachable from this dev host (unlike Binance), so default ON — they un-freeze the
+    // long-tail catalog. Same explicit-transform boolean pattern as BINANCE_ENABLED
+    // (Boolean("false") === true, so z.coerce.boolean() would never disable).
+    GATE_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    GATE_WS_URL: z.string().min(1).default('wss://api.gateio.ws/ws/v4/'),
+    KUCOIN_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    // KuCoin's connect flow is token-gated: POST bullet-public for a short-lived token +
+    // WS endpoint, then connect to `${endpoint}?token=...`. This is the bullet URL.
+    KUCOIN_BULLET_URL: z.string().min(1).default('https://api.kucoin.com/api/v1/bullet-public'),
     // Stage 12: COINMARKETCAP_API_KEY is now required. Stage 9B's CMC sync is the
     // authoritative token-catalog source; booting without the key silently disables
     // price refreshes in a way that's hard to notice in production.
