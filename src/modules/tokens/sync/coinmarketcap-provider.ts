@@ -13,6 +13,28 @@ import type { TokenMetadataProvider, TokenMetadata } from './provider.js';
 
 const CMC_URL = 'https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest';
 const MAX_SYMBOLS_PER_CALL = 50;
+// retrofit-34: market-cap-ranked listings endpoint — used to INGEST a real catalog
+// (top-N coins), distinct from the symbol-native quotes/latest the sync path uses.
+const CMC_LISTINGS_URL = 'https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest';
+
+// retrofit-34: one ranked listing row, normalized to Token-table column shapes
+// (decimal strings, nullable rank/marketCap/logoUrl).
+export interface TopToken {
+  symbol: string;
+  name: string;
+  rank: number | null;
+  currentPrice: string;
+  marketCap: string | null;
+  logoUrl: string | null;
+}
+
+interface CmcListing {
+  id: number;
+  name: string;
+  symbol: string;
+  cmc_rank: number | null;
+  quote: { USD: { price: number | null; market_cap: number | null } };
+}
 
 interface CmcQuoteUsd {
   price: number;
@@ -100,6 +122,48 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
       });
     }
     return out;
+  }
+
+  /**
+   * retrofit-34: fetch the CMC top-N coins by market cap (listings/latest). Used by the
+   * catalog-ingest routine to INSERT real content into the Token table — unlike
+   * fetchMetadata/fetchPrices, which are symbol-native and only refresh existing rows.
+   * Dedupes duplicate tickers (CMC reuses symbols across coins) keeping the highest
+   * market cap; builds logoUrl from CMC's public static CDN keyed by coin id; skips
+   * null-price rows. Returns [] (no throw) when no API key is configured.
+   */
+  async fetchTopTokens(limit: number): Promise<TopToken[]> {
+    if (!this.apiKey) {
+      console.warn('[cmc-provider] no API key — skipping fetchTopTokens');
+      return [];
+    }
+    const url = `${CMC_LISTINGS_URL}?start=1&limit=${limit}&convert=USD&sort=market_cap`;
+    const res = await fetch(url, {
+      headers: { 'X-CMC_PRO_API_KEY': this.apiKey, Accept: 'application/json' },
+    });
+    if (!res.ok) {
+      throw new Error(`CMC listings HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+    }
+    const body = (await res.json()) as { data: CmcListing[] };
+
+    const best = new Map<string, TopToken & { _mc: number }>();
+    for (const c of body.data ?? []) {
+      const usd = c.quote?.USD;
+      if (!usd || usd.price == null) continue; // no price → unusable
+      const mc = usd.market_cap ?? 0;
+      const prev = best.get(c.symbol);
+      if (prev && prev._mc >= mc) continue; // keep the higher-market-cap listing for a dup ticker
+      best.set(c.symbol, {
+        symbol: c.symbol,
+        name: c.name,
+        rank: c.cmc_rank ?? null,
+        currentPrice: usd.price.toFixed(8),
+        marketCap: usd.market_cap != null ? usd.market_cap.toFixed(2) : null,
+        logoUrl: `https://s2.coinmarketcap.com/static/img/coins/64x64/${c.id}.png`,
+        _mc: mc,
+      });
+    }
+    return [...best.values()].map(({ _mc, ...t }) => t);
   }
 
   async fetchPrices(symbols: string[]): Promise<Map<string, PriceData>> {

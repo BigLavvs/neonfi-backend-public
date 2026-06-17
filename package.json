@@ -17,6 +17,7 @@
     "migrate:deploy": "prisma migrate deploy",
     "db:hypertable": "tsx prisma/sql/run-hypertable.ts",
     "db:seed": "prisma db seed",
+    "seed:tokens": "tsx src/scripts/seed-catalog.ts",
     "test": "vitest run"
   },
   "prisma": {
