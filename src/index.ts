@@ -84,12 +84,28 @@ async function startPriceFeeds(): Promise<void> {
 
   // Coinbase breadth coverage (best-effort): intersect the catalog with
   // Coinbase's listed USD products so we don't subscribe dead products.
+  // retrofit-31: if that REST product list is empty/unreachable the old code
+  // subscribed NOTHING — fall back to the catalog directly (Coinbase silently
+  // ignores unknown products) so coverage can never silently become a no-op.
+  // Emit one boot-summary line so the running process's feed wiring is visible.
   try {
     const coinbaseListed = await fetchCoinbaseUsdBaseSymbols();
-    if (coinbaseListed.size > 0) {
-      const coverage = [...getCatalogSymbols()].filter((s) => coinbaseListed.has(s));
-      coinbase.subscribeForCoverage(coverage);
+    const catalog = [...getCatalogSymbols()];
+    const coverage = coinbaseListed.size > 0
+      ? catalog.filter((s) => coinbaseListed.has(s))
+      : catalog; // fallback: REST product list unavailable — subscribe the catalog directly
+    if (coinbaseListed.size === 0) {
+      console.warn(JSON.stringify({ event: 'coinbase_products_unavailable_fallback', coverage: coverage.length }));
     }
+    console.log(JSON.stringify({
+      event: 'price_feeds_boot',
+      binanceEnabled: config.BINANCE_ENABLED,
+      catalog: getCatalogSymbols().size,
+      coinbaseListed: coinbaseListed.size,
+      coinbaseCoverage: coverage.length,
+      krakenCoverage: getKrakenCoverage().length,
+    }));
+    coinbase.subscribeForCoverage(coverage);
   } catch (e) {
     console.error('[neonfi-backend] coinbase coverage subscribe failed', e);
   }

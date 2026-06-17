@@ -343,3 +343,85 @@ it('243: subscribe frame uses singular channel:"ticker", not the legacy channels
 
   client.disconnect();
 });
+
+// ---------------------------------------------------------------------------
+// 244. channel:subscriptions ack → logs confirmed product count (retrofit-31)
+// ---------------------------------------------------------------------------
+
+it('244: channel:subscriptions ack → logs confirmed product count; no recordTick', () => {
+  mockRecordTick.mockClear();
+  const client = new CoinbaseClient(serverUrl);
+
+  const logs: string[] = [];
+  const origLog = console.log;
+  console.log = (msg: string) => { logs.push(String(msg)); };
+
+  expect(() =>
+    client.handleMessage(JSON.stringify({
+      channel: 'subscriptions',
+      events: [{ subscriptions: { ticker: ['BTC-USD', 'ETH-USD', 'SOL-USD'] } }],
+    })),
+  ).not.toThrow();
+
+  console.log = origLog;
+
+  expect(mockRecordTick).not.toHaveBeenCalled();
+  const ack = logs.find((l) => l.includes('coinbase_subscriptions_ack'));
+  expect(ack).toBeDefined();
+  expect((JSON.parse(ack as string) as { confirmed: number }).confirmed).toBe(3);
+});
+
+// ---------------------------------------------------------------------------
+// 245. Error frame (no channel, type:error/message) → coinbase_ws_error (retrofit-31)
+// ---------------------------------------------------------------------------
+
+it('245: error frame (no channel, type:error) → logs coinbase_ws_error; no throw; no recordTick', () => {
+  mockRecordTick.mockClear();
+  const client = new CoinbaseClient(serverUrl);
+
+  const errs: string[] = [];
+  const origErr = console.error;
+  console.error = (msg: string) => { errs.push(String(msg)); };
+
+  expect(() =>
+    client.handleMessage(JSON.stringify({
+      type: 'error',
+      message: 'invalid product_ids in subscribe',
+    })),
+  ).not.toThrow();
+
+  console.error = origErr;
+
+  expect(mockRecordTick).not.toHaveBeenCalled();
+  const errLine = errs.find((l) => l.includes('coinbase_ws_error'));
+  expect(errLine).toBeDefined();
+  expect((JSON.parse(errLine as string) as { detail: string }).detail).toContain('invalid product_ids');
+});
+
+// ---------------------------------------------------------------------------
+// 246. coinbase_first_tick beacon fires at most once across two ticker frames (retrofit-31)
+// ---------------------------------------------------------------------------
+
+it('246: coinbase_first_tick beacon fires at most once across two ticker frames', () => {
+  mockRecordTick.mockClear();
+  const client = new CoinbaseClient(serverUrl);
+
+  const logs: string[] = [];
+  const origLog = console.log;
+  console.log = (msg: string) => { logs.push(String(msg)); };
+
+  // Module-level `loggedFirstTick` may already be set by an earlier ticker test,
+  // so the beacon fires 0× (already logged) or 1× (first ever) — never twice.
+  const frame = JSON.stringify({
+    channel: 'ticker',
+    events: [{ tickers: [{ product_id: 'ADA-USD', price: '0.45', price_percent_chg_24_h: '1.0' }] }],
+  });
+  expect(() => client.handleMessage(frame)).not.toThrow();
+  expect(() => client.handleMessage(frame)).not.toThrow();
+
+  console.log = origLog;
+
+  expect(mockRecordTick).toHaveBeenCalledTimes(2);
+  const firstTickLogs = logs.filter((l) => l.includes('coinbase_first_tick'));
+  expect(firstTickLogs.length).toBeLessThanOrEqual(1);
+});

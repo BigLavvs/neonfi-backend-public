@@ -21,6 +21,11 @@ const PONG_TIMEOUT_MS = 5_000;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
 const RECONNECT_ALERT_AFTER_ATTEMPTS = 5;
 
+// retrofit-31: prove ingestion. The first Coinbase tick actually recorded logs
+// once at module scope — if `coinbase_first_tick` never appears, ingestion is
+// dead even though the socket reports "connected".
+let loggedFirstTick = false;
+
 type ClientState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
 export class CoinbaseClient {
@@ -138,6 +143,12 @@ export class CoinbaseClient {
             const rawChange = t['price_percent_chg_24_h'];
             const change24h = rawChange != null ? parseFloat(String(rawChange)) : 0;
 
+            // retrofit-31: beacon the very first recorded tick (module-scoped, once).
+            if (!loggedFirstTick) {
+              loggedFirstTick = true;
+              console.log(JSON.stringify({ event: 'coinbase_first_tick', symbol: base.toUpperCase() }));
+            }
+
             // retrofit-16: write the per-exchange key and let the resolver own the
             // canonical `price:<SYMBOL>` key + channel (no longer written here).
             recordTick(
@@ -152,12 +163,36 @@ export class CoinbaseClient {
         break;
       }
 
-      case 'subscriptions':
-        // Subscribe acknowledgement — nothing to record.
+      case 'subscriptions': {
+        // Subscribe acknowledgement — nothing to record. retrofit-31: surface how
+        // many products Coinbase confirms on the `ticker` channel so a silent
+        // zero-coverage subscribe is visible at boot.
+        let confirmed = 0;
+        const events = Array.isArray(msg['events']) ? (msg['events'] as unknown[]) : [];
+        for (const evRaw of events) {
+          if (!evRaw || typeof evRaw !== 'object') continue;
+          const subs = (evRaw as Record<string, unknown>)['subscriptions'];
+          if (!subs || typeof subs !== 'object') continue;
+          const ticker = (subs as Record<string, unknown>)['ticker'];
+          if (Array.isArray(ticker)) confirmed += ticker.length;
+        }
+        console.log(JSON.stringify({ event: 'coinbase_subscriptions_ack', confirmed }));
         break;
+      }
 
-      default:
+      default: {
+        // retrofit-31: Advanced Trade reports a rejected subscribe with NO `channel`
+        // and a top-level `type:'error'` / `message` / `error` field — catch that
+        // "subscribe rejected → 0 ingestion" case instead of letting it fall silently.
+        if (
+          msg['channel'] == null &&
+          (msg['error'] != null || msg['message'] != null || msg['type'] === 'error')
+        ) {
+          const detail = String(msg['message'] ?? msg['error'] ?? raw).slice(0, 200);
+          console.error(JSON.stringify({ event: 'coinbase_ws_error', detail }));
+        }
         break;
+      }
     }
   }
 
