@@ -18,6 +18,7 @@
     "db:hypertable": "tsx prisma/sql/run-hypertable.ts",
     "db:seed": "prisma db seed",
     "seed:tokens": "tsx src/scripts/seed-catalog.ts",
+    "backfill:costbasis": "tsx src/scripts/backfill-costbasis.ts",
     "test": "vitest run"
   },
   "prisma": {
