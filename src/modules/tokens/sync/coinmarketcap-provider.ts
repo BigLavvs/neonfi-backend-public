@@ -45,6 +45,7 @@ interface CmcQuoteUsd {
 }
 
 interface CmcEntry {
+  id: number; // retrofit-40: needed to build the logo URL on the sync path
   cmc_rank: number | null;
   quote: { USD: CmcQuoteUsd };
 }
@@ -110,10 +111,16 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
     for (const symbol of symbols) {
       const entries = body.data[symbol];
       if (!entries?.length) continue;
-      // Pick the entry with the highest market_cap when there are multiple listings
-      const entry = entries.reduce((best, cur) =>
-        (cur.quote.USD.market_cap ?? 0) > (best.quote.USD.market_cap ?? 0) ? cur : best,
-      );
+      // retrofit-40: CMC reuses tickers across coins, so a symbol can return multiple
+      // listings. Prefer the most prominent one by LOWEST cmc_rank (reliably populated),
+      // with market_cap only as a tiebreak — picking by market_cap alone lets a junk coin
+      // win whenever the canonical coin's cap is null (a common CMC gap).
+      const entry = entries.reduce((best, cur) => {
+        const br = best.cmc_rank ?? Number.MAX_SAFE_INTEGER;
+        const cr = cur.cmc_rank ?? Number.MAX_SAFE_INTEGER;
+        if (cr !== br) return cr < br ? cur : best;
+        return (cur.quote.USD.market_cap ?? 0) > (best.quote.USD.market_cap ?? 0) ? cur : best;
+      });
       const usd = entry.quote.USD;
       if (usd?.price == null) continue; // CMC returned no price for this symbol — skip, don't crash the batch
       out.set(symbol, {
@@ -122,6 +129,9 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
         marketCap: usd.market_cap != null ? usd.market_cap.toFixed(2) : null,
         rank: entry.cmc_rank ?? null,
         change24h: usd.percent_change_24h ?? null, // retrofit-39
+        // retrofit-40: build the logo from the chosen entry's id so the 6-hourly sync
+        // repairs stale/null logos (e.g. a re-resolved canonical coin).
+        logoUrl: `https://s2.coinmarketcap.com/static/img/coins/64x64/${entry.id}.png`,
       });
     }
     return out;
@@ -131,9 +141,10 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
    * retrofit-34: fetch the CMC top-N coins by market cap (listings/latest). Used by the
    * catalog-ingest routine to INSERT real content into the Token table — unlike
    * fetchMetadata/fetchPrices, which are symbol-native and only refresh existing rows.
-   * Dedupes duplicate tickers (CMC reuses symbols across coins) keeping the highest
-   * market cap; builds logoUrl from CMC's public static CDN keyed by coin id; skips
-   * null-price rows. Returns [] (no throw) when no API key is configured.
+   * Dedupes duplicate tickers (CMC reuses symbols across coins) keeping the LOWEST
+   * cmc_rank (market cap only a tiebreak — retrofit-40); builds logoUrl from CMC's
+   * public static CDN keyed by coin id; skips null-price rows. Returns [] (no throw)
+   * when no API key is configured.
    */
   async fetchTopTokens(limit: number): Promise<TopToken[]> {
     if (!this.apiKey) {
@@ -149,13 +160,17 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
     }
     const body = (await res.json()) as { data: CmcListing[] };
 
-    const best = new Map<string, TopToken & { _mc: number }>();
+    const best = new Map<string, TopToken & { _mc: number; _rank: number }>();
     for (const c of body.data ?? []) {
       const usd = c.quote?.USD;
       if (!usd || usd.price == null) continue; // no price → unusable
       const mc = usd.market_cap ?? 0;
+      const rank = c.cmc_rank ?? Number.MAX_SAFE_INTEGER;
       const prev = best.get(c.symbol);
-      if (prev && prev._mc >= mc) continue; // keep the higher-market-cap listing for a dup ticker
+      // retrofit-40: keep the more prominent coin for a dup ticker — lower cmc_rank wins,
+      // market cap is only a tiebreak. (Was market-cap-only, which let a rank-3538 junk
+      // "TON" beat real Toncoin whenever the canonical coin's cap came back null.)
+      if (prev && (prev._rank < rank || (prev._rank === rank && prev._mc >= mc))) continue;
       best.set(c.symbol, {
         symbol: c.symbol,
         name: c.name,
@@ -165,9 +180,10 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
         logoUrl: `https://s2.coinmarketcap.com/static/img/coins/64x64/${c.id}.png`,
         change24h: usd.percent_change_24h ?? null, // retrofit-39
         _mc: mc,
+        _rank: rank,
       });
     }
-    return [...best.values()].map(({ _mc, ...t }) => t);
+    return [...best.values()].map(({ _mc, _rank, ...t }) => t);
   }
 
   async fetchPrices(symbols: string[]): Promise<Map<string, PriceData>> {

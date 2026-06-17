@@ -47,6 +47,9 @@ export async function runTokenMetadataSync(
             // retrofit-39: persist the 24h change as the cold-cache badge fallback. Like
             // rank, only write a real value — a missing change must not null out the prior.
             ...(meta.change24h != null ? { change24h: meta.change24h } : {}),
+            // retrofit-40: repair stale/null logos on the 6-hourly sync; only write when
+            // provided so a logo-less metadata response never clears a good logoUrl.
+            ...(meta.logoUrl ? { logoUrl: meta.logoUrl } : {}),
           },
         });
         await redis.del(`token_meta:${symbol}`);

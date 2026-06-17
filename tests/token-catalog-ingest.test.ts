@@ -69,6 +69,36 @@ describe('fetchTopTokens (CMC listings) parsing', () => {
     }
   });
 
+  it('retrofit-40: dedupes a same-ticker collision by LOWEST cmc_rank even when the canonical coin has null market cap', async () => {
+    // Real Toncoin: low rank (15) but market_cap null (a common CMC gap). Junk "TON":
+    // rank 3538 with a non-null cap. Market-cap-only dedupe would pick the junk coin;
+    // rank-priority must keep the canonical Toncoin (and its logo).
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: 99999, name: 'JunkTon', symbol: 'TON', cmc_rank: 3538, quote: { USD: { price: 0.001, market_cap: 5_000, percent_change_24h: 1 } } },
+          { id: 11419, name: 'Toncoin', symbol: 'TON', cmc_rank: 15,   quote: { USD: { price: 5.5,   market_cap: null,  percent_change_24h: 2 } } },
+        ],
+      }),
+    } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const provider = new CoinMarketCapTokenMetadataProvider('test-key');
+      const top = await provider.fetchTopTokens(100);
+      expect(top).toHaveLength(1);
+      const ton = top[0]!;
+      expect(ton.rank).toBe(15); // canonical Toncoin, not rank-3538 junk
+      expect(ton.name).toBe('Toncoin');
+      expect(ton.currentPrice).toBe('5.50000000');
+      expect(ton.marketCap).toBeNull();
+      expect(ton.logoUrl).toBe('https://s2.coinmarketcap.com/static/img/coins/64x64/11419.png');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('returns [] and does not fetch when no API key is set', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

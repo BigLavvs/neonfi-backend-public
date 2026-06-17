@@ -11,6 +11,9 @@ export interface TokenMetadata {
   // fallback for the wallet badge. Optional — older mock providers may omit it; a miss
   // leaves the existing Token.change24h untouched (see sync.ts).
   change24h?: number | null;
+  // retrofit-40: CMC logo URL, so the 6-hourly sync repairs stale/null logos. Optional;
+  // a miss leaves the existing Token.logoUrl untouched (never null out a good one).
+  logoUrl?: string | null;
 }
 
 export interface TokenMetadataProvider {

@@ -51,12 +51,13 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  // Restore seed values for the tokens used across these tests. change24h is null in the
-  // seed (retrofit-39 column) — reset it too so a test that writes it can't bleed a stale
-  // 24h change into the live-price / assets suites (all files share one DB).
-  await prisma.token.update({ where: { symbol: 'BTC' }, data: { ...BTC_SEED, change24h: null } });
-  await prisma.token.update({ where: { symbol: 'ETH' }, data: { ...ETH_SEED, change24h: null } });
-  await prisma.token.update({ where: { symbol: 'USDT' }, data: { ...USDT_SEED, change24h: null } });
+  // Restore seed values for the tokens used across these tests. change24h (retrofit-39)
+  // and logoUrl (retrofit-40) are null in the seed — reset them too so a test that writes
+  // them can't bleed a stale 24h change / logo into the live-price / assets / tokens suites
+  // (all files share one DB).
+  await prisma.token.update({ where: { symbol: 'BTC' }, data: { ...BTC_SEED, change24h: null, logoUrl: null } });
+  await prisma.token.update({ where: { symbol: 'ETH' }, data: { ...ETH_SEED, change24h: null, logoUrl: null } });
+  await prisma.token.update({ where: { symbol: 'USDT' }, data: { ...USDT_SEED, change24h: null, logoUrl: null } });
   const keys = await redis.keys('token_meta:*');
   if (keys.length > 0) await redis.del(keys);
 });
@@ -251,6 +252,61 @@ it('398: sync persists change24h and preserves it when a later sync omits it', a
   btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
   expect(Number(btc.currentPrice.toString())).toBeCloseTo(99000); // price refreshed
   expect(Number(btc.change24h!.toString())).toBeCloseTo(7.25); // change24h preserved
+});
+
+// ---------------------------------------------------------------------------
+// 399. retrofit-40 — fetchMetadata dedupes same-ticker collisions by lowest cmc_rank
+//      and returns a logoUrl built from the chosen entry's id
+// ---------------------------------------------------------------------------
+
+it('399: fetchMetadata keeps the lowest-cmc_rank entry (canonical over junk) and builds logoUrl from its id', async () => {
+  // "TON" returns two listings: real Toncoin (rank 15, market_cap null — a common CMC gap)
+  // and a rank-3538 junk coin with a non-null cap. Market-cap-only dedupe would pick the
+  // junk coin; rank-priority must keep canonical Toncoin and emit its logo.
+  const fetchMock = vi.fn(async () => ({
+    ok: true,
+    json: async () => ({
+      data: {
+        TON: [
+          { id: 99999, cmc_rank: 3538, quote: { USD: { price: 0.001, percent_change_24h: 1, market_cap: 5_000 } } },
+          { id: 11419, cmc_rank: 15,   quote: { USD: { price: 5.5,   percent_change_24h: 2, market_cap: null } } },
+        ],
+      },
+    }),
+  } as Response));
+  vi.stubGlobal('fetch', fetchMock);
+
+  try {
+    const provider = new CoinMarketCapTokenMetadataProvider('test-key');
+    const result = await provider.fetchMetadata(['TON']);
+    const ton = result.get('TON')!;
+    expect(ton.rank).toBe(15); // canonical Toncoin, not rank-3538 junk
+    expect(ton.currentPrice).toBe('5.50000000');
+    expect(ton.logoUrl).toBe('https://s2.coinmarketcap.com/static/img/coins/64x64/11419.png');
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 400. retrofit-40 — sync persists logoUrl and never nulls it on a logo-less sync
+// ---------------------------------------------------------------------------
+
+it('400: sync persists logoUrl and preserves it when a later sync omits it', async () => {
+  // First sync writes the logo.
+  await runTokenMetadataSync(makeMockProvider('mock', new Map<string, TokenMetadata>([
+    ['BTC', { symbol: 'BTC', currentPrice: '98000.00', marketCap: '1900000000000.00', rank: 1, logoUrl: 'https://s2.coinmarketcap.com/static/img/coins/64x64/1.png' }],
+  ])));
+  let btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  expect(btc.logoUrl).toBe('https://s2.coinmarketcap.com/static/img/coins/64x64/1.png');
+
+  // A later sync that OMITS logoUrl must NOT clear the persisted value (mirrors rank/change24h).
+  await runTokenMetadataSync(makeMockProvider('mock', new Map<string, TokenMetadata>([
+    ['BTC', { symbol: 'BTC', currentPrice: '99000.00', marketCap: '1910000000000.00', rank: 1 }],
+  ])));
+  btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  expect(Number(btc.currentPrice.toString())).toBeCloseTo(99000); // price refreshed
+  expect(btc.logoUrl).toBe('https://s2.coinmarketcap.com/static/img/coins/64x64/1.png'); // logo preserved
 });
 
 // ---------------------------------------------------------------------------
