@@ -9,6 +9,8 @@ import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
 import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 import { portfolioDerivedCacheKeys } from '../src/lib/portfolio-cache-keys.js';
+import { getPriceHistory } from '../src/modules/prices/prices.service.js';
+import { historyQuerySchema } from '../src/modules/prices/prices.schemas.js';
 import type { CoinMarketCapTokenMetadataProvider } from '../src/modules/tokens/sync/coinmarketcap-provider.js';
 
 // ---------------------------------------------------------------------------
@@ -126,6 +128,10 @@ beforeEach(async () => {
   // Clear price cache keys
   const priceKeys = await redis.keys('price:*');
   if (priceKeys.length) await redis.del(priceKeys);
+  // retrofit-43: price_hist:* keys don't match the price:* glob (different prefix) — clear them
+  // separately so an intraday history list can't bleed across tests.
+  const histKeys = await redis.keys('price_hist:*');
+  if (histKeys.length) await redis.del(histKeys);
 });
 
 afterEach(async () => {
@@ -452,5 +458,119 @@ it('r35c: GET /prices/debug no symbol → board array of catalog symbols', async
 
 it('r35d: GET /prices/debug no auth → 401', async () => {
   const res = await app.request(`${PRICES_BASE}/debug?symbol=BTC`);
+  expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-43 — intraday price history (Redis buffer): schema, service, endpoint
+// ---------------------------------------------------------------------------
+
+it('r43-schema: historyQuerySchema upcases, dedupes, caps at 50, defaults range to 1H', () => {
+  // Dedup (case-insensitive) + default range.
+  const a = historyQuerySchema.parse({ symbols: 'btc, ETH ,Btc' });
+  expect(a.symbols).toEqual(['BTC', 'ETH']);
+  expect(a.range).toBe('1H');
+
+  // Cap at 50 distinct symbols.
+  const many = Array.from({ length: 60 }, (_, i) => `S${i}`).join(',');
+  const b = historyQuerySchema.parse({ symbols: many, range: '1D' });
+  expect(b.symbols).toHaveLength(50);
+  expect(b.range).toBe('1D');
+});
+
+it('r43-svc-window: getPriceHistory filters to the range window and returns oldest→newest {t,p}', async () => {
+  const now = 2_000_000_000_000;
+  // Stored newest→oldest (resolver LPUSHes newest at head). Two within 1H, one 2h old.
+  await redis.rpush(
+    'price_hist:WIN',
+    `${now - 1_000}|110`, // 1s ago  — in 1H + 1D
+    `${now - 1_800_000}|105`, // 30m ago — in 1H + 1D
+    `${now - 7_200_000}|100`, // 2h ago  — in 1D only
+  );
+
+  const h1 = await getPriceHistory(['WIN'], '1H', now);
+  expect(h1.WIN).toEqual([
+    { t: now - 1_800_000, p: 105 },
+    { t: now - 1_000, p: 110 },
+  ]); // oldest→newest, 2h-old point excluded
+
+  const d1 = await getPriceHistory(['WIN'], '1D', now);
+  expect(d1.WIN).toEqual([
+    { t: now - 7_200_000, p: 100 },
+    { t: now - 1_800_000, p: 105 },
+    { t: now - 1_000, p: 110 },
+  ]); // all three, oldest→newest
+});
+
+it('r43-svc-malformed: getPriceHistory skips legacy bare-price + malformed + non-positive entries', async () => {
+  const now = 2_000_000_000_000;
+  await redis.rpush(
+    'price_hist:MIX',
+    `${now - 1_000}|120`, // valid
+    '99', // legacy bare price — no ts → skipped
+    `${now - 2_000}|abc`, // non-finite price → skipped
+    `${now - 3_000}|0`, // p<=0 → skipped
+    `${now - 4_000}|118`, // valid
+  );
+  const h = await getPriceHistory(['MIX'], '1H', now);
+  expect(h.MIX).toEqual([
+    { t: now - 4_000, p: 118 },
+    { t: now - 1_000, p: 120 },
+  ]);
+});
+
+it('r43-svc-empty: unknown symbol → []; a Redis throw → [] (never throws)', async () => {
+  const now = 2_000_000_000_000;
+  const h = await getPriceHistory(['NOPE'], '1H', now);
+  expect(h.NOPE).toEqual([]);
+
+  const lrangeSpy = vi.spyOn(redis, 'lrange').mockRejectedValueOnce(new Error('redis down'));
+  try {
+    const h2 = await getPriceHistory(['BTC'], '1H', now);
+    expect(h2.BTC).toEqual([]); // swallowed, never throws
+    expect(lrangeSpy).toHaveBeenCalled();
+  } finally {
+    lrangeSpy.mockRestore();
+  }
+});
+
+it('r43-ep-ok: GET /prices/history?symbols=BTC,ETH&range=1H → 200 { history: { SYM: [...] } }', async () => {
+  const cookie = await registerAndLogin();
+  const now = Date.now();
+  await redis.rpush('price_hist:BTC', `${now - 1_000}|65000`, `${now - 120_000}|64900`);
+  // ETH has no list → its series is [].
+
+  const res = await app.request(`${PRICES_BASE}/history?symbols=BTC,ETH&range=1H`, {
+    headers: { Cookie: cookie },
+  });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { data: { history: Record<string, Array<{ t: number; p: number }>> } };
+  expect(body.data.history.BTC).toEqual([
+    { t: now - 120_000, p: 64900 },
+    { t: now - 1_000, p: 65000 },
+  ]); // oldest→newest
+  expect(body.data.history.ETH).toEqual([]);
+});
+
+it('r43-ep-missing: GET /prices/history with no symbols → 400 VALIDATION_ERROR', async () => {
+  const cookie = await registerAndLogin();
+  const res = await app.request(`${PRICES_BASE}/history`, { headers: { Cookie: cookie } });
+  expect(res.status).toBe(400);
+  const body = (await res.json()) as { error: { code: string } };
+  expect(body.error.code).toBe('VALIDATION_ERROR');
+});
+
+it('r43-ep-badrange: GET /prices/history with range=5Y → 400 VALIDATION_ERROR', async () => {
+  const cookie = await registerAndLogin();
+  const res = await app.request(`${PRICES_BASE}/history?symbols=BTC&range=5Y`, {
+    headers: { Cookie: cookie },
+  });
+  expect(res.status).toBe(400);
+  const body = (await res.json()) as { error: { code: string } };
+  expect(body.error.code).toBe('VALIDATION_ERROR');
+});
+
+it('r43-ep-auth: GET /prices/history no auth → 401', async () => {
+  const res = await app.request(`${PRICES_BASE}/history?symbols=BTC&range=1H`);
   expect(res.status).toBe(401);
 });

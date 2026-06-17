@@ -22,13 +22,17 @@ const PRICE_TTL_S = 60;
 // picking the canonical value (even though its key may still be within TTL).
 const STALENESS_WINDOW_MS = 15_000;
 
-// retrofit-20: sampled per-symbol price history for sparklines (`price_hist:<SYMBOL>`).
-// Appended at most once per symbol every HIST_SAMPLE_MS so the capped list spans hours,
-// not seconds — a far coarser gate than the per-tick canonical writes. Kept to the newest
-// HIST_MAX_POINTS and expired after HIST_TTL_S so a quiet symbol's series ages out.
-const HIST_SAMPLE_MS = 5 * 60_000; // ≥5 min between samples per symbol
-const HIST_MAX_POINTS = 12; // LTRIM 0..11
-const HIST_TTL_S = 86_400; // 1 day
+// retrofit-20/43: sampled per-symbol price history (`price_hist:<SYMBOL>`) — powers both the
+// top-mover sparklines AND the 1H/1D intraday chart ranges (GET /prices/history). Appended at
+// most once per symbol every HIST_SAMPLE_MS — a far coarser gate than the per-tick canonical
+// writes. retrofit-43 widened the buffer to ~24h (3-min samples × 480 points) and now stores
+// each entry as "<tsMs>|<price>" so the chart x-axis uses real timestamps: a quiet symbol that
+// skips samples must NOT be drawn as evenly-spaced. Kept to the newest HIST_MAX_POINTS and the
+// TTL is refreshed on every sample so a stale symbol's series ages out after 24h. All Redis,
+// capped + TTL'd — zero Postgres write load (480 × ~500 symbols × ~30 B ≈ ~7 MB, bounded).
+const HIST_SAMPLE_MS = 3 * 60_000; // ≥3 min between samples per symbol
+const HIST_MAX_POINTS = 480; // 480 × 3 min = 24h  (LTRIM 0..479)
+const HIST_TTL_S = 86_400; // 24h
 
 // retrofit-35: priority = SPEED/breadth of the source's real-time stream. Binance (all-market
 // ~1/sec) first; Coinbase next (true-USD, per-trade). OKX/Bybit (retrofit-37) and Gate/KuCoin
@@ -211,9 +215,10 @@ async function resolveCanonical(sym: string, now: number): Promise<void> {
     await redis.publish(`price:${sym}`, payload);
   }
 
-  // retrofit-20: append the winning price to a capped per-symbol history list for
-  // sparklines, sampled at ≥5 min (a separate, coarser gate than the per-tick canonical
-  // writes) so ~12 points span hours, not seconds. Stamp the sample time BEFORE the
+  // retrofit-20/43: append the winning price to a capped per-symbol history list, sampled at
+  // ≥3 min (a separate, coarser gate than the per-tick canonical writes) so 480 points span
+  // ~24h. Each entry is "<tsMs>|<price>" (retrofit-43) so the intraday chart can place samples
+  // on a real time axis rather than assuming even spacing. Stamp the sample time BEFORE the
   // await (same collapse-concurrent-ticks reasoning as the publish dedupe). Best-effort: a
   // history failure must never break the canonical price path, so the chain is fully
   // `.catch`-swallowed.
@@ -221,11 +226,11 @@ async function resolveCanonical(sym: string, now: number): Promise<void> {
   if (now - lastHist >= HIST_SAMPLE_MS) {
     lastHistSampleAt.set(sym, now);
     await redis
-      .lpush(`price_hist:${sym}`, String(winner.tick.price))
+      .lpush(`price_hist:${sym}`, `${now}|${winner.tick.price}`)
       .then(() => redis.ltrim(`price_hist:${sym}`, 0, HIST_MAX_POINTS - 1))
       .then(() => redis.expire(`price_hist:${sym}`, HIST_TTL_S))
       .catch(() => {
-        /* sparkline history is best-effort */
+        /* intraday history is best-effort */
       });
   }
 }

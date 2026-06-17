@@ -159,15 +159,22 @@ async function computeTopMovers(): Promise<OverviewDTO['topMovers']> {
     .sort((a, b) => Math.abs(b.change24h) - Math.abs(a.change24h))
     .slice(0, TOP_MOVERS_LIMIT);
 
-  // retrofit-20: attach a real recent price series (`spark`) per chosen mover from the
-  // sampled `price_hist:<SYMBOL>` list (resolver-written, ≥5-min samples, ≤12 points,
+  // retrofit-20/43: attach a real recent price series (`spark`) per chosen mover from the
+  // sampled `price_hist:<SYMBOL>` list (resolver-written, ≥3-min samples, ≤480 points,
   // stored newest→oldest). Reverse to oldest→newest for the chart; no history / Redis
   // miss → [] (the frontend draws a flat line until ≥2 points accrue). ≤6 small LRANGEs.
+  //
+  // retrofit-43: entries are now "<ts>|<price>" (were bare prices pre-43). Take the price
+  // half; fall back to parsing the whole token so any legacy entries still within TTL render.
+  const parsePrice = (s: string): number => {
+    const bar = s.indexOf('|');
+    return Number(bar >= 0 ? s.slice(bar + 1) : s);
+  };
   const sparks = await Promise.all(
     top.map((m) =>
       redis
         .lrange(`price_hist:${m.symbol}`, 0, -1)
-        .then((rawHist) => rawHist.map(Number).filter(Number.isFinite).reverse())
+        .then((rawHist) => rawHist.map(parsePrice).filter(Number.isFinite).reverse())
         .catch(() => [] as number[]),
     ),
   );

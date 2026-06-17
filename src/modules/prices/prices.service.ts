@@ -160,6 +160,52 @@ export function _setCmcProvider(p: CoinMarketCapTokenMetadataProvider): void {
 }
 
 // ---------------------------------------------------------------------------
+// Intraday price history (retrofit-43) — GET /prices/history
+//
+// Symbol-keyed sampled price series read straight from the resolver's Redis buffer
+// (`price_hist:<SYMBOL>`, ≤24h, 3-min samples, "<tsMs>|<price>" entries, newest→oldest).
+// Powers the 1H/1D chart ranges; daily balance snapshots still power 1W+. Redis-only — no
+// Postgres read/write. A missing/empty key, malformed entry, or Redis hiccup yields [] for
+// that symbol and never throws.
+// ---------------------------------------------------------------------------
+
+const RANGE_MS: Record<'1H' | '1D', number> = { '1H': 60 * 60_000, '1D': 24 * 60 * 60_000 };
+
+export interface PricePoint {
+  t: number;
+  p: number;
+}
+
+export async function getPriceHistory(
+  symbols: string[],
+  range: '1H' | '1D',
+  now: number = Date.now(),
+): Promise<Record<string, PricePoint[]>> {
+  const cutoff = now - RANGE_MS[range];
+  const out: Record<string, PricePoint[]> = {};
+  await Promise.all(
+    symbols.map(async (sym) => {
+      try {
+        const raw = await redis.lrange(`price_hist:${sym}`, 0, -1); // newest→oldest
+        const pts: PricePoint[] = [];
+        for (const entry of raw) {
+          const bar = entry.indexOf('|');
+          if (bar < 0) continue; // legacy price-only entry has no usable ts — skip
+          const t = Number(entry.slice(0, bar));
+          const p = Number(entry.slice(bar + 1));
+          if (Number.isFinite(t) && Number.isFinite(p) && p > 0 && t >= cutoff) pts.push({ t, p });
+        }
+        pts.reverse(); // oldest→newest for charting
+        out[sym] = pts;
+      } catch {
+        out[sym] = []; // Redis hiccup → empty series, never throws
+      }
+    }),
+  );
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Source-visibility readout (retrofit-35) — GET /prices/debug
 //
 // Diagnostic, behind requireAuth: shows which source is pricing each token and lets

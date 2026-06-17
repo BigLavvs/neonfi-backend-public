@@ -607,6 +607,33 @@ it('391: topMovers attach the sampled price_hist series as spark (oldest→newes
 });
 
 // ---------------------------------------------------------------------------
+// r43a — sparkline reader tolerates the new "<ts>|<price>" history format
+// (retrofit-43), still parses any legacy bare-price entries, and drops malformed ones.
+// ---------------------------------------------------------------------------
+
+it('r43a: topMovers spark parses "<ts>|<price>" entries, keeps legacy bare prices, drops malformed', async () => {
+  const cookies = await registerAndLogin();
+  await seedPriceTick('BTC', 10, 100000);
+  // Stored newest→oldest (resolver LPUSHes newest at head). Mix the new timestamped
+  // format with one legacy bare-price entry and one malformed entry.
+  await redis.rpush(
+    'price_hist:BTC',
+    '1700000300000|105', // new format, newest
+    'garbage', // malformed → dropped
+    '1700000100000|101', // new format
+    '99', // legacy bare price (pre-43) → still parsed
+  );
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const btc = d.topMovers.find((m) => m.symbol === 'BTC')!;
+  // Prices only, oldest→newest (reversed), malformed dropped: [99, 101, 105].
+  expect(btc.spark).toEqual([99, 101, 105]);
+});
+
+// ---------------------------------------------------------------------------
 // 392 — raw position holdings: per-portfolio + aggregate cost fields (retrofit-28)
 // ---------------------------------------------------------------------------
 

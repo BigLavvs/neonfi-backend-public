@@ -7,12 +7,15 @@
 
 import { it, expect, describe, beforeEach, vi } from 'vitest';
 
-const { store, lists, published } = vi.hoisted(() => ({
+const { store, lists, published, ltrimCalls, expireCalls } = vi.hoisted(() => ({
   store: new Map<string, string>(),
   // retrofit-20: list-typed keys (price_hist:*) live in their own store so the string
   // KV ops (set/get/mget) and the list ops (lpush/ltrim/lrange) don't collide.
   lists: new Map<string, string[]>(),
   published: [] as Array<{ channel: string; message: string }>,
+  // retrofit-43: record LTRIM/EXPIRE args so the cap + TTL can be asserted directly.
+  ltrimCalls: [] as Array<{ key: string; start: number; stop: number }>,
+  expireCalls: [] as Array<{ key: string; ttl: number }>,
 }));
 
 // Resolve a possibly-negative LRANGE/LTRIM stop index against a list length (Redis
@@ -41,6 +44,7 @@ vi.mock('../src/lib/redis.js', () => ({
       return cur.length;
     }),
     ltrim: vi.fn(async (key: string, start: number, stop: number) => {
+      ltrimCalls.push({ key, start, stop });
       const cur = lists.get(key) ?? [];
       lists.set(key, cur.slice(start, resolveStop(cur.length, stop) + 1));
       return 'OK';
@@ -49,7 +53,10 @@ vi.mock('../src/lib/redis.js', () => ({
       const cur = lists.get(key) ?? [];
       return cur.slice(start, resolveStop(cur.length, stop) + 1);
     }),
-    expire: vi.fn(async () => 1),
+    expire: vi.fn(async (key: string, ttl: number) => {
+      expireCalls.push({ key, ttl });
+      return 1;
+    }),
   },
 }));
 
@@ -68,6 +75,8 @@ beforeEach(() => {
   store.clear();
   lists.clear();
   published.length = 0;
+  ltrimCalls.length = 0;
+  expireCalls.length = 0;
   __resetThrottleForTest();
 });
 
@@ -336,43 +345,53 @@ describe('change-dedupe (replaces the old time throttle)', () => {
   });
 });
 
-describe('sampled price history (sparklines, retrofit-20)', () => {
-  const FIVE_MIN = __internals.HIST_SAMPLE_MS;
+describe('sampled intraday price history (retrofit-20/43)', () => {
+  const SAMPLE_MS = __internals.HIST_SAMPLE_MS; // 3 min (retrofit-43)
 
-  it('appends the winning price as the first sample, then samples at most once per ≥5 min', async () => {
+  it('appends "<ts>|<price>" as the first sample, then samples at most once per ≥SAMPLE_MS', async () => {
     const base = 8_000_000;
-    // First tick → first history sample (newest at head).
+    // First tick → first history sample (newest at head), timestamped.
     await recordTick('BTC', 'coinbase', 100, 1, 'USD', base);
-    expect(lists.get('price_hist:BTC')).toEqual(['100']);
+    expect(lists.get('price_hist:BTC')).toEqual([`${base}|100`]);
 
-    // Another tick 1.1s later: passes the canonical throttle but NOT the 5-min
-    // history gate → no new sample.
+    // Another tick 1.1s later: passes the canonical throttle but NOT the sample
+    // gate → no new sample.
     await recordTick('BTC', 'coinbase', 101, 1, 'USD', base + 1_100);
-    expect(lists.get('price_hist:BTC')).toEqual(['100']);
+    expect(lists.get('price_hist:BTC')).toEqual([`${base}|100`]);
 
-    // ≥5 min after the last sample → a new point is prepended (newest→oldest).
-    await recordTick('BTC', 'coinbase', 102, 1, 'USD', base + FIVE_MIN + 1);
-    expect(lists.get('price_hist:BTC')).toEqual(['102', '100']);
+    // ≥SAMPLE_MS after the last sample → a new point is prepended (newest→oldest),
+    // each carrying its own timestamp so a skipped sample is not drawn evenly-spaced.
+    const t2 = base + SAMPLE_MS + 1;
+    await recordTick('BTC', 'coinbase', 102, 1, 'USD', t2);
+    expect(lists.get('price_hist:BTC')).toEqual([`${t2}|102`, `${base}|100`]);
   });
 
-  it('caps the history at 12 points (LTRIM 0..11), newest first', async () => {
+  it('caps the history at HIST_MAX_POINTS (LTRIM 0..MAX-1) + refreshes the 24h TTL', async () => {
+    const MAX = __internals.HIST_MAX_POINTS; // 480
     let t = 9_000_000;
-    // 15 samples, each ≥5 min apart so every one passes the sample gate.
-    for (let i = 0; i < 15; i++) {
+    // MAX + 3 samples, each ≥SAMPLE_MS apart so every one passes the sample gate.
+    for (let i = 0; i < MAX + 3; i++) {
       await recordTick('ETH', 'coinbase', 200 + i, 1, 'USD', t);
-      t += FIVE_MIN + 1;
+      t += SAMPLE_MS + 1;
     }
     const hist = lists.get('price_hist:ETH')!;
-    expect(hist).toHaveLength(__internals.HIST_MAX_POINTS); // 12
-    expect(hist[0]).toBe('214'); // newest (last pushed) at head
-    expect(hist[11]).toBe('203'); // oldest 12 kept; 200..202 trimmed off
+    expect(hist).toHaveLength(MAX); // capped — never exceeds MAX
+    expect(hist[0]).toBe(`${t - (SAMPLE_MS + 1)}|${200 + MAX + 2}`); // newest (last pushed) at head
+
+    // LTRIM always asked for 0..MAX-1, and EXPIRE always set the 24h TTL.
+    const ethTrims = ltrimCalls.filter((c) => c.key === 'price_hist:ETH');
+    expect(ethTrims.length).toBeGreaterThan(0);
+    expect(ethTrims.every((c) => c.start === 0 && c.stop === MAX - 1)).toBe(true);
+    const ethExpires = expireCalls.filter((c) => c.key === 'price_hist:ETH');
+    expect(ethExpires.length).toBeGreaterThan(0);
+    expect(ethExpires.every((c) => c.ttl === __internals.HIST_TTL_S)).toBe(true);
   });
 
   it('history sampling is per-symbol (one symbol does not gate another)', async () => {
     const now = 10_000_000;
     await recordTick('AAA', 'coinbase', 1, 0, 'USD', now);
     await recordTick('BBB', 'coinbase', 2, 0, 'USD', now);
-    expect(lists.get('price_hist:AAA')).toEqual(['1']);
-    expect(lists.get('price_hist:BBB')).toEqual(['2']);
+    expect(lists.get('price_hist:AAA')).toEqual([`${now}|1`]);
+    expect(lists.get('price_hist:BBB')).toEqual([`${now}|2`]);
   });
 });
