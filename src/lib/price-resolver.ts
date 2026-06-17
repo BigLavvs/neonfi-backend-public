@@ -7,8 +7,9 @@
 //
 // Per-exchange ticks are stored at `price:<SYMBOL>:<exchange>`; the canonical
 // value is recomputed on each tick by:
-//   1. priority — true-USD sources (coinbase, kraken) beat USDT (binance), and
-//   2. freshness — within a tier, the freshest tick inside a staleness window.
+//   1. priority — fastest last-trade source first (coinbase > kraken > binance;
+//      retrofit-32), and
+//   2. freshness — within equal priority, the freshest tick inside a staleness window.
 // Stale/expired per-exchange entries are ignored.
 
 import { redis } from './redis.js';
@@ -26,14 +27,13 @@ const HIST_SAMPLE_MS = 5 * 60_000; // ≥5 min between samples per symbol
 const HIST_MAX_POINTS = 12; // LTRIM 0..11
 const HIST_TTL_S = 86_400; // 1 day
 
-// Resolver priority TIERS: lower number wins. The true-USD sources (coinbase,
-// kraken) share the top tier — between them the freshest tick wins. Binance is
-// the lower tier (USDT-quoted ≈ USD approximation), used only as a fallback.
-const SOURCE_PRIORITY: Record<string, number> = {
-  coinbase: 0,
-  kraken: 0,
-  binance: 1,
-};
+// retrofit-32: priority = SPEED of the source's last-trade stream (measured on this host:
+// Coinbase ~3 trades/sec for majors >> Kraken trades; Binance is geo-blocked here). The resolver
+// already picks the highest-priority source with a FRESH (non-stale) tick and falls back down the
+// list — i.e. "use the fastest source that has the pair; fall back only when it's missing/stale."
+// All sources report LAST-TRADE price (no bbo/mid). If the host ever reaches Binance, consider
+// moving it to 0 — but weigh its USDT≈USD quote against Coinbase/Kraken's true USD.
+const SOURCE_PRIORITY: Record<string, number> = { coinbase: 0, kraken: 1, binance: 2 };
 // The exchanges we read back when recomputing the canonical value.
 const EXCHANGES = ['coinbase', 'kraken', 'binance'] as const;
 

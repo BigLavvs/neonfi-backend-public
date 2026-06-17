@@ -93,16 +93,27 @@ describe('recordTick → canonical resolution', () => {
     expect(canonical('BTC')).toMatchObject({ price: 101, source: 'kraken' });
   });
 
-  it('within the true-USD tier, the freshest tick wins (coinbase over older kraken)', async () => {
+  it('coinbase beats kraken when both are fresh (speed priority, retrofit-32)', async () => {
     const now = 3_000_000;
-    store.set('price:ETH:kraken', JSON.stringify({ price: 200, change24h: 1, quote: 'USD', ts: now - 5_000 }));
+    store.set('price:ETH:kraken', JSON.stringify({ price: 200, change24h: 1, quote: 'USD', ts: now }));
 
     await recordTick('ETH', 'coinbase', 201, 2, 'USD', now);
 
     expect(canonical('ETH')).toMatchObject({ price: 201, source: 'coinbase' });
   });
 
-  it('stale true-USD entry is ignored; a fresher same-tier entry wins', async () => {
+  it('coinbase wins even when kraken is FRESHER — priority beats freshness across sources', async () => {
+    const now = 3_500_000;
+    // coinbase is 5s old but still inside the 15s staleness window; kraken is bang up to date.
+    store.set('price:ETH:coinbase', JSON.stringify({ price: 201, change24h: 2, quote: 'USD', ts: now - 5_000 }));
+
+    await recordTick('ETH', 'kraken', 200, 1, 'USD', now);
+
+    // Speed priority (coinbase=0) wins over the fresher kraken tick (kraken=1).
+    expect(canonical('ETH')).toMatchObject({ price: 201, source: 'coinbase' });
+  });
+
+  it('kraken is used when coinbase is stale (outside the staleness window)', async () => {
     const now = 4_000_000;
     // coinbase tick is 20s old → outside the 15s staleness window → ignored
     store.set('price:ETH:coinbase', JSON.stringify({ price: 999, change24h: 0, quote: 'USD', ts: now - 20_000 }));
@@ -112,14 +123,31 @@ describe('recordTick → canonical resolution', () => {
     expect(canonical('ETH')).toMatchObject({ price: 202, source: 'kraken' });
   });
 
-  it('binance is used only as a fallback when no fresh true-USD source exists', async () => {
+  it('kraken is used when coinbase is absent', async () => {
+    const now = 4_500_000;
+    await recordTick('ETH', 'kraken', 203, 1, 'USD', now);
+
+    expect(canonical('ETH')).toMatchObject({ price: 203, source: 'kraken' });
+  });
+
+  it('binance is used only when it is the sole fresh source', async () => {
     const now = 5_000_000;
-    // kraken stale → ignored; binance fresh → wins despite lower tier
+    // kraken stale → ignored; binance fresh → wins despite lowest priority
     store.set('price:SOL:kraken', JSON.stringify({ price: 150, change24h: 1, quote: 'USD', ts: now - 30_000 }));
 
     await recordTick('SOL', 'binance', 151, 2, 'USDT', now);
 
     expect(canonical('SOL')).toMatchObject({ price: 151, source: 'binance' });
+  });
+
+  it('full priority order with all three fresh → coinbase wins; binance never used', async () => {
+    const now = 5_500_000;
+    store.set('price:SOL:coinbase', JSON.stringify({ price: 150, change24h: 1, quote: 'USD', ts: now }));
+    store.set('price:SOL:kraken', JSON.stringify({ price: 151, change24h: 1, quote: 'USD', ts: now }));
+
+    await recordTick('SOL', 'binance', 152, 2, 'USDT', now);
+
+    expect(canonical('SOL')).toMatchObject({ price: 150, source: 'coinbase' });
   });
 });
 
