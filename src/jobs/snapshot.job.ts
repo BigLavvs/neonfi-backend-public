@@ -207,6 +207,28 @@ export async function runSnapshotJob(
   return { snapshotted, failed, missed, dropChunksSucceeded, tokenPricesSnapshotted };
 }
 
+// retrofit-42 B1 — dev-friendly boot catch-up.
+//
+// SNAPSHOT_CRON ('0 0 * * *') only fires while the process is alive at midnight UTC and never
+// replays missed runs, so a dev box that isn't up at midnight never snapshots and history stays
+// empty. On boot we check whether TODAY already has a snapshot and, if not, run the job once so
+// each day the server starts captures that day's point; the cron handles the rest. token_price_snapshot
+// is the right signal: it's written every run and is NOT Pro-gated, so "today has token rows" ⟺
+// "the job ran today" regardless of plan. Idempotent (upsert) — safe even if it races the cron.
+export async function runSnapshotCatchUpIfNeeded(
+  derive: typeof computeDerived = computeDerived,
+): Promise<boolean> {
+  const snapshotDate = todayUtcDate();
+  const already = await prisma.tokenPriceSnapshot.count({ where: { snapshotDate } });
+  if (already > 0) {
+    console.log('[snapshots]', JSON.stringify({ event: 'catchup_skipped', reason: 'already_snapshotted_today' }));
+    return false;
+  }
+  console.log('[snapshots]', JSON.stringify({ event: 'catchup_running' }));
+  await runSnapshotJob(derive);
+  return true;
+}
+
 export function startSnapshotScheduler(): void {
   if (!config.SNAPSHOT_ENABLED) {
     console.log('[snapshots] cron disabled by SNAPSHOT_ENABLED=false');

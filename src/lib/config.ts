@@ -113,6 +113,19 @@ const schema = z
     COINMARKETCAP_API_KEY: z.string().min(1),
     COINRANKING_API_KEY: z.string().optional(),
 
+    // --- Real historical prices for chart backfill (retrofit-42) ---
+    // CoinGecko is the historical-price source for `npm run backfill:snapshots`. The key is
+    // OPTIONAL: with a free demo key we use the demo host + `x-cg-demo-api-key` header
+    // (≈30 req/min); without one the public host works but is slow + 429-prone. A free demo
+    // key is strongly recommended for the backfill. NOTE: the demo key uses the SAME public
+    // base, just with the header — only a PAID/pro key needs the pro-api host.
+    COINGECKO_API_KEY: z.string().optional(),
+    COINGECKO_BASE: z.string().min(1).default('https://api.coingecko.com/api/v3'),
+    // Cap on how many tokens get REAL daily history in the backfill (held tokens are always
+    // included on top of this; the long tail gets a synthetic series so every chart still
+    // renders). Lower it for a faster keyless run. Default 250.
+    REAL_HISTORY_LIMIT: z.coerce.number().int().min(1).default(250),
+
     // --- Email ---
     RESEND_API_KEY: z.string().min(1),
     EMAIL_FROM_ADDRESS: z.string().min(1),

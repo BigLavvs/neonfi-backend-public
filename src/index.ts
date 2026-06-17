@@ -38,7 +38,7 @@ import type { Server as HttpServer } from 'node:http';
 import { config } from './lib/config.js';
 import { app } from './app.js';
 import { startTokenSyncScheduler } from './jobs/token-sync.job.js';
-import { startSnapshotScheduler } from './jobs/snapshot.job.js';
+import { startSnapshotScheduler, runSnapshotCatchUpIfNeeded } from './jobs/snapshot.job.js';
 import { startDbKeepalive, stopDbKeepalive } from './jobs/db-keepalive.job.js';
 import { coinbase, fetchCoinbaseUsdBaseSymbols } from './lib/coinbase.js';
 import { binance } from './lib/binance.js';
@@ -60,6 +60,11 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
 if (config.NODE_ENV !== 'test') {
   startTokenSyncScheduler();
   startSnapshotScheduler();
+  // retrofit-42 B1: dev-friendly catch-up — capture today's snapshot if the cron missed it (the
+  // process wasn't alive at midnight UTC). Fire-and-forget so it never blocks boot.
+  void runSnapshotCatchUpIfNeeded().catch((e) =>
+    console.error('[neonfi-backend] snapshot catch-up failed:', e),
+  );
   // OPTIONAL keep-alive (retrofit-17, default OFF) — gated so it only runs when an
   // operator opts in. Starts after the schedulers; the DB is reachable on demand
   // (the prisma retry extension absorbs a cold-start on the first ping).
