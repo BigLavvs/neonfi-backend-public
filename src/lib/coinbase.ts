@@ -4,10 +4,10 @@
 // connection to COINBASE_WS_URL; reference-counted symbol subscriptions so
 // many clients watching the same symbol result in ONE Coinbase subscription.
 //
-// Connection resilience constants are locked by Build Guide §6.4:
-//   PING_INTERVAL_MS = 30 000   — heartbeat cadence
-//   PONG_TIMEOUT_MS  = 5 000    — treat as dead if no pong within this window
-//   RECONNECT_BACKOFF_MS        — 1 / 2 / 4 / 8 / 16s, then cap at 30s
+// Connection resilience (retrofit-33: Advanced Trade keepalive is the `heartbeats`
+// channel + a message-driven liveness watchdog, NOT a WS protocol ping):
+//   HEARTBEAT_TIMEOUT_MS = 10 000 — no inbound frame for this long ⇒ dead ⇒ reconnect
+//   RECONNECT_BACKOFF_MS          — 1 / 2 / 4 / 8 / 16s, then cap at 30s
 //   RECONNECT_ALERT_AFTER_ATTEMPTS = 5
 
 import WebSocket from 'ws';
@@ -16,10 +16,12 @@ import { config } from './config.js';
 import { recordTick } from './price-resolver.js';
 
 // Build Guide §6.4 — locked constants, do not promote to env vars
-const PING_INTERVAL_MS = 30_000;
-const PONG_TIMEOUT_MS = 5_000;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
 const RECONNECT_ALERT_AFTER_ATTEMPTS = 5;
+// retrofit-33: Advanced Trade's keepalive is the `heartbeats` channel (server sends
+// ~1/sec), NOT a WS protocol ping. Treat "no inbound frame for this long" as dead and
+// force a reconnect. Replaces the old one-shot ws.ping()/pong-timeout machinery.
+const HEARTBEAT_TIMEOUT_MS = 10_000;
 
 // retrofit-31: prove ingestion. The first Coinbase tick actually recorded logs
 // once at module scope — if `coinbase_first_tick` never appears, ingestion is
@@ -38,13 +40,16 @@ export class CoinbaseClient {
   // but on the same channel, so they're effectively redundant — kept as documented.
   private coverageProducts: Set<string> = new Set();
   private reconnectAttempts = 0;
-  private pingTimer: ReturnType<typeof setTimeout> | null = null;
-  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly url: string;
+  // retrofit-33: liveness window, overridable in tests so the watchdog can be driven
+  // in milliseconds instead of the production 10s.
+  private readonly heartbeatTimeoutMs: number;
 
-  constructor(url?: string) {
+  constructor(url?: string, opts?: { heartbeatTimeoutMs?: number }) {
     this.url = url ?? config.COINBASE_WS_URL;
+    this.heartbeatTimeoutMs = opts?.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
   }
 
   isConnected(): boolean {
@@ -57,8 +62,7 @@ export class CoinbaseClient {
   }
 
   disconnect(): void {
-    this._clearPingTimer();
-    this._clearPongTimer();
+    this._clearHeartbeatTimer();
     this._clearReconnectTimer();
     this.state = 'disconnected';
     if (this.ws) {
@@ -75,8 +79,7 @@ export class CoinbaseClient {
 
     ws.on('open', () => this._onOpen());
     ws.on('message', (data: WebSocket.RawData) => this._onMessage(data));
-    ws.on('pong', () => this._clearPongTimer());
-    ws.on('close', () => this._onClose());
+    ws.on('close', (code: number, reason: Buffer) => this._onClose(code, reason?.toString()));
     ws.on('error', (err: Error) => this._onError(err));
   }
 
@@ -84,7 +87,7 @@ export class CoinbaseClient {
     this.state = 'connected';
     this.reconnectAttempts = 0;
     console.log(JSON.stringify({ event: 'coinbase_connected', url: this.url }));
-    this._schedulePing();
+    this._resetHeartbeatTimer();
     // Resubscribe to any symbols tracked before disconnect
     for (const [symbol] of this.subscriptions) {
       this._sendSubscribe(symbol);
@@ -93,13 +96,16 @@ export class CoinbaseClient {
     if (this.coverageProducts.size) {
       this._sendBatchSubscribe([...this.coverageProducts]);
     }
+    // retrofit-33: subscribe Advanced Trade's official keepalive channel. Without it
+    // Coinbase closes the socket after a short idle period (the flapping retrofit-33 fixes).
+    this.ws?.send(JSON.stringify({ type: 'subscribe', channel: 'heartbeats' }));
   }
 
   private _onMessage(raw: WebSocket.RawData): void {
-    // retrofit-30: ANY inbound frame proves liveness. Advanced Trade sends
-    // `channel:'heartbeats'`/`'subscriptions'`/`'ticker'` — never the legacy
-    // `type:'heartbeat'` — so reset the pong timer here, not in a dead message branch.
-    this._clearPongTimer();
+    // retrofit-33: ANY inbound frame (heartbeat, ticker, ack) proves liveness, so reset
+    // the message-driven watchdog here. Coinbase streams heartbeats ~1/sec plus ticker
+    // data, so a gap longer than the window means the socket is dead.
+    this._resetHeartbeatTimer();
     this.handleMessage(raw.toString());
   }
 
@@ -180,6 +186,10 @@ export class CoinbaseClient {
         break;
       }
 
+      case 'heartbeats':
+        // retrofit-33: keepalive frame — liveness already reset in _onMessage. No record.
+        break;
+
       default: {
         // retrofit-31: Advanced Trade reports a rejected subscribe with NO `channel`
         // and a top-level `type:'error'` / `message` / `error` field — catch that
@@ -196,11 +206,17 @@ export class CoinbaseClient {
     }
   }
 
-  private _onClose(): void {
+  private _onClose(code?: number, reason?: string): void {
     if (this.state === 'disconnected') return; // intentional disconnect
-    this._clearPingTimer();
-    this._clearPongTimer();
-    console.log(JSON.stringify({ event: 'coinbase_disconnected', reconnectAttempts: this.reconnectAttempts }));
+    this._clearHeartbeatTimer();
+    // retrofit-33: surface the close code/reason so a future drop is explainable
+    // (e.g. 1006 abnormal vs a policy message) instead of an opaque reconnect loop.
+    console.log(JSON.stringify({
+      event: 'coinbase_disconnected',
+      code: code ?? null,
+      reason: reason ?? null,
+      reconnectAttempts: this.reconnectAttempts,
+    }));
     this._scheduleReconnect();
   }
 
@@ -209,28 +225,18 @@ export class CoinbaseClient {
     // The 'close' event fires after 'error', so reconnect is triggered there
   }
 
-  private _schedulePing(): void {
-    this._clearPingTimer();
-    this.pingTimer = setTimeout(() => {
-      if (this.state !== 'connected' || !this.ws) return;
-      try {
-        this.ws.ping();
-      } catch {
-        // ignore — if WS is broken the close event will fire
-      }
-      this.pongTimer = setTimeout(() => {
-        console.warn(JSON.stringify({ event: 'coinbase_pong_timeout' }));
-        this.ws?.terminate();
-      }, PONG_TIMEOUT_MS);
-    }, PING_INTERVAL_MS);
+  private _resetHeartbeatTimer(): void {
+    this._clearHeartbeatTimer();
+    this.heartbeatTimer = setTimeout(() => {
+      // No inbound frame within the window — the socket is dead even if the OS hasn't
+      // noticed. terminate() fires 'close' → _onClose → reconnect.
+      console.warn(JSON.stringify({ event: 'coinbase_heartbeat_timeout' }));
+      this.ws?.terminate();
+    }, this.heartbeatTimeoutMs);
   }
 
-  private _clearPingTimer(): void {
-    if (this.pingTimer) { clearTimeout(this.pingTimer); this.pingTimer = null; }
-  }
-
-  private _clearPongTimer(): void {
-    if (this.pongTimer) { clearTimeout(this.pongTimer); this.pongTimer = null; }
+  private _clearHeartbeatTimer(): void {
+    if (this.heartbeatTimer) { clearTimeout(this.heartbeatTimer); this.heartbeatTimer = null; }
   }
 
   private _clearReconnectTimer(): void {

@@ -425,3 +425,94 @@ it('246: coinbase_first_tick beacon fires at most once across two ticker frames'
   const firstTickLogs = logs.filter((l) => l.includes('coinbase_first_tick'));
   expect(firstTickLogs.length).toBeLessThanOrEqual(1);
 });
+
+// ---------------------------------------------------------------------------
+// 247. _onOpen subscribes the heartbeats keepalive channel (retrofit-33)
+// ---------------------------------------------------------------------------
+
+it('247: _onOpen sends a {channel:"heartbeats"} subscribe (Advanced Trade keepalive)', async () => {
+  const client = new CoinbaseClient(serverUrl);
+
+  const serverConn = new Promise<WsServer>((r) => wss.once('connection', (ws) => r(ws)));
+  client.connect();
+  const serverSocket = await serverConn;
+
+  // Capture every frame from open onward — heartbeats subscribe is sent in _onOpen.
+  const frames: Array<Record<string, unknown>> = [];
+  serverSocket.on('message', (d) => {
+    try { frames.push(JSON.parse(d.toString()) as Record<string, unknown>); } catch { /* ignore */ }
+  });
+
+  await sleep(80); // allow 'open' → heartbeats subscribe to arrive
+
+  const hb = frames.find((f) => f['type'] === 'subscribe' && f['channel'] === 'heartbeats');
+  expect(hb).toBeDefined();
+
+  client.disconnect();
+});
+
+// ---------------------------------------------------------------------------
+// 248. channel:heartbeats frame → no recordTick, no throw (retrofit-33)
+// ---------------------------------------------------------------------------
+
+it('248: channel:heartbeats frame → no recordTick, no throw', () => {
+  mockRecordTick.mockClear();
+  const client = new CoinbaseClient(serverUrl);
+
+  expect(() =>
+    client.handleMessage(JSON.stringify({
+      channel: 'heartbeats',
+      events: [{ current_time: '2026-06-17T00:00:00Z', heartbeat_counter: 42 }],
+    })),
+  ).not.toThrow();
+
+  expect(mockRecordTick).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 249. Liveness watchdog: no inbound frame within the window → terminate → reconnect
+// (retrofit-33; heartbeatTimeoutMs overridden to keep the test fast/deterministic)
+// ---------------------------------------------------------------------------
+
+it('249: no inbound frame within the heartbeat window → watchdog terminates and reconnects', async () => {
+  const client = new CoinbaseClient(serverUrl, { heartbeatTimeoutMs: 200 });
+
+  const firstConn = new Promise<WsServer>((r) => wss.once('connection', (ws) => r(ws)));
+  client.connect();
+  await firstConn;
+  await sleep(50);
+  expect(client.isConnected()).toBe(true);
+
+  // The fake server sends nothing, so no inbound frame arrives. After ~200ms the
+  // watchdog terminates the socket → _onClose → reconnect (first backoff ~1s).
+  const secondConn = new Promise<void>((r) => wss.once('connection', () => r()));
+  await secondConn;
+  await sleep(100);
+  expect(client.isConnected()).toBe(true); // came back up
+
+  client.disconnect();
+}, 5000);
+
+// ---------------------------------------------------------------------------
+// 250. Any inbound frame resets the watchdog — a steady stream keeps the socket alive
+// ---------------------------------------------------------------------------
+
+it('250: inbound frames keep resetting the watchdog — no drop while frames flow', async () => {
+  const client = new CoinbaseClient(serverUrl, { heartbeatTimeoutMs: 200 });
+
+  const conn = new Promise<WsServer>((r) => wss.once('connection', (ws) => r(ws)));
+  client.connect();
+  const serverSocket = await conn;
+  await sleep(50);
+  expect(client.isConnected()).toBe(true);
+
+  // Send a frame every 80ms for ~400ms (> the 200ms window). Each inbound frame resets
+  // the watchdog, so the socket must stay up the whole time.
+  for (let i = 0; i < 5; i++) {
+    serverSocket.send(JSON.stringify({ channel: 'heartbeats', events: [{ heartbeat_counter: i }] }));
+    await sleep(80);
+  }
+  expect(client.isConnected()).toBe(true); // never terminated
+
+  client.disconnect();
+}, 5000);
