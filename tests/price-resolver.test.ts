@@ -84,16 +84,26 @@ describe('recordTick → canonical resolution', () => {
     expect(publishCount('BTC')).toBe(1);
   });
 
-  it('true-USD (kraken) beats binance even when binance is equally fresh', async () => {
+  it('binance beats kraken when both are fresh (broadest/fastest source first, retrofit-35)', async () => {
     const now = 2_000_000;
-    store.set('price:BTC:binance', JSON.stringify({ price: 100, change24h: 1, quote: 'USDT', ts: now }));
+    store.set('price:BTC:kraken', JSON.stringify({ price: 101, change24h: 1, quote: 'USD', ts: now }));
 
-    await recordTick('BTC', 'kraken', 101, 2, 'USD', now);
+    await recordTick('BTC', 'binance', 100, 2, 'USDT', now);
 
-    expect(canonical('BTC')).toMatchObject({ price: 101, source: 'kraken' });
+    // retrofit-35: binance (priority 0, broadest real-time coverage) now outranks kraken (6).
+    expect(canonical('BTC')).toMatchObject({ price: 100, source: 'binance' });
   });
 
-  it('coinbase beats kraken when both are fresh (speed priority, retrofit-32)', async () => {
+  it('binance beats coinbase when both are fresh (retrofit-35 priority)', async () => {
+    const now = 2_500_000;
+    store.set('price:BTC:coinbase', JSON.stringify({ price: 101, change24h: 1, quote: 'USD', ts: now }));
+
+    await recordTick('BTC', 'binance', 100, 2, 'USDT', now);
+
+    expect(canonical('BTC')).toMatchObject({ price: 100, source: 'binance' });
+  });
+
+  it('coinbase beats kraken when both are fresh (priority, retrofit-35)', async () => {
     const now = 3_000_000;
     store.set('price:ETH:kraken', JSON.stringify({ price: 200, change24h: 1, quote: 'USD', ts: now }));
 
@@ -130,24 +140,86 @@ describe('recordTick → canonical resolution', () => {
     expect(canonical('ETH')).toMatchObject({ price: 203, source: 'kraken' });
   });
 
-  it('binance is used only when it is the sole fresh source', async () => {
+  it('kraken is used when it is the sole fresh source (others stale)', async () => {
     const now = 5_000_000;
-    // kraken stale → ignored; binance fresh → wins despite lowest priority
-    store.set('price:SOL:kraken', JSON.stringify({ price: 150, change24h: 1, quote: 'USD', ts: now - 30_000 }));
+    // binance stale → ignored; kraken fresh → wins despite lowest priority
+    store.set('price:SOL:binance', JSON.stringify({ price: 150, change24h: 1, quote: 'USDT', ts: now - 30_000 }));
 
-    await recordTick('SOL', 'binance', 151, 2, 'USDT', now);
+    await recordTick('SOL', 'kraken', 151, 2, 'USD', now);
 
-    expect(canonical('SOL')).toMatchObject({ price: 151, source: 'binance' });
+    expect(canonical('SOL')).toMatchObject({ price: 151, source: 'kraken' });
   });
 
-  it('full priority order with all three fresh → coinbase wins; binance never used', async () => {
+  it('full priority order with all three fresh → binance wins (retrofit-35); coinbase/kraken never used', async () => {
     const now = 5_500_000;
     store.set('price:SOL:coinbase', JSON.stringify({ price: 150, change24h: 1, quote: 'USD', ts: now }));
     store.set('price:SOL:kraken', JSON.stringify({ price: 151, change24h: 1, quote: 'USD', ts: now }));
 
     await recordTick('SOL', 'binance', 152, 2, 'USDT', now);
 
-    expect(canonical('SOL')).toMatchObject({ price: 150, source: 'coinbase' });
+    expect(canonical('SOL')).toMatchObject({ price: 152, source: 'binance' });
+  });
+});
+
+describe('kraken trade/bbo merge (retrofit-35)', () => {
+  it('kraken trade + kraken_bbo both fresh → newer ts wins; source reflects which', async () => {
+    const now = 11_000_000;
+    // bbo is newer than the trade → bbo-mid surfaces (keeps a thin pair moving).
+    store.set('price:LINK:kraken', JSON.stringify({ price: 20, change24h: 1, quote: 'USD', ts: now - 4_000 }));
+    await recordTick('LINK', 'kraken_bbo', 21, 1, 'USD', now);
+    expect(canonical('LINK')).toMatchObject({ price: 21, source: 'kraken_bbo' });
+  });
+
+  it('equal ts → the trade (kraken) wins (a real execution beats a mid)', async () => {
+    const now = 11_500_000;
+    store.set('price:LINK:kraken_bbo', JSON.stringify({ price: 21, change24h: 1, quote: 'USD', ts: now }));
+    await recordTick('LINK', 'kraken', 20, 1, 'USD', now);
+    expect(canonical('LINK')).toMatchObject({ price: 20, source: 'kraken' });
+  });
+
+  it('the trade wins when it is the more current of the two', async () => {
+    const now = 12_000_000;
+    // bbo is older than the live trade → trade wins.
+    store.set('price:LINK:kraken_bbo', JSON.stringify({ price: 99, change24h: 1, quote: 'USD', ts: now - 6_000 }));
+    await recordTick('LINK', 'kraken', 20, 1, 'USD', now);
+    expect(canonical('LINK')).toMatchObject({ price: 20, source: 'kraken' });
+  });
+
+  it('only kraken_bbo fresh → bbo-mid is used and labelled kraken_bbo', async () => {
+    const now = 12_500_000;
+    await recordTick('LINK', 'kraken_bbo', 22, 1, 'USD', now);
+    expect(canonical('LINK')).toMatchObject({ price: 22, source: 'kraken_bbo' });
+  });
+});
+
+describe('cross-source outlier guard (retrofit-35)', () => {
+  it('a single fresh source is accepted as-is (no cross-check possible)', async () => {
+    const now = 13_000_000;
+    await recordTick('PEPE', 'gate', 0.0000123, 1, 'USDT', now);
+    expect(canonical('PEPE')).toMatchObject({ price: 0.0000123, source: 'gate' });
+  });
+
+  it('an absurd source (≥RATIO× the median) is dropped and a sane source wins', async () => {
+    const now = 13_500_000;
+    // binance + coinbase agree (~65000); kraken is 100× off (a collision/bad print) → dropped.
+    store.set('price:BTC:coinbase', JSON.stringify({ price: 65010, change24h: 1, quote: 'USD', ts: now }));
+    store.set('price:BTC:kraken', JSON.stringify({ price: 6_500_000, change24h: 1, quote: 'USD', ts: now }));
+
+    await recordTick('BTC', 'binance', 65000, 2, 'USDT', now);
+
+    // kraken dropped as an outlier; binance (priority 0) wins among the sane cluster.
+    expect(canonical('BTC')).toMatchObject({ price: 65000, source: 'binance' });
+  });
+
+  it('two sources disagreeing beyond the ratio keep the higher-priority one (no majority)', async () => {
+    const now = 14_000_000;
+    // coinbase (priority 1) vs gate (priority 4) disagree 1000× — no majority to trust.
+    store.set('price:FOO:gate', JSON.stringify({ price: 100_000, change24h: 1, quote: 'USDT', ts: now }));
+
+    await recordTick('FOO', 'coinbase', 100, 2, 'USD', now);
+
+    // No consensus → keep the higher-priority source (coinbase) rather than the median survivor.
+    expect(canonical('FOO')).toMatchObject({ price: 100, source: 'coinbase' });
   });
 });
 

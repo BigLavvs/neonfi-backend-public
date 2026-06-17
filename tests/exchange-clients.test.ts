@@ -149,6 +149,77 @@ describe('kraken: ticker parse', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Kraken — bbo sub-feed (retrofit-35): event_trigger:'bbo' → (bid+ask)/2 mid,
+// recorded under the 'kraken_bbo' source. Same frame schema as the trades feed.
+// ---------------------------------------------------------------------------
+
+describe('kraken: bbo sub-feed parse (retrofit-35)', () => {
+  it("records price:<BASE>:kraken_bbo with the (bid+ask)/2 mid for a bbo client", async () => {
+    setCatalogSymbols(['BTC']);
+    const client = new KrakenClient('ws://unused', { eventTrigger: 'bbo', source: 'kraken_bbo' });
+
+    client.handleMessage(JSON.stringify({
+      channel: 'ticker',
+      type: 'update',
+      data: [{ symbol: 'BTC/USD', last: 65000, bid: 64999, ask: 65001, change_pct: 2.0 }],
+    }));
+    await sleep(20);
+
+    // mid = (64999 + 65001) / 2 = 65000; stored under the bbo source, NOT 'kraken'.
+    expect(perExchange('BTC', 'kraken_bbo')).toMatchObject({ price: 65000, change24h: 2.0, quote: 'USD' });
+    expect(perExchange('BTC', 'kraken')).toBeNull();
+  });
+
+  it("a trades client still records the last price under 'kraken' (default behaviour unchanged)", async () => {
+    setCatalogSymbols(['BTC']);
+    const client = new KrakenClient('ws://unused'); // default eventTrigger:'trades', source:'kraken'
+
+    client.handleMessage(JSON.stringify({
+      channel: 'ticker',
+      type: 'update',
+      data: [{ symbol: 'BTC/USD', last: 64000, bid: 63999, ask: 64001, change_pct: 1.0 }],
+    }));
+    await sleep(20);
+
+    expect(perExchange('BTC', 'kraken')).toMatchObject({ price: 64000, quote: 'USD' });
+    expect(perExchange('BTC', 'kraken_bbo')).toBeNull();
+  });
+
+  it('skips a bbo frame missing bid/ask (cannot compute a mid)', async () => {
+    setCatalogSymbols(['BTC', 'ETH']);
+    const client = new KrakenClient('ws://unused', { eventTrigger: 'bbo', source: 'kraken_bbo' });
+
+    client.handleMessage(JSON.stringify({
+      channel: 'ticker',
+      type: 'update',
+      data: [
+        { symbol: 'BTC/USD', last: 65000, change_pct: 1.0 }, // no bid/ask → skip
+        { symbol: 'ETH/USD', last: 3200, bid: 0, ask: 3201, change_pct: 1.0 }, // bid ≤ 0 → skip
+      ],
+    }));
+    await sleep(20);
+
+    expect(perExchange('BTC', 'kraken_bbo')).toBeNull();
+    expect(perExchange('ETH', 'kraken_bbo')).toBeNull();
+  });
+
+  it('sends event_trigger in the subscribe params (bbo vs trades)', () => {
+    const sent: string[] = [];
+    const bbo = new KrakenClient('ws://unused', { eventTrigger: 'bbo', source: 'kraken_bbo' });
+    // Drive _sendSubscribe via a fake ws that captures frames.
+    (bbo as unknown as { ws: { send: (s: string) => void }; state: string }).ws = {
+      send: (s: string) => sent.push(s),
+    };
+    (bbo as unknown as { state: string }).state = 'connected';
+    bbo.subscribe(['BTC/USD']);
+
+    const frame = JSON.parse(sent[0]!) as { params: { channel: string; event_trigger: string } };
+    expect(frame.params.channel).toBe('ticker');
+    expect(frame.params.event_trigger).toBe('bbo');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Connect + degraded-mode boot decision (mock ws servers)
 // ---------------------------------------------------------------------------
 

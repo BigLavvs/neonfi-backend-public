@@ -8,6 +8,8 @@ import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
 import { config } from '../../lib/config.js';
 import { portfolioDerivedCacheKeys } from '../../lib/portfolio-cache-keys.js';
+import { __internals as resolverInternals } from '../../lib/price-resolver.js';
+import { getCatalogSymbols } from '../../lib/price-symbols.js';
 import { CoinMarketCapTokenMetadataProvider } from '../tokens/sync/coinmarketcap-provider.js';
 
 const PRICE_TTL_S = 60;
@@ -155,4 +157,77 @@ async function invalidateUserReadCaches(userId: number): Promise<void> {
 // Exported for test injection
 export function _setCmcProvider(p: CoinMarketCapTokenMetadataProvider): void {
   _cmcProvider = p;
+}
+
+// ---------------------------------------------------------------------------
+// Source-visibility readout (retrofit-35) — GET /prices/debug
+//
+// Diagnostic, behind requireAuth: shows which source is pricing each token and lets
+// you spot cross-source disagreements. Reads-only (no writes, no new deps): one mget
+// of the canonical `price:<SYM>` + each per-exchange `price:<SYM>:<exchange>` entry,
+// annotated with ageMs / stale (relative to the resolver's staleness window).
+// ---------------------------------------------------------------------------
+
+const { EXCHANGES, STALENESS_WINDOW_MS } = resolverInternals;
+const DEBUG_BOARD_LIMIT = 50;
+
+export interface PriceSourceDebug {
+  price: number;
+  ts: number;
+  ageMs: number;
+  stale: boolean;
+}
+
+export interface PriceSymbolDebug {
+  symbol: string;
+  canonical: { price: number; source: string; ts: number } | null;
+  sources: Record<string, PriceSourceDebug>;
+}
+
+async function buildSymbolDebug(sym: string, now: number): Promise<PriceSymbolDebug> {
+  const exchangeKeys = EXCHANGES.map((e) => `price:${sym}:${e}`);
+  const raws = await redis.mget(`price:${sym}`, ...exchangeKeys);
+
+  let canonical: PriceSymbolDebug['canonical'] = null;
+  const canonRaw = raws[0];
+  if (canonRaw) {
+    try {
+      const c = JSON.parse(canonRaw) as { price: number; source?: string; ts?: number };
+      canonical = { price: c.price, source: c.source ?? 'unknown', ts: c.ts ?? 0 };
+    } catch {
+      // leave canonical null on a malformed entry
+    }
+  }
+
+  const sources: Record<string, PriceSourceDebug> = {};
+  EXCHANGES.forEach((exchange, i) => {
+    const raw = raws[i + 1]; // offset by the leading canonical key
+    if (!raw) return;
+    try {
+      const t = JSON.parse(raw) as { price: number; ts: number };
+      const ageMs = now - t.ts;
+      sources[exchange] = { price: t.price, ts: t.ts, ageMs, stale: ageMs > STALENESS_WINDOW_MS };
+    } catch {
+      // skip a malformed per-exchange entry
+    }
+  });
+
+  return { symbol: sym, canonical, sources };
+}
+
+/**
+ * Read-only price source board. With a symbol, return that symbol's canonical price + every
+ * per-exchange source (ageMs/stale). Without one, return the first N catalog symbols as an
+ * at-a-glance board. `now` is injectable for deterministic tests.
+ */
+export async function getPriceDebug(
+  symbol: string | undefined,
+  now: number = Date.now(),
+): Promise<PriceSymbolDebug | { symbols: PriceSymbolDebug[] }> {
+  if (symbol) {
+    return buildSymbolDebug(symbol.toUpperCase(), now);
+  }
+  const board = [...getCatalogSymbols()].slice(0, DEBUG_BOARD_LIMIT);
+  const symbols = await Promise.all(board.map((s) => buildSymbolDebug(s, now)));
+  return { symbols };
 }

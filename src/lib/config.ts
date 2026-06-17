@@ -70,6 +70,12 @@ const schema = z
     BINANCE_WS_URL: z.string().min(1).default('wss://stream.binance.com:9443/ws/!ticker@arr'),
     // Kraken WebSocket v2 (public market data).
     KRAKEN_WS_URL: z.string().min(1).default('wss://ws.kraken.com/v2'),
+    // retrofit-35: cross-source outlier guard. Ticker symbols are NOT unique across
+    // exchanges, so a long-tail collision can produce a confidently-wrong price. With ≥2
+    // FRESH sources, a per-exchange tick further than this ratio from the median (×ratio
+    // above or ÷ratio below) is dropped as a likely collision / bad print. Default 5 —
+    // generous for real volatility, tight enough to catch gross collisions.
+    PRICE_OUTLIER_RATIO: z.coerce.number().min(1).default(5),
     // Stage 12: COINMARKETCAP_API_KEY is now required. Stage 9B's CMC sync is the
     // authoritative token-catalog source; booting without the key silently disables
     // price refreshes in a way that's hard to notice in production.

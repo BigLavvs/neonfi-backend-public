@@ -42,7 +42,7 @@ import { startSnapshotScheduler } from './jobs/snapshot.job.js';
 import { startDbKeepalive, stopDbKeepalive } from './jobs/db-keepalive.job.js';
 import { coinbase, fetchCoinbaseUsdBaseSymbols } from './lib/coinbase.js';
 import { binance } from './lib/binance.js';
-import { kraken } from './lib/kraken.js';
+import { kraken, krakenBbo } from './lib/kraken.js';
 import { loadCatalogSymbols, getCatalogSymbols, getKrakenCoverage } from './lib/price-symbols.js';
 import { startWsServer } from './ws/server.js';
 
@@ -122,10 +122,14 @@ async function startPriceFeeds(): Promise<void> {
     console.error('[neonfi-backend] binance connect failed', e);
   }
 
-  // Kraken — no all-market stream; subscribe the top-N catalog USD pairs by rank.
+  // Kraken — no all-market stream; subscribe the top-N catalog USD pairs by rank. The bbo-mid
+  // sub-feed covers the SAME pairs; the resolver uses it only when it's more current than the
+  // last trade (retrofit-35).
   try {
     kraken.connect();
     kraken.subscribe(getKrakenCoverage());
+    krakenBbo.connect();
+    krakenBbo.subscribe(getKrakenCoverage());
   } catch (e) {
     console.error('[neonfi-backend] kraken connect failed', e);
   }
@@ -174,6 +178,12 @@ async function shutdown(signal: string): Promise<void> {
     kraken.disconnect();
   } catch (e) {
     console.error('[neonfi-backend] kraken disconnect error:', e);
+  }
+
+  try {
+    krakenBbo.disconnect();
+  } catch (e) {
+    console.error('[neonfi-backend] krakenBbo disconnect error:', e);
   }
 
   try {

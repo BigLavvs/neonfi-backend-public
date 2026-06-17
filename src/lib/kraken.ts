@@ -9,12 +9,21 @@
 // key/auth):
 //   - URL: wss://ws.kraken.com/v2
 //   - Subscribe: {"method":"subscribe","params":{"channel":"ticker",
-//                 "symbol":["BTC/USD", ...]}}
+//                 "symbol":["BTC/USD", ...],"event_trigger":"trades"|"bbo"}}
 //   - Ticker frame: {"channel":"ticker","type":"snapshot"|"update",
-//                 "data":[{"symbol":"BTC/USD","last":<num>,"change_pct":<num>,...}]}
+//                 "data":[{"symbol":"BTC/USD","last":<num>,"bid":<num>,"ask":<num>,
+//                          "change_pct":<num>,...}]}
 //     last      = last traded price
+//     bid / ask = best bid / ask (used for the bbo-mid sub-feed)
 //     change_pct = 24-hour price change in percentage points
 //   - Pairs are slash-delimited and normalized (BTC/USD, not legacy XBT/USD).
+//
+// retrofit-35: the same class drives TWO singletons — `kraken` (event_trigger:'trades',
+// last-trade price, source 'kraken') and `krakenBbo` (event_trigger:'bbo', (bid+ask)/2
+// mid price, source 'kraken_bbo'). The `ticker` channel accepts event_trigger 'bbo'|'trades'
+// (default 'trades') with an IDENTICAL frame schema. This is a deliberate, scoped reversal
+// of retrofit-32's "no bbo" stance, mitigated by the resolver merge that prefers the last
+// trade and only surfaces the bbo-mid when it is MORE current (price-resolver.ts).
 
 import WebSocket from 'ws';
 import { redis } from './redis.js';
@@ -42,9 +51,15 @@ export class KrakenClient {
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly url: string;
+  // retrofit-35: which Kraken sub-feed this instance drives. 'trades' (default) records the
+  // last-trade price under source 'kraken'; 'bbo' records the (bid+ask)/2 mid under 'kraken_bbo'.
+  private readonly eventTrigger: 'trades' | 'bbo';
+  private readonly source: string;
 
-  constructor(url?: string) {
+  constructor(url?: string, opts?: { eventTrigger?: 'trades' | 'bbo'; source?: string }) {
     this.url = url ?? config.KRAKEN_WS_URL;
+    this.eventTrigger = opts?.eventTrigger ?? 'trades';
+    this.source = opts?.source ?? 'kraken';
   }
 
   isConnected(): boolean {
@@ -113,7 +128,7 @@ export class KrakenClient {
       const chunk = pairs.slice(i, i + SUBSCRIBE_CHUNK);
       this.ws.send(JSON.stringify({
         method: 'subscribe',
-        params: { channel: 'ticker', symbol: chunk },
+        params: { channel: 'ticker', symbol: chunk, event_trigger: this.eventTrigger },
       }));
     }
   }
@@ -151,12 +166,22 @@ export class KrakenClient {
       if (norm.quote !== 'USD') continue; // we only cover USD pairs
       if (!isCatalogSymbol(norm.base)) continue;
 
-      const price = typeof t['last'] === 'number' ? (t['last'] as number) : parseFloat(String(t['last']));
+      // retrofit-35: pick the price by sub-feed mode. 'trades' → last-trade; 'bbo' →
+      // (bid+ask)/2 mid, skipping the frame if either side is missing/non-finite/≤0.
+      let price: number;
+      if (this.eventTrigger === 'bbo') {
+        const bid = typeof t['bid'] === 'number' ? (t['bid'] as number) : parseFloat(String(t['bid']));
+        const ask = typeof t['ask'] === 'number' ? (t['ask'] as number) : parseFloat(String(t['ask']));
+        if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) continue;
+        price = (bid + ask) / 2;
+      } else {
+        price = typeof t['last'] === 'number' ? (t['last'] as number) : parseFloat(String(t['last']));
+      }
       if (!Number.isFinite(price)) continue;
       const rawChange = t['change_pct'];
       const change24h = typeof rawChange === 'number' ? rawChange : parseFloat(String(rawChange));
 
-      recordTick(norm.base, 'kraken', price, Number.isFinite(change24h) ? change24h : 0, 'USD').catch(
+      recordTick(norm.base, this.source, price, Number.isFinite(change24h) ? change24h : 0, 'USD').catch(
         (e: Error) => console.error(`[kraken] recordTick ${norm.base} error:`, e.message),
       );
     }
@@ -230,4 +255,10 @@ export class KrakenClient {
   }
 }
 
-export const kraken = new KrakenClient();
+export const kraken = new KrakenClient(); // trades → 'kraken'
+// retrofit-35: bbo-mid sub-feed. The resolver merges it into the 'kraken' candidate, using it
+// only when it is more current than the last trade (keeps thin Kraken pairs live).
+export const krakenBbo = new KrakenClient(undefined, {
+  eventTrigger: 'bbo',
+  source: 'kraken_bbo',
+});

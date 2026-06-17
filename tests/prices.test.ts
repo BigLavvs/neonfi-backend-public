@@ -403,3 +403,54 @@ it('389: POST /prices/refresh still succeeds when derived-cache invalidation thr
     delSpy.mockRestore();
   }
 });
+
+// ---------------------------------------------------------------------------
+// retrofit-35 — GET /prices/debug source-visibility readout
+// ---------------------------------------------------------------------------
+
+it('r35a: GET /prices/debug?symbol=BTC → canonical source + per-exchange ageMs/stale', async () => {
+  const cookie = await registerAndLogin();
+  const now = Date.now();
+  // Canonical (resolver shape) + one fresh + one stale per-exchange entry.
+  await redis.set('price:BTC', JSON.stringify({ price: 65000, change24h: 1, source: 'coinbase', ts: now }));
+  await redis.set('price:BTC:coinbase', JSON.stringify({ price: 65000, change24h: 1, quote: 'USD', ts: now }));
+  await redis.set('price:BTC:kraken', JSON.stringify({ price: 64990, change24h: 1, quote: 'USD', ts: now - 20_000 }));
+
+  const res = await app.request(`${PRICES_BASE}/debug?symbol=BTC`, { headers: { Cookie: cookie } });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as {
+    data: {
+      symbol: string;
+      canonical: { price: number; source: string; ts: number } | null;
+      sources: Record<string, { price: number; ageMs: number; stale: boolean }>;
+    };
+  };
+  expect(body.data.symbol).toBe('BTC');
+  expect(body.data.canonical?.source).toBe('coinbase');
+  // Fresh coinbase tick → not stale; the 20s-old kraken tick → stale (>15s window).
+  expect(body.data.sources.coinbase!.stale).toBe(false);
+  expect(body.data.sources.kraken!.stale).toBe(true);
+  expect(body.data.sources.coinbase!.ageMs).toBeGreaterThanOrEqual(0);
+});
+
+it('r35b: GET /prices/debug?symbol=ZZZ (no data) → canonical null, empty sources', async () => {
+  const cookie = await registerAndLogin();
+  const res = await app.request(`${PRICES_BASE}/debug?symbol=ZZZ`, { headers: { Cookie: cookie } });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { data: { canonical: unknown; sources: Record<string, unknown> } };
+  expect(body.data.canonical).toBeNull();
+  expect(Object.keys(body.data.sources)).toHaveLength(0);
+});
+
+it('r35c: GET /prices/debug no symbol → board array of catalog symbols', async () => {
+  const cookie = await registerAndLogin();
+  const res = await app.request(`${PRICES_BASE}/debug`, { headers: { Cookie: cookie } });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { data: { symbols: Array<{ symbol: string }> } };
+  expect(Array.isArray(body.data.symbols)).toBe(true);
+});
+
+it('r35d: GET /prices/debug no auth → 401', async () => {
+  const res = await app.request(`${PRICES_BASE}/debug?symbol=BTC`);
+  expect(res.status).toBe(401);
+});

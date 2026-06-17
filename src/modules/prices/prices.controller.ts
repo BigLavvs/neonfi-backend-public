@@ -7,7 +7,7 @@ import { ok, err } from '../../lib/envelope.js';
 import { requireAuth } from '../auth/middleware.js';
 import type { AuthEnv } from '../auth/middleware.js';
 import { refreshBodySchema } from './prices.schemas.js';
-import { resolveSymbolsForUser, refreshPrices } from './prices.service.js';
+import { resolveSymbolsForUser, refreshPrices, getPriceDebug } from './prices.service.js';
 
 const RATE_LIMIT_TTL_S = 30;
 
@@ -71,4 +71,13 @@ pricesRouter.post('/refresh', requireAuth, async (c) => {
   const result = await refreshPrices(user.id, symbols);
 
   return c.json(ok({ prices: result.prices, ...(result.partialFailure ? { partialFailure: true } : {}) }), 200);
+});
+
+// GET /api/v1/prices/debug?symbol=BTC — read-only source-visibility readout (retrofit-35).
+// Behind requireAuth (diagnostic, not public). With a symbol → that symbol's canonical price
+// + every per-exchange source (ageMs/stale). Without one → the first N catalog symbols.
+pricesRouter.get('/debug', requireAuth, async (c) => {
+  const symbol = c.req.query('symbol');
+  const data = await getPriceDebug(symbol);
+  return c.json(ok(data), 200);
 });
