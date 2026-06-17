@@ -4,12 +4,12 @@
 // getEffectivePlan is mocked (defaults to 'pro'; tests that need 'free' override it
 // per-call). DB is real for user/session creation (register + login + ws-token flow).
 //
-// retrofit-28: the server is now a BROADCAST FIREHOSE — it psubscribes `price:*`, buffers
-// the latest tick per symbol, and flushes ONE batched `price_update` frame to every open
-// socket every ~1s. There is no `subscribe` message, no per-symbol fan-out, no `subs:*`
-// sets. Tests assert: ticket auth + Pro gate (unchanged), the batched broadcast frame
-// reaches sockets that never subscribed, inbound frames are ignored, and the
-// plan_downgraded / reconnect control events still fire.
+// retrofit-28: the server is now a BROADCAST FIREHOSE — it psubscribes `price:*` and
+// forwards each resolved tick IMMEDIATELY (per-message, no buffer, no flush timer) as one
+// `price_update` frame to every open socket. There is no `subscribe` message, no
+// per-symbol fan-out, no `subs:*` sets. Tests assert: ticket auth + Pro gate (unchanged),
+// each published tick reaches sockets that never subscribed as its own one-symbol frame,
+// inbound frames are ignored, and the plan_downgraded / reconnect control events fire.
 
 import { it, beforeAll, afterAll, beforeEach, expect, vi } from 'vitest';
 import { createServer } from 'node:http';
@@ -139,8 +139,9 @@ interface Frame {
 
 /**
  * Wait for the next frame of a given `type`, ignoring others. The firehose can deliver a
- * stray `price_update` at any time (the flush loop is shared module state across the
- * file), so control-event assertions filter for the type they expect.
+ * stray `price_update` at any time (the `price:*` broadcast is shared module state across
+ * the file — one psubscribe for the whole server), so control-event assertions filter for
+ * the type they expect.
  */
 function nextMessageOfType(ws: WebSocket, type: string, timeout = 4000): Promise<Frame> {
   return new Promise((resolve, reject) => {
@@ -164,7 +165,7 @@ function nextMessageOfType(ws: WebSocket, type: string, timeout = 4000): Promise
   });
 }
 
-/** Collect every frame received over `ms` (used to prove a quiet socket / batching). */
+/** Collect every frame received over `ms` (used to prove a quiet socket / per-tick frames). */
 function collectMessages(ws: WebSocket, ms: number): Promise<Frame[]> {
   return new Promise((resolve) => {
     const frames: Frame[] = [];
@@ -324,7 +325,7 @@ it('256: free user ticket → 403 (free users rejected at handshake)', async () 
 // 257. Broadcast firehose: a price publish reaches EVERY open socket (no subscribe)
 // ---------------------------------------------------------------------------
 
-it('257: publish price:BTC → every open socket receives the batched price_update frame (no subscribe)', async () => {
+it('257: publish price:BTC → every open socket immediately receives a price_update frame (no subscribe)', async () => {
   const ticket1 = await getTicket(TEST_EMAIL);
   const ticket2 = await getTicket(TEST_EMAIL2);
 
@@ -357,24 +358,31 @@ it('257: publish price:BTC → every open socket receives the batched price_upda
 });
 
 // ---------------------------------------------------------------------------
-// 258. Batching: multiple symbols published in a window arrive in the prices[] array
+// 258. Per-tick: each publish is forwarded as its own one-symbol price_update frame
 // ---------------------------------------------------------------------------
 
-it('258: multiple symbols → delivered batched under one payload.prices[] (latest wins per symbol)', async () => {
+it('258: each publish → its own one-symbol price_update frame (no batching; latest wins across ticks)', async () => {
   const ticket = await getTicket();
   const ws = await openWs(ticket);
 
-  const framesPromise = collectMessages(ws, 1600); // ~1.5 flush windows
-  // Two distinct symbols + a second BTC tick (latest must win for BTC).
+  const framesPromise = collectMessages(ws, 1000);
+  // Two distinct symbols + a second BTC tick (latest must win for BTC). Each publish is a
+  // separate move, so each must arrive as its OWN frame — never coalesced into one batch.
   await redis.publish('price:BTC', JSON.stringify({ price: 50000, change24h: 1.5 }));
   await redis.publish('price:ETH', JSON.stringify({ price: 3000, change24h: -2.0 }));
   await redis.publish('price:BTC', JSON.stringify({ price: 50500, change24h: 1.7 }));
 
   const frames = await framesPromise;
   const priceFrames = frames.filter((f) => f.type === 'price_update');
-  expect(priceFrames.length).toBeGreaterThan(0);
 
-  // Merge all delivered prices; both symbols must appear, BTC at its latest value.
+  // No buffering/batching: exactly one frame per publish, each carrying a single symbol.
+  expect(priceFrames.length).toBe(3);
+  for (const f of priceFrames) {
+    expect((f.payload as { prices: unknown[] }).prices).toHaveLength(1);
+  }
+
+  // Merge across the per-tick frames (delivered in publish order); both symbols present,
+  // BTC at its latest value.
   const merged = new Map<string, { price: number; change24h: number }>();
   for (const f of priceFrames) {
     const prices = (f.payload as { prices: Array<{ symbol: string; price: number; change24h: number }> }).prices;

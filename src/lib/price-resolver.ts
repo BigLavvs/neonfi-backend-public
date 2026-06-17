@@ -17,14 +17,10 @@ const PRICE_TTL_S = 60;
 // A per-exchange entry older than this is treated as stale and ignored when
 // picking the canonical value (even though its key may still be within TTL).
 const STALENESS_WINDOW_MS = 15_000;
-// Canonical write+publish is capped to at most one per symbol per interval. The
-// Binance all-market stream is already ~1/sec, but a busy symbol seen across
-// three feeds could otherwise hammer Redis — enforce the ceiling here.
-const THROTTLE_MS = 100;
 
 // retrofit-20: sampled per-symbol price history for sparklines (`price_hist:<SYMBOL>`).
 // Appended at most once per symbol every HIST_SAMPLE_MS so the capped list spans hours,
-// not seconds — a far coarser gate than the 1s canonical throttle. Kept to the newest
+// not seconds — a far coarser gate than the per-tick canonical writes. Kept to the newest
 // HIST_MAX_POINTS and expired after HIST_TTL_S so a quiet symbol's series ages out.
 const HIST_SAMPLE_MS = 5 * 60_000; // ≥5 min between samples per symbol
 const HIST_MAX_POINTS = 12; // LTRIM 0..11
@@ -48,20 +44,22 @@ interface ExchangeTick {
   ts: number;
 }
 
-// Last canonical write time per symbol — drives the throttle. In-process Map is
-// fine: a single backend process owns the feeds.
-const lastCanonicalWriteAt = new Map<string, number>();
+// Last PUBLISHED canonical price per symbol — drives the change-dedupe. We publish a
+// `price:<SYMBOL>` tick to the firehose only when the resolved price differs from this,
+// so identical re-resolutions don't spam clients. In-process Map is fine: a single
+// backend process owns the feeds.
+const lastPublishedPrice = new Map<string, number>();
 
 // retrofit-20: last history-sample time per symbol — drives the ≥5-min sparkline
-// sample gate, independent of the 1s canonical throttle above. Same in-process Map
+// sample gate, independent of the per-tick canonical writes. Same in-process Map
 // rationale (single feed-owning process).
 const lastHistSampleAt = new Map<string, number>();
 
 /**
  * Record a tick from one exchange. Writes the per-exchange key unconditionally,
- * then (throttled) recomputes + publishes the canonical price.
+ * then recomputes the canonical price (republished only when it actually changed).
  *
- * `now` is injectable so tests can drive the throttle/freshness logic
+ * `now` is injectable so tests can drive the freshness/history logic
  * deterministically; production callers omit it.
  */
 export async function recordTick(
@@ -87,15 +85,11 @@ export async function recordTick(
 }
 
 /**
- * Recompute the canonical price for one symbol from its per-exchange entries and
- * (if anything changed within the throttle window) write + publish it.
+ * Recompute the canonical price for one symbol from its per-exchange entries, refresh
+ * the canonical read cache, and (only when the resolved price actually moved) publish
+ * the new tick to the firehose.
  */
 async function resolveCanonical(sym: string, now: number): Promise<void> {
-  // Throttle BEFORE the read — a symbol updated <1s ago keeps its canonical value
-  // until the next window; the per-exchange key was already written above.
-  const last = lastCanonicalWriteAt.get(sym) ?? 0;
-  if (now - last < THROTTLE_MS) return;
-
   const keys = EXCHANGES.map((e) => `price:${sym}:${e}`);
   const raws = await redis.mget(...keys);
 
@@ -131,17 +125,25 @@ async function resolveCanonical(sym: string, now: number): Promise<void> {
     ts: now,
   });
 
-  // Stamp the throttle BEFORE the awaits so concurrent ticks in the same window
-  // collapse to a single write even before this one resolves.
-  lastCanonicalWriteAt.set(sym, now);
-
+  // Always refresh the canonical read cache (60s TTL) so the live-price read overlay
+  // (lib/live-price.ts) stays warm even across flat-price stretches.
   await redis.set(`price:${sym}`, payload, 'EX', PRICE_TTL_S);
-  await redis.publish(`price:${sym}`, payload);
+
+  // Change-dedupe (retrofit-29) — replaces the old time throttle. Publish to the
+  // firehose ONLY when the resolved price actually moved from the last value we
+  // published for this symbol. Identical re-resolutions (e.g. a non-winning exchange
+  // ticks while the winner is unchanged) are dropped so per-tick streaming never spams
+  // clients with no-op frames. Stamp the new value BEFORE the await so concurrent
+  // identical ticks collapse to a single publish.
+  if (lastPublishedPrice.get(sym) !== winner.tick.price) {
+    lastPublishedPrice.set(sym, winner.tick.price);
+    await redis.publish(`price:${sym}`, payload);
+  }
 
   // retrofit-20: append the winning price to a capped per-symbol history list for
-  // sparklines, sampled at ≥5 min (a separate, coarser gate than the 1s canonical
-  // throttle) so ~12 points span hours, not seconds. Stamp the sample time BEFORE the
-  // await (same collapse-concurrent-ticks reasoning as the throttle). Best-effort: a
+  // sparklines, sampled at ≥5 min (a separate, coarser gate than the per-tick canonical
+  // writes) so ~12 points span hours, not seconds. Stamp the sample time BEFORE the
+  // await (same collapse-concurrent-ticks reasoning as the publish dedupe). Best-effort: a
   // history failure must never break the canonical price path, so the chain is fully
   // `.catch`-swallowed.
   const lastHist = lastHistSampleAt.get(sym) ?? 0;
@@ -157,15 +159,14 @@ async function resolveCanonical(sym: string, now: number): Promise<void> {
   }
 }
 
-/** Test-only: reset the throttle + history-sample bookkeeping between cases. */
+/** Test-only: reset the change-dedupe + history-sample bookkeeping between cases. */
 export function __resetThrottleForTest(): void {
-  lastCanonicalWriteAt.clear();
+  lastPublishedPrice.clear();
   lastHistSampleAt.clear();
 }
 
 export const __internals = {
   STALENESS_WINDOW_MS,
-  THROTTLE_MS,
   PRICE_TTL_S,
   SOURCE_PRIORITY,
   HIST_SAMPLE_MS,

@@ -3,7 +3,7 @@
 // Redis is replaced with an in-memory store (vi.hoisted so the factory can close
 // over it) — recordTick's per-exchange writes land in `store`, and canonical
 // publishes are captured in `published`. `now` is injected for deterministic
-// throttle/freshness behavior.
+// dedupe/freshness behavior.
 
 import { it, expect, describe, beforeEach, vi } from 'vitest';
 
@@ -123,31 +123,50 @@ describe('recordTick → canonical resolution', () => {
   });
 });
 
-describe('throttle', () => {
-  const THROTTLE = __internals.THROTTLE_MS;
-
-  it('rapid recordTick calls collapse to ≤1 canonical write per throttle window/symbol', async () => {
+describe('change-dedupe (replaces the old time throttle)', () => {
+  it('rapid CHANGING ticks each publish — no time-gate collapses them', async () => {
     const base = 6_000_000;
-    // 10 ticks packed inside a single throttle window (spacing < THROTTLE_MS), driven
-    // off the constant so this holds at any cadence (e.g. 1000ms or 100ms).
-    const step = Math.max(1, Math.floor(THROTTLE / 10));
+    // 10 ticks just 1ms apart, each a distinct price. Under the old 100ms throttle these
+    // collapsed to a single publish; with per-tick streaming every move publishes.
     for (let i = 0; i < 10; i++) {
-      await recordTick('SOL', 'binance', 10 + i, 1, 'USDT', base + i * step);
+      await recordTick('SOL', 'binance', 10 + i, 1, 'USDT', base + i);
     }
-    expect(publishCount('SOL')).toBe(1);
-
-    // crossing the throttle boundary allows one more canonical write
-    await recordTick('SOL', 'binance', 99, 1, 'USDT', base + THROTTLE + 100);
-    expect(publishCount('SOL')).toBe(2);
-    expect(canonical('SOL')).toMatchObject({ price: 99 });
+    expect(publishCount('SOL')).toBe(10);
+    expect(canonical('SOL')).toMatchObject({ price: 19 });
   });
 
-  it('throttle is per-symbol (a second symbol is not blocked by the first)', async () => {
+  it('an identical resolved price does NOT republish (dedupe); a changed one does', async () => {
+    const base = 6_500_000;
+    await recordTick('SOL', 'binance', 50, 1, 'USDT', base);
+    expect(publishCount('SOL')).toBe(1);
+
+    // Same price again, far later (well past any old throttle window) → still no publish.
+    await recordTick('SOL', 'binance', 50, 1, 'USDT', base + 10_000);
+    expect(publishCount('SOL')).toBe(1);
+
+    // A genuine move → one more publish.
+    await recordTick('SOL', 'binance', 51, 1, 'USDT', base + 20_000);
+    expect(publishCount('SOL')).toBe(2);
+    expect(canonical('SOL')).toMatchObject({ price: 51 });
+  });
+
+  it('dedupe is per-symbol (a second symbol publishes independently)', async () => {
     const now = 7_000_000;
     await recordTick('AAA', 'binance', 1, 0, 'USDT', now);
     await recordTick('BBB', 'binance', 2, 0, 'USDT', now);
     expect(publishCount('AAA')).toBe(1);
     expect(publishCount('BBB')).toBe(1);
+  });
+
+  it('still refreshes the canonical read cache even when the price is unchanged', async () => {
+    const base = 7_500_000;
+    await recordTick('XRP', 'binance', 5, 1, 'USDT', base);
+    // Identical price 30s later: no new publish, but the canonical key is rewritten with
+    // a fresh ts — the TTL refresh keeps the live-price read overlay warm during flat
+    // stretches (lib/live-price.ts reads `price:<SYMBOL>` with a 60s TTL).
+    await recordTick('XRP', 'binance', 5, 1, 'USDT', base + 30_000);
+    expect(publishCount('XRP')).toBe(1);
+    expect(canonical('XRP')).toMatchObject({ price: 5, ts: base + 30_000 });
   });
 });
 

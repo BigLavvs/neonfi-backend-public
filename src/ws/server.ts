@@ -7,12 +7,14 @@
 //
 // retrofit-28 — BROADCAST FIREHOSE. Realtime prices are a client-side display overlay
 // (Idowu's decision, see _claude/retrofit-28.md). The server no longer tracks per-socket
-// symbol subscriptions; it psubscribes the full `price:*` channel ONCE, buffers the
-// latest tick per symbol, and flushes ONE batched `price_update` frame to EVERY open
-// (Pro) socket on a fixed ~1s cadence. No `subscribe` message, no `subs:<SYMBOL>` sets,
-// no per-socket symbol state — server cost is flat regardless of symbol/holding count.
-// The exchange feeds already subscribe full coverage at boot (index.ts startPriceFeeds),
-// so prices are already flowing into Redis `price:<SYMBOL>`.
+// symbol subscriptions; it psubscribes the full `price:*` channel ONCE and forwards each
+// tick IMMEDIATELY (per-message, no buffering, no batching timer) as one `price_update`
+// frame to EVERY open (Pro) socket. No `subscribe` message, no `subs:<SYMBOL>` sets, no
+// per-socket symbol state — server cost is flat regardless of symbol/holding count. The
+// resolver (lib/price-resolver.ts) already change-dedupes, so a `price:*` pmessage only
+// fires when the resolved price actually moved — there is nothing to coalesce here. The
+// exchange feeds subscribe full coverage at boot (index.ts startPriceFeeds), so prices
+// are already flowing into Redis `price:<SYMBOL>`.
 
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'node:http';
@@ -35,15 +37,6 @@ import {
 // ---------------------------------------------------------------------------
 
 let _wss: WebSocketServer | null = null;
-
-// retrofit-28: latest tick per symbol, accumulated between flushes (latest wins). One
-// shared buffer for the whole process — the broadcast is identical for every socket.
-const priceBuffer = new Map<string, { price: number; change24h: number }>();
-
-// Single batching timer: one client update/sec (smooth, low churn) instead of per-tick
-// spam. Cleared in stopWsServer.
-let _flushTimer: ReturnType<typeof setInterval> | null = null;
-const FLUSH_INTERVAL_MS = 100;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -76,16 +69,9 @@ export async function startWsServer(httpServer: HttpServer): Promise<void> {
   _wss.on('connection', handleConnection);
 
   await startRedisSubscriptions();
-  startFlushLoop();
 }
 
 export async function stopWsServer(): Promise<void> {
-  if (_flushTimer) {
-    clearInterval(_flushTimer);
-    _flushTimer = null;
-  }
-  priceBuffer.clear();
-
   for (const ws of wsBySocketId.values()) {
     ws.terminate();
   }
@@ -185,18 +171,13 @@ function handleConnection(ws: WebSocket, _req: IncomingMessage, context: AuthCon
 }
 
 // ---------------------------------------------------------------------------
-// Price firehose — buffer + batched flush
+// Price firehose — per-tick broadcast
 // ---------------------------------------------------------------------------
 
-function startFlushLoop(): void {
-  if (_flushTimer) return;
-  _flushTimer = setInterval(flushPrices, FLUSH_INTERVAL_MS);
-  // Don't let the batching timer keep the process alive on its own; the HTTP server
-  // (prod) / test harness owns the event loop. Guarded for runtimes lacking unref.
-  _flushTimer.unref?.();
-}
-
-function bufferPrice(channel: string, raw: string): void {
+// Forward a single resolved `price:<SYMBOL>` tick IMMEDIATELY to every open socket as a
+// one-entry `price_update` frame. No buffer, no flush timer — the resolver already
+// change-dedupes upstream, so each pmessage is a genuine move worth delivering.
+function broadcastPrice(channel: string, raw: string): void {
   const symbol = channel.slice('price:'.length);
   if (!symbol) return;
   let data: { price?: unknown; change24h?: unknown };
@@ -208,23 +189,10 @@ function bufferPrice(channel: string, raw: string): void {
   if (typeof data.price !== 'number' || !Number.isFinite(data.price)) return;
   const change24h =
     typeof data.change24h === 'number' && Number.isFinite(data.change24h) ? data.change24h : 0;
-  // Latest tick wins until the next flush.
-  priceBuffer.set(symbol, { price: data.price, change24h });
-}
-
-function flushPrices(): void {
-  if (priceBuffer.size === 0) return;
-
-  const prices = [...priceBuffer.entries()].map(([symbol, { price, change24h }]) => ({
-    symbol,
-    price,
-    change24h,
-  }));
-  priceBuffer.clear();
 
   const msg = JSON.stringify({
     type: 'price_update',
-    payload: { prices },
+    payload: { prices: [{ symbol, price: data.price, change24h }] },
     timestamp: new Date().toISOString(),
   });
 
@@ -260,7 +228,7 @@ async function startRedisSubscriptions(): Promise<void> {
   });
 
   redisSubscriber.on('pmessage', (_pattern: string, channel: string, raw: string) => {
-    if (channel.startsWith('price:')) bufferPrice(channel, raw);
+    if (channel.startsWith('price:')) broadcastPrice(channel, raw);
   });
 }
 
