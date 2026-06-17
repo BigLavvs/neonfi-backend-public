@@ -20,7 +20,7 @@ const STALENESS_WINDOW_MS = 15_000;
 // Canonical write+publish is capped to at most one per symbol per interval. The
 // Binance all-market stream is already ~1/sec, but a busy symbol seen across
 // three feeds could otherwise hammer Redis — enforce the ceiling here.
-const THROTTLE_MS = 1_000;
+const THROTTLE_MS = 100;
 
 // retrofit-20: sampled per-symbol price history for sparklines (`price_hist:<SYMBOL>`).
 // Appended at most once per symbol every HIST_SAMPLE_MS so the capped list spans hours,

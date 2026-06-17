@@ -124,16 +124,20 @@ describe('recordTick → canonical resolution', () => {
 });
 
 describe('throttle', () => {
-  it('rapid recordTick calls collapse to ≤1 canonical write/sec/symbol', async () => {
+  const THROTTLE = __internals.THROTTLE_MS;
+
+  it('rapid recordTick calls collapse to ≤1 canonical write per throttle window/symbol', async () => {
     const base = 6_000_000;
-    // 10 ticks spread across <1s
+    // 10 ticks packed inside a single throttle window (spacing < THROTTLE_MS), driven
+    // off the constant so this holds at any cadence (e.g. 1000ms or 100ms).
+    const step = Math.max(1, Math.floor(THROTTLE / 10));
     for (let i = 0; i < 10; i++) {
-      await recordTick('SOL', 'binance', 10 + i, 1, 'USDT', base + i * 50);
+      await recordTick('SOL', 'binance', 10 + i, 1, 'USDT', base + i * step);
     }
     expect(publishCount('SOL')).toBe(1);
 
-    // crossing the 1s boundary allows one more canonical write
-    await recordTick('SOL', 'binance', 99, 1, 'USDT', base + 1_100);
+    // crossing the throttle boundary allows one more canonical write
+    await recordTick('SOL', 'binance', 99, 1, 'USDT', base + THROTTLE + 100);
     expect(publishCount('SOL')).toBe(2);
     expect(canonical('SOL')).toMatchObject({ price: 99 });
   });
@@ -156,7 +160,7 @@ describe('sampled price history (sparklines, retrofit-20)', () => {
     await recordTick('BTC', 'coinbase', 100, 1, 'USD', base);
     expect(lists.get('price_hist:BTC')).toEqual(['100']);
 
-    // Another tick 1.1s later: passes the 1s canonical throttle but NOT the 5-min
+    // Another tick 1.1s later: passes the canonical throttle but NOT the 5-min
     // history gate → no new sample.
     await recordTick('BTC', 'coinbase', 101, 1, 'USD', base + 1_100);
     expect(lists.get('price_hist:BTC')).toEqual(['100']);

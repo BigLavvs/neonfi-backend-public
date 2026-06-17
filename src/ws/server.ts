@@ -43,7 +43,7 @@ const priceBuffer = new Map<string, { price: number; change24h: number }>();
 // Single batching timer: one client update/sec (smooth, low churn) instead of per-tick
 // spam. Cleared in stopWsServer.
 let _flushTimer: ReturnType<typeof setInterval> | null = null;
-const FLUSH_INTERVAL_MS = 1_000;
+const FLUSH_INTERVAL_MS = 100;
 
 // ---------------------------------------------------------------------------
 // Public API
