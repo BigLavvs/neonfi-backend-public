@@ -453,9 +453,9 @@ it('414: an NFT transfer creates an nft transaction + an Nft row; current NFT ho
     ],
     nextCursor: null, totalCount: null,
   });
-  // A current holding that predates the transfer window.
+  // A current holding that predates the transfer window (retrofit-51: carries a description).
   fetchNftHoldingsMock.mockResolvedValue([
-    { contractAddress: '0xheldcontract414', tokenId: '99', name: 'Held One', collectionName: 'Held Coll', logoUrl: 'http://img/99', tokenStandard: 'ERC721' },
+    { contractAddress: '0xheldcontract414', tokenId: '99', name: 'Held One', description: 'A rare held collectible.', collectionName: 'Held Coll', logoUrl: 'http://img/99', tokenStandard: 'ERC721' },
   ]);
 
   const res = await portPost('', { name: 'NFT Wallet', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
@@ -478,6 +478,10 @@ it('414: an NFT transfer creates an nft transaction + an Nft row; current NFT ho
     ['0xheldcontract414', '99'],
     ['0xnftcontract414', '7'],
   ]);
+  // retrofit-51: the held holding's description is persisted; the in-window transfer (no
+  // metadata) stores null — no crash either way.
+  expect(nfts[0]!.description).toBe('A rare held collectible.');
+  expect(nfts[1]!.description).toBeNull();
 });
 
 it('415: sync-more imports the next page using the stored cursor and advances/clears it', async () => {

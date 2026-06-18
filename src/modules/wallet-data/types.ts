@@ -57,6 +57,7 @@ export interface WalletTransfer {
   // nft only:
   nftTokenId: string | null;
   collectionName: string | null;
+  description: string | null; // retrofit-51: collectible description (null unless the payload carries it)
 }
 
 export interface TransferPage {
@@ -71,6 +72,7 @@ export interface WalletNftHolding {
   contractAddress: string;
   tokenId: string;
   name: string | null;
+  description: string | null; // retrofit-51: from normalized_metadata.description; null when absent
   collectionName: string | null;
   logoUrl: string | null;
   tokenStandard: string | null;

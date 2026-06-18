@@ -230,6 +230,7 @@ async function importNftTransfer(
         contractAddress: contract,
         tokenId,
         name: tr.name ?? null,
+        description: tr.description ?? null,
         collectionName: tr.collectionName ?? null,
         logoUrl: tr.logoUrl ?? null,
         chain: chainSlug,
@@ -237,6 +238,7 @@ async function importNftTransfer(
       update: {
         ...(tr.logoUrl ? { logoUrl: tr.logoUrl } : {}),
         ...(tr.name ? { name: tr.name } : {}),
+        ...(tr.description ? { description: tr.description } : {}),
       },
     });
   } else {
@@ -312,6 +314,7 @@ async function importNftHoldings(
           contractAddress: h.contractAddress,
           tokenId: h.tokenId,
           name: h.name,
+          description: h.description,
           collectionName: h.collectionName,
           logoUrl: h.logoUrl,
           chain: chainSlug,
@@ -320,6 +323,7 @@ async function importNftHoldings(
         update: {
           ...(h.logoUrl ? { logoUrl: h.logoUrl } : {}),
           ...(h.name ? { name: h.name } : {}),
+          ...(h.description ? { description: h.description } : {}),
         },
       });
     } catch (e) {

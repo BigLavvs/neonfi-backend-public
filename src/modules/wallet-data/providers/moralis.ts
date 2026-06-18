@@ -76,6 +76,7 @@ interface MoralisHistoryNftTransfer {
   collection_name?: string | null;
   collection_logo?: string | null;
   contract_type?: string | null;
+  normalized_metadata?: { description?: string | null } | null;
 }
 interface MoralisHistoryItem {
   hash?: string | null;
@@ -100,7 +101,7 @@ interface MoralisNftHolding {
   name?: string | null;
   contract_type?: string | null;
   collection_logo?: string | null;
-  normalized_metadata?: { name?: string | null; image?: string | null } | null;
+  normalized_metadata?: { name?: string | null; image?: string | null; description?: string | null } | null;
 }
 interface MoralisNftHoldingsResponse {
   result?: MoralisNftHolding[];
@@ -283,6 +284,7 @@ export class MoralisWalletProvider implements WalletDataProvider {
             logoUrl: t.token_logo ?? null,
             nftTokenId: null,
             collectionName: null,
+            description: null,
           });
         }
         for (const t of item.erc20_transfers ?? []) {
@@ -302,6 +304,7 @@ export class MoralisWalletProvider implements WalletDataProvider {
             logoUrl: t.token_logo ?? null,
             nftTokenId: null,
             collectionName: null,
+            description: null,
           });
         }
         for (const t of item.nft_transfers ?? []) {
@@ -322,6 +325,8 @@ export class MoralisWalletProvider implements WalletDataProvider {
             logoUrl: t.collection_logo ?? null,
             nftTokenId: tokenId,
             collectionName: t.collection_name ?? null,
+            // Best-effort: history rarely carries token metadata; null unless present.
+            description: t.normalized_metadata?.description ?? null,
           });
         }
       }
@@ -361,6 +366,7 @@ export class MoralisWalletProvider implements WalletDataProvider {
           contractAddress,
           tokenId,
           name: it.normalized_metadata?.name ?? it.name ?? null,
+          description: it.normalized_metadata?.description ?? null,
           collectionName: it.name ?? null,
           logoUrl: it.normalized_metadata?.image ?? it.collection_logo ?? null,
           tokenStandard: it.contract_type ?? null,

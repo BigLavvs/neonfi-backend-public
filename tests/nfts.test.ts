@@ -119,6 +119,7 @@ async function seedNft(portfolioId: number, overrides: Record<string, unknown> =
     data: {
       portfolioId,
       name: overrides.name as string ?? 'Test NFT',
+      description: (overrides.description as string | null | undefined) ?? null,
       tokenId: overrides.tokenId as string ?? '1',
       contractAddress: overrides.contractAddress as string ?? '0xcontract1',
       collectionName: overrides.collectionName as string ?? 'TestCollection',
@@ -341,6 +342,32 @@ it('288: GET /portfolios/:id/nfts Pro with traits JSON → traits parsed as obje
   expect(res.status).toBe(200);
   const body = await res.json() as { data: { nft: { traits: unknown } } };
   expect(body.data.nft.traits).toEqual(traitsValue);
+});
+
+// ---------------------------------------------------------------------------
+// 291: retrofit-51 — DTO exposes the collectible description (set + null cases)
+// ---------------------------------------------------------------------------
+
+it('291: GET /portfolios/:id/nfts/:nftId returns description when set, null when absent', async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const portfolioId = await createConnectedPortfolio(userId);
+
+  const withDesc = await seedNft(portfolioId, {
+    tokenId: 'd1', contractAddress: '0xdesc1', description: 'A legendary on-chain collectible.',
+  });
+  const noDesc = await seedNft(portfolioId, { tokenId: 'd2', contractAddress: '0xdesc2' });
+
+  const r1 = await nftGet(nftUrl(portfolioId, withDesc), cookie);
+  expect(r1.status).toBe(200);
+  expect(((await r1.json()) as { data: { nft: { description: string | null } } }).data.nft.description)
+    .toBe('A legendary on-chain collectible.');
+
+  const r2 = await nftGet(nftUrl(portfolioId, noDesc), cookie);
+  expect(r2.status).toBe(200);
+  expect(((await r2.json()) as { data: { nft: { description: string | null } } }).data.nft.description)
+    .toBeNull();
 });
 
 // ---------------------------------------------------------------------------

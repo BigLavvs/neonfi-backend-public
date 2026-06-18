@@ -487,6 +487,7 @@ model Nft {
   portfolio       Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
   portfolioId     Int
   name            String?   @db.VarChar(255)
+  description     String?   // retrofit-51: collectible description (normalized_metadata.description); null when absent
   tokenId         String    @db.VarChar(255)
   contractAddress String    @db.VarChar(255)
   collectionName  String?   @db.VarChar(255)
