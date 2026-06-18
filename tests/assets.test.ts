@@ -482,31 +482,30 @@ it('189: PATCH connected portfolio asset → 403 CONNECTED_PORTFOLIO_READ_ONLY',
   expect(json.error.code).toBe('CONNECTED_PORTFOLIO_READ_ONLY');
 });
 
-it('190: PATCH with balance field → 400 VALIDATION_ERROR (strict rejects balance)', async () => {
+it('190: PATCH with stray field → 400 VALIDATION_ERROR (strict still applies)', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
   const assetId = await addAssetDirectly(portfolioId, btcId);
 
-  const res = await assetPatch(portfolioId, assetId, { balance: '1.0' }, cookies);
+  const res = await assetPatch(portfolioId, assetId, { bogusField: 'value' }, cookies);
   expect(res.status).toBe(400);
 
   const json = await res.json() as { error: { code: string } };
   expect(json.error.code).toBe('VALIDATION_ERROR');
 });
 
-it('191: PATCH empty body → 200 no-op, returns current asset unchanged', async () => {
+it('191: PATCH empty body → 400 VALIDATION_ERROR (refine requires at least one field)', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
-  const assetId = await addAssetDirectly(portfolioId, btcId, { netDeposit: '100.00' });
+  const assetId = await addAssetDirectly(portfolioId, btcId);
 
   const res = await assetPatch(portfolioId, assetId, {}, cookies);
-  expect(res.status).toBe(200);
+  expect(res.status).toBe(400);
 
-  const json = await res.json() as { data: { asset: Record<string, unknown> } };
-  expect(json.data.asset.id).toBe(assetId);
-  expect(json.data.asset.netDeposit).toBe(100);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('VALIDATION_ERROR');
 });
 
 // ---------------------------------------------------------------------------
@@ -721,4 +720,121 @@ it('393: POST opening historical with NO snapshot on/before the date → 400 PRI
   const json = await res.json() as { error: { code: string } };
   expect(json.error.code).toBe('PRICE_HISTORY_UNAVAILABLE');
   expect(await prisma.asset.count()).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// 394-398. retrofit-44 — PATCH opening position (balance + cost)
+// ---------------------------------------------------------------------------
+
+it('394: PATCH { balance, cost:avg } → openingBalance + costBasis recomputed; DTO reflects update', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  // Open with balance=2, avgCost=100 → costBasis=200
+  const postRes = await assetPost(portfolioId, { tokenId: btcId, balance: '2', cost: { mode: 'avg', avgCost: '100' } }, cookies);
+  expect(postRes.status).toBe(201);
+  const postJson = await postRes.json() as { data: { asset: Record<string, unknown> } };
+  const assetId = postJson.data.asset.id as number;
+
+  // Edit: balance=3, avgCost=200 → costBasis=600
+  const res = await assetPatch(portfolioId, assetId, { balance: '3', cost: { mode: 'avg', avgCost: '200' } }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { asset: Record<string, unknown> } };
+  const a = json.data.asset;
+  expect(a.balance).toBe(3);
+  expect(a.avgCost).toBe(200);
+  expect(a.costBasis).toBe(600); // 3 × 200
+  expect(a.costTracked).toBe(true);
+
+  // Idempotent: same PATCH again yields same result
+  const res2 = await assetPatch(portfolioId, assetId, { balance: '3', cost: { mode: 'avg', avgCost: '200' } }, cookies);
+  expect(res2.status).toBe(200);
+  const json2 = await res2.json() as { data: { asset: Record<string, unknown> } };
+  expect(json2.data.asset.balance).toBe(3);
+  expect(json2.data.asset.costBasis).toBe(600);
+});
+
+it('395: PATCH { balance } only → rescales costBasis at prior per-unit avg; per-unit avgCost unchanged', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  // Open: balance=2, avgCost=100 → costBasis=200, per-unit=100
+  const postRes = await assetPost(portfolioId, { tokenId: btcId, balance: '2', cost: { mode: 'avg', avgCost: '100' } }, cookies);
+  expect(postRes.status).toBe(201);
+  const assetId = (await postRes.json() as { data: { asset: Record<string, unknown> } }).data.asset.id as number;
+
+  // Balance-only edit: balance=4, cost omitted → rescale: 4 × 100 = 400
+  const res = await assetPatch(portfolioId, assetId, { balance: '4' }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { asset: Record<string, unknown> } };
+  const a = json.data.asset;
+  expect(a.balance).toBe(4);
+  expect(a.avgCost).toBe(100); // per-unit unchanged
+  expect(a.costBasis).toBe(400); // rescaled: 4 × 100
+  expect(a.costTracked).toBe(true);
+});
+
+it('396: PATCH { cost:none } → clears cost tracking; avgCost null, costTracked false; balance preserved', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  // Open with avg cost
+  const postRes = await assetPost(portfolioId, { tokenId: btcId, balance: '2', cost: { mode: 'avg', avgCost: '100' } }, cookies);
+  expect(postRes.status).toBe(201);
+  const assetId = (await postRes.json() as { data: { asset: Record<string, unknown> } }).data.asset.id as number;
+
+  const res = await assetPatch(portfolioId, assetId, { cost: { mode: 'none' } }, cookies);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { asset: Record<string, unknown> } };
+  const a = json.data.asset;
+  expect(a.avgCost).toBeNull();
+  expect(a.costTracked).toBe(false);
+  expect(a.balance).toBe(2); // balance preserved (balance-only edit keeps existing openingBalance)
+});
+
+it('397: PATCH { cost:historical, date } with no snapshot → 400 PRICE_HISTORY_UNAVAILABLE', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+
+  const postRes = await assetPost(portfolioId, { tokenId: btcId, balance: '2', cost: { mode: 'none' } }, cookies);
+  expect(postRes.status).toBe(201);
+  const assetId = (await postRes.json() as { data: { asset: Record<string, unknown> } }).data.asset.id as number;
+
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btcId } });
+
+  const res = await assetPatch(
+    portfolioId,
+    assetId,
+    { cost: { mode: 'historical', date: '2020-01-01T00:00:00.000Z' } },
+    cookies,
+  );
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('PRICE_HISTORY_UNAVAILABLE');
+});
+
+it('398: PATCH opening edit on another user\'s portfolio → 403 FORBIDDEN', async () => {
+  const cookiesA = await registerAndLogin(TEST_EMAIL, TEST_PASSWORD, TEST_FULL_NAME);
+  const userAId = await getUserId(TEST_EMAIL);
+  const portfolioId = await seedPortfolio(userAId, 'manual');
+
+  const postRes = await assetPost(portfolioId, { tokenId: btcId, balance: '2', cost: { mode: 'none' } }, cookiesA);
+  expect(postRes.status).toBe(201);
+  const assetId = (await postRes.json() as { data: { asset: Record<string, unknown> } }).data.asset.id as number;
+
+  const cookiesB = await registerAndLogin(TEST_EMAIL_2, TEST_PASSWORD, 'User B');
+
+  const res = await assetPatch(portfolioId, assetId, { balance: '5' }, cookiesB);
+  expect(res.status).toBe(403);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('FORBIDDEN');
 });

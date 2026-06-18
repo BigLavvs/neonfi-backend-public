@@ -1,4 +1,4 @@
-import { prisma } from '../../lib/prisma.js';
+import { prisma, type PrismaTransactionClient } from '../../lib/prisma.js';
 import type { AssetWithToken } from './assets.dto.js';
 
 export async function findAllAssetsByPortfolioId(portfolioId: number): Promise<AssetWithToken[]> {
@@ -30,11 +30,19 @@ export async function createAssetRow(data: {
   return prisma.asset.create({ data, include: { token: true } });
 }
 
+// retrofit-44: optional `tx` allows the opening edit to run atomically with recalc.
+// Prisma ignores undefined fields in `data`, so partial updates work correctly.
 export async function updateAssetRow(
   id: number,
-  data: { netDeposit: string },
+  data: {
+    netDeposit?: string;
+    openingBalance?: string;
+    openingCostBasis?: string | null;
+    openingAt?: Date | null;
+  },
+  tx?: PrismaTransactionClient,
 ): Promise<AssetWithToken> {
-  return prisma.asset.update({ where: { id }, data, include: { token: true } });
+  return (tx ?? prisma).asset.update({ where: { id }, data, include: { token: true } });
 }
 
 export async function deleteAssetRow(id: number): Promise<void> {

@@ -20,7 +20,7 @@ const CostHistoricalSchema = z
   .strict();
 const CostNoneSchema = z.object({ mode: z.literal('none') }).strict();
 
-const CostSchema = z.discriminatedUnion('mode', [
+export const CostSchema = z.discriminatedUnion('mode', [
   CostAvgSchema,
   CostHistoricalSchema,
   CostNoneSchema,
@@ -34,12 +34,21 @@ export const CreateAssetBodySchema = z
   })
   .strict();
 
-export const UpdateAssetBodySchema = z.object({
-  netDeposit: z
-    .string()
-    .regex(/^\d+(\.\d+)?$/, 'netDeposit must be a non-negative decimal string')
-    .optional(),
-}).strict();
+// retrofit-44: opening edit — balance/cost edit the opening position in place; netDeposit
+// kept for back-compat. Refine requires at least one field so empty bodies are rejected.
+export const UpdateAssetBodySchema = z
+  .object({
+    netDeposit: z
+      .string()
+      .regex(/^\d+(\.\d+)?$/, 'netDeposit must be a non-negative decimal string')
+      .optional(),
+    balance: decimalStr.optional(),
+    cost: CostSchema.optional(),
+  })
+  .strict()
+  .refine((b) => b.netDeposit !== undefined || b.balance !== undefined || b.cost !== undefined, {
+    message: 'Provide netDeposit, or balance/cost to edit the opening position',
+  });
 
 export type CreateAssetBody = z.infer<typeof CreateAssetBodySchema>;
 export type UpdateAssetBody = z.infer<typeof UpdateAssetBodySchema>;
