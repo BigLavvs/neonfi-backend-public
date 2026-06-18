@@ -1,4 +1,4 @@
-// Neonfi backend — initial holdings sync for connected portfolios (retrofit-47).
+// Neonfi backend — initial holdings sync for connected portfolios (retrofit-47, retrofit-48).
 //
 // Runs ONCE at connect time (createPortfolio, connected branch), best-effort: seeds the
 // wallet's CURRENT holdings so the portfolio shows them immediately. The Moralis stream
@@ -9,14 +9,101 @@
 // spam airdrops out of the catalog): here the provider already gave us a real balance +
 // price and the provider layer already excluded spam/dust, so a non-catalog holding is
 // AUTO-LISTED rather than dropped — the initial sync reflects the user's real bag.
+//
+// retrofit-48: resolution is now contract-first (the on-chain identity) with a symbol
+// fallback, and auto-listed rows carry `contractAddress` + `autoListed: true` so the
+// connected-reprice job can refresh their (off-firehose) price by contract.
 
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { seedAcquisitionInTx, invalidatePnlCache } from '../transactions/transactions.service.js';
 import { fetchWalletSummary } from './index.js';
+import type { WalletToken } from './types.js';
 
 // Decimal(20,8) column scale — format without exponent notation so Prisma accepts it.
 function dec8(n: number): string {
   return n.toFixed(8);
+}
+
+// Resolve a wallet token to its catalog row, auto-listing it when no row exists.
+//
+// `symbol` stays the UNIQUE catalog key (re-keying to (symbol, contract) is out of scope),
+// so there is still exactly one row per ticker. `contractAddress` makes resolution PRECISE:
+// we match on the on-chain identity first and only fall back to the ticker.
+async function resolveOrCreateToken(t: WalletToken) {
+  const symbol = t.symbol.toUpperCase();
+  // Lower-case EVM contracts to match the wallet-validator's normalization; Solana mints are
+  // case-sensitive but arrive already-normalized from the provider, so .toLowerCase() is a
+  // no-op risk we accept here (native/Solana flows resolve by symbol anyway).
+  const contract = t.contractAddress ? t.contractAddress.toLowerCase() : null;
+
+  // 1. Resolve precisely — contract is the on-chain identity, so try it FIRST when present.
+  let token =
+    contract != null
+      ? await prisma.token.findFirst({
+          where: { contractAddress: { equals: contract, mode: 'insensitive' } },
+        })
+      : null;
+  const matchedByContract = token != null;
+
+  // Fall back to the symbol match (native tokens, with no contract, resolve here too).
+  if (!token) {
+    token = await prisma.token.findFirst({
+      where: { symbol: { equals: t.symbol, mode: 'insensitive' } },
+    });
+  }
+
+  if (token) {
+    if (!matchedByContract && contract != null) {
+      if (token.contractAddress == null) {
+        // 2. Backfill the contract on a symbol match so future resolves are precise. (Only
+        //    when the row has no contract yet — never overwrite a different one.)
+        token = await prisma.token.update({
+          where: { id: token.id },
+          data: { contractAddress: contract },
+        });
+      } else if (token.contractAddress.toLowerCase() !== contract) {
+        // 3. Genuine same-ticker / different-project collision. `symbol` is UNIQUE so we
+        //    cannot create a second row — map the holding to the existing row (never drop)
+        //    and log it. This is the documented limitation; the catalog re-key to
+        //    (symbol, contractAddress) — which would touch the firehose, webhook, and
+        //    transactions — is explicitly out of scope for this retrofit.
+        console.warn('[wallet-sync] ticker collision', {
+          symbol,
+          existing: token.contractAddress,
+          incoming: contract,
+        });
+      }
+    }
+    return token;
+  }
+
+  // 4. Nothing matched → auto-list. autoListed:true marks the row for the connected-reprice
+  //    job (it is NOT on the live exchange firehose, which subscribes by symbol to majors).
+  //    LIVE-PRICING CAVEAT: until the reprice job runs, the value holds at the synced price.
+  //    Guard the unique-symbol create against a concurrent same-symbol insert (across
+  //    portfolios) — on P2002 re-resolve to the now-existing row.
+  try {
+    return await prisma.token.create({
+      data: {
+        symbol,
+        name: t.name ?? t.symbol,
+        currentPrice: t.usdPrice != null ? dec8(t.usdPrice) : '0',
+        rank: null,
+        logoUrl: null,
+        autoListed: true,
+        contractAddress: contract,
+      },
+    });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      const existing = await prisma.token.findFirst({
+        where: { symbol: { equals: t.symbol, mode: 'insensitive' } },
+      });
+      if (existing) return existing;
+    }
+    throw e;
+  }
 }
 
 export async function syncConnectedHoldings(
@@ -31,27 +118,10 @@ export async function syncConnectedHoldings(
   for (const t of summary.tokens) {
     if (!(t.balance > 0) || !t.symbol) continue;
     try {
-      const symbol = t.symbol.toUpperCase();
-      // Resolve OR auto-create the catalog Token. The Token model has no contract-address
-      // column, so we match/key on the unique `symbol`. upsert makes re-syncs idempotent
-      // and concurrent creates across portfolios race-safe. An existing catalog row is
-      // left untouched (the catalog is authoritative for name/price/rank).
-      const token = await prisma.token.upsert({
-        where: { symbol },
-        update: {},
-        create: {
-          symbol,
-          name: t.name ?? t.symbol,
-          // LIVE-PRICING CAVEAT: auto-listed tokens are NOT in the live price firehose
-          // (it subscribes by symbol to exchange WS streams), so their value holds at the
-          // synced price until a future refresh — accurate at sync time, and far better
-          // than dropping real holdings. A later retrofit can fold these into a periodic
-          // price refresh / re-sync.
-          currentPrice: t.usdPrice != null ? dec8(t.usdPrice) : '0',
-          rank: null,
-          logoUrl: null,
-        },
-      });
+      // Resolve OR auto-create the catalog Token (contract-first, symbol fallback). An
+      // existing catalog row is left untouched for name/price/rank (the catalog is
+      // authoritative); only a missing contract is backfilled onto it.
+      const token = await resolveOrCreateToken(t);
 
       // Seed an opening position for the current balance via the shared acquisition seed
       // (native buy). priceAtTime = the provider's per-unit price ⇒ cost basis ≈ current

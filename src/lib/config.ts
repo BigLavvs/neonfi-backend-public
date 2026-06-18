@@ -160,6 +160,19 @@ const schema = z
       .default('0 */6 * * *')
       .refine((v) => cron.validate(v), 'TOKEN_SYNC_CRON must be a valid cron expression'),
 
+    // --- Connected-wallet token re-price (retrofit-48) ---
+    // Periodic refresh of auto-listed connected-wallet tokens (not on the live firehose).
+    // NOTE: explicit transform, NOT z.coerce.boolean() — Boolean("false") === true, so
+    // coercion would never disable it (same gotcha as TOKEN_SYNC_ENABLED / SNAPSHOT_ENABLED).
+    CONNECTED_REPRICE_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    CONNECTED_REPRICE_CRON: z
+      .string()
+      .default('*/30 * * * *')
+      .refine((v) => cron.validate(v), 'CONNECTED_REPRICE_CRON must be a valid cron expression'),
+
     // --- Daily balance snapshot job (Stage 13) ---
     // NOTE: deliberately NOT z.coerce.boolean() like TOKEN_SYNC_ENABLED above —
     // z.coerce.boolean() runs Boolean("false") === true, so "false" would NOT

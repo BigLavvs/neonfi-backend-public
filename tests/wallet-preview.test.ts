@@ -38,6 +38,9 @@ const TEST_EMAIL = 'wallet.preview@neonfi.test';
 const TEST_PASSWORD = 'Test1234';
 const VALID_EVM = '0xAbCdEf1234567890AbCdEf1234567890AbCdEf12';
 const AUTO_SYMBOL = 'ZZAUTO47';
+// retrofit-48: catalog rows pre-seeded / auto-listed by the sync-resolution cases below.
+// Cleared each run (after truncate drops their asset FKs) so resolution starts clean.
+const SYNC_TEST_SYMBOLS = [AUTO_SYMBOL, 'ZZEXIST48', 'ZZWALLET48', 'ZZBACKFILL48', 'ZZCOLLIDE48'];
 
 async function authPost(path: string, body: Record<string, unknown>): Promise<Response> {
   return app.request(`${AUTH_BASE}${path}`, {
@@ -73,7 +76,7 @@ beforeEach(async () => {
   // truncate first (clears assets so the auto-listed token has no FK refs), then drop the
   // auto-listed token so each run re-creates it from scratch.
   await truncateAllUserData();
-  await prisma.token.deleteMany({ where: { symbol: AUTO_SYMBOL } });
+  await prisma.token.deleteMany({ where: { symbol: { in: SYNC_TEST_SYMBOLS } } });
   await clearRedisAuthKeys();
   previewWalletMock.mockReset();
   fetchWalletSummaryMock.mockReset();
@@ -81,9 +84,9 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  // Leave the catalog clean: clear the last test's assets, then the auto-listed token.
+  // Leave the catalog clean: clear the last test's assets, then the auto-listed tokens.
   await truncateAllUserData();
-  await prisma.token.deleteMany({ where: { symbol: AUTO_SYMBOL } });
+  await prisma.token.deleteMany({ where: { symbol: { in: SYNC_TEST_SYMBOLS } } });
 });
 
 // ---------------------------------------------------------------------------
@@ -189,6 +192,9 @@ it('405: connected create seeds catalog + auto-listed holdings, opening position
   expect(auto).not.toBeNull();
   expect(Number(auto!.currentPrice)).toBe(5);
   expect(auto!.rank).toBeNull();
+  // retrofit-48: an auto-listed row is flagged + carries the provider's (lower-cased) contract.
+  expect(auto!.autoListed).toBe(true);
+  expect(auto!.contractAddress).toBe('0xauto');
 
   // An asset row + a native `buy` transaction exist for BOTH holdings.
   const assets = await prisma.asset.findMany({ where: { portfolioId } });
@@ -240,4 +246,101 @@ it('407: a single bad-token seed does not abort the rest of the sync', async () 
   // The good catalog token still seeded despite the bad one failing.
   const assets = await prisma.asset.findMany({ where: { portfolioId } });
   expect(assets).toHaveLength(1);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-48 — contract-first resolution, backfill, collision
+// ---------------------------------------------------------------------------
+
+it('408: sync resolves a wallet token to an existing row by CONTRACT (no new symbol row)', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+
+  // An existing row carrying a contract. The wallet token has a DIFFERENT symbol but the
+  // SAME contract (different case) → it must resolve by contract to this row, not auto-list.
+  const existing = await prisma.token.create({
+    data: { symbol: 'ZZEXIST48', name: 'Existing', currentPrice: '7', contractAddress: '0xdeadbeef48' },
+  });
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: 'ETH', nativeBalance: 0, totalUsd: 100, tokenCount: 1,
+    tokens: [
+      { symbol: 'ZZWALLET48', name: 'Wallet Alias', contractAddress: '0xDEADBEEF48', balance: 4, decimals: 18, usdPrice: 25, usdValue: 100, isNative: false },
+    ],
+    provider: 'moralis',
+  });
+
+  const res = await portPost('', { name: 'Contract Match', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(res.status).toBe(201);
+  const portfolioId = (await res.json()).data.portfolio.id as number;
+
+  // No new row for the wallet's alias symbol; the asset is seeded against the existing row.
+  expect(await prisma.token.findUnique({ where: { symbol: 'ZZWALLET48' } })).toBeNull();
+  const assets = await prisma.asset.findMany({ where: { portfolioId } });
+  expect(assets).toHaveLength(1);
+  expect(assets[0]!.tokenId).toBe(existing.id);
+  // The existing row's contract is untouched (it already had one).
+  const after = await prisma.token.findUniqueOrThrow({ where: { id: existing.id } });
+  expect(after.contractAddress).toBe('0xdeadbeef48');
+});
+
+it('409: sync backfills contractAddress on a symbol match when the row had none', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+
+  const existing = await prisma.token.create({
+    data: { symbol: 'ZZBACKFILL48', name: 'Backfill Me', currentPrice: '3', contractAddress: null },
+  });
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: 'ETH', nativeBalance: 0, totalUsd: 30, tokenCount: 1,
+    tokens: [
+      { symbol: 'ZZBACKFILL48', name: 'Backfill Me', contractAddress: '0xBackFill48', balance: 10, decimals: 18, usdPrice: 3, usdValue: 30, isNative: false },
+    ],
+    provider: 'moralis',
+  });
+
+  const res = await portPost('', { name: 'Backfill', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(res.status).toBe(201);
+  const portfolioId = (await res.json()).data.portfolio.id as number;
+
+  // Matched the existing row (no duplicate) and recorded the contract, lower-cased.
+  expect(await prisma.token.count({ where: { symbol: 'ZZBACKFILL48' } })).toBe(1);
+  const after = await prisma.token.findUniqueOrThrow({ where: { id: existing.id } });
+  expect(after.contractAddress).toBe('0xbackfill48');
+  const assets = await prisma.asset.findMany({ where: { portfolioId } });
+  expect(assets).toHaveLength(1);
+  expect(assets[0]!.tokenId).toBe(existing.id);
+});
+
+it('410: a same-ticker / different-contract collision maps to the existing row + warns, no dup, no throw', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+  const existing = await prisma.token.create({
+    data: { symbol: 'ZZCOLLIDE48', name: 'Original Project', currentPrice: '9', contractAddress: '0xaaa111' },
+  });
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: 'ETH', nativeBalance: 0, totalUsd: 90, tokenCount: 1,
+    tokens: [
+      { symbol: 'ZZCOLLIDE48', name: 'Impostor Project', contractAddress: '0xBBB222', balance: 10, decimals: 18, usdPrice: 9, usdValue: 90, isNative: false },
+    ],
+    provider: 'moralis',
+  });
+
+  const res = await portPost('', { name: 'Collision', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(res.status).toBe(201); // never throws
+  const portfolioId = (await res.json()).data.portfolio.id as number;
+
+  // Single row (no duplicate); existing contract untouched; collision logged.
+  expect(await prisma.token.count({ where: { symbol: 'ZZCOLLIDE48' } })).toBe(1);
+  const after = await prisma.token.findUniqueOrThrow({ where: { id: existing.id } });
+  expect(after.contractAddress).toBe('0xaaa111');
+  const assets = await prisma.asset.findMany({ where: { portfolioId } });
+  expect(assets).toHaveLength(1);
+  expect(assets[0]!.tokenId).toBe(existing.id);
+  expect(warn).toHaveBeenCalledWith(
+    '[wallet-sync] ticker collision',
+    expect.objectContaining({ symbol: 'ZZCOLLIDE48', existing: '0xaaa111', incoming: '0xbbb222' }),
+  );
+  warn.mockRestore();
 });

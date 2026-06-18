@@ -39,6 +39,7 @@ import { config } from './lib/config.js';
 import { app } from './app.js';
 import { startTokenSyncScheduler } from './jobs/token-sync.job.js';
 import { startSnapshotScheduler, runSnapshotCatchUpIfNeeded } from './jobs/snapshot.job.js';
+import { startConnectedRepriceScheduler } from './jobs/connected-reprice.job.js';
 import { startDbKeepalive, stopDbKeepalive } from './jobs/db-keepalive.job.js';
 import { coinbase, fetchCoinbaseUsdBaseSymbols } from './lib/coinbase.js';
 import { binance } from './lib/binance.js';
@@ -60,6 +61,7 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
 if (config.NODE_ENV !== 'test') {
   startTokenSyncScheduler();
   startSnapshotScheduler();
+  startConnectedRepriceScheduler();
   // retrofit-42 B1: dev-friendly catch-up — capture today's snapshot if the cron missed it (the
   // process wasn't alive at midnight UTC). Fire-and-forget so it never blocks boot.
   void runSnapshotCatchUpIfNeeded().catch((e) =>

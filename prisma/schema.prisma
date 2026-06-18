@@ -243,12 +243,23 @@ model Token {
   // cold-cache fallback so the wallet badge shows a (slightly stale) change even for a
   // token with no fresh live `price:<SYM>` tick. Nullable — unknown until first written.
   change24h    Decimal? @db.Decimal(10, 4)
+  // retrofit-48: on-chain identity for precise connected-wallet resolution + per-contract
+  // re-pricing. Nullable because existing CMC catalog rows have no contract recorded. NOT
+  // unique (the same contract string can recur across chains, and `symbol` stays the unique
+  // key) — indexed for lookups only. Stored lower-cased for EVM; Solana mints left as-is.
+  contractAddress String? @db.VarChar(255)
+  // retrofit-48: true when this row was auto-created from a connected wallet's holdings (not
+  // the CMC catalog). These tokens are NOT on the live firehose, so the connected-reprice job
+  // refreshes their price. CMC/catalog tokens stay false and are priced by token-sync + the
+  // firehose.
+  autoListed   Boolean  @default(false)
   assets       Asset[]
   // retrofit-21: daily price-history rows (powers the token-detail chart + ATH/ATL).
   priceSnapshots TokenPriceSnapshot[]
 
   updatedAt    DateTime @updatedAt
 
+  @@index([contractAddress])
   @@map("token")
 }
 
