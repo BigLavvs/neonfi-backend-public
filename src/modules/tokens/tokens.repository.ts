@@ -63,6 +63,27 @@ export async function findTokenPriceSnapshotOnOrBefore(
   return row ? { snapshotDate: row.snapshotDate, price: Number(row.price.toString()) } : null;
 }
 
+// retrofit-46: bulk daily-close fetch for GET /prices/history's daily ranges (1W/1M/1Y/ALL).
+// Returns every TokenPriceSnapshot row for the given tokenIds with snapshotDate >= sinceDate,
+// ordered by tokenId ASC then snapshotDate ASC so the caller can bucket per-token series in one
+// pass with ascending dates preserved. Decimal price → number (service stays Decimal-free).
+export async function findBulkTokenPriceSnapshotsSince(
+  tokenIds: number[],
+  sinceDate: Date,
+): Promise<Array<{ tokenId: number; snapshotDate: Date; price: number }>> {
+  if (tokenIds.length === 0) return [];
+  const rows = await prisma.tokenPriceSnapshot.findMany({
+    where: { tokenId: { in: tokenIds }, snapshotDate: { gte: sinceDate } },
+    orderBy: [{ tokenId: 'asc' }, { snapshotDate: 'asc' }],
+    select: { tokenId: true, snapshotDate: true, price: true },
+  });
+  return rows.map((r) => ({
+    tokenId: r.tokenId,
+    snapshotDate: r.snapshotDate,
+    price: Number(r.price.toString()),
+  }));
+}
+
 // retrofit-21: min/max snapshot price over ALL of a token's history (not windowed) —
 // the "high/low since tracking began" feeding ATH/ATL. Null when no snapshots exist yet.
 export async function aggregateTokenPriceExtremes(

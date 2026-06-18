@@ -15,6 +15,7 @@ import { ok } from '../../lib/envelope.js';
 import type { AuthEnv } from '../auth/middleware.js';
 import { requireAuth } from '../auth/middleware.js';
 import { getOverview } from './overview.service.js';
+import { listRecentUserTransactions } from '../transactions/transactions.service.js';
 
 const router = new Hono<AuthEnv>();
 
@@ -45,6 +46,25 @@ router.get('/', async (c) => {
   });
   const data = await getOverview(user.id, { days, txLimit });
   return c.json(ok(data), 200);
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/overview/transactions?limit= (retrofit-46)
+// ---------------------------------------------------------------------------
+// Every transaction the user owns, across ALL portfolios, newest-first. The frontend
+// uses this to (a) build the holdings step function (holdings(t) = current − txns after t)
+// and (b) drop buy/sell markers on the value chart, reconstructing value(t)=holdings(t)×
+// price(t) client-side (the retrofit-45 backend reconstruction having been reverted).
+// Same clamp-never-400 stance as GET /overview: limit defaults to 500, clamps to [1, 2000].
+const TxQuerySchema = z.object({
+  limit: z.coerce.number().int().catch(500).transform(clampTo(1, 2000)),
+});
+
+router.get('/transactions', async (c) => {
+  const user = c.get('user');
+  const { limit } = TxQuerySchema.parse({ limit: c.req.query('limit') });
+  const transactions = await listRecentUserTransactions(user.id, limit);
+  return c.json(ok({ transactions }), 200);
 });
 
 export { router as overviewRouter };

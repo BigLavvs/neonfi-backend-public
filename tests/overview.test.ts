@@ -694,3 +694,62 @@ it('392: each portfolio row carries holdings[] (excl. balance<=0); aggregate hol
   // ETH (balance 0) is absent everywhere.
   expect(d.holdings.map((h) => h.symbol)).not.toContain('ETH');
 });
+
+// ---------------------------------------------------------------------------
+// retrofit-46 — GET /overview/transactions (cross-portfolio user tx list)
+// ---------------------------------------------------------------------------
+
+interface TxListResponse {
+  data: { transactions: Array<{ id: number; portfolioId: number; timestamp: string }> };
+}
+
+it('r46-tx: GET /overview/transactions → all the user\'s txns across portfolios, newest-first', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const p1 = await createManualPortfolio(userId, 'P1');
+  const p2 = await createManualPortfolio(userId, 'P2');
+  await seedNativeTx(p1, '2026-01-01T00:00:00.000Z');
+  await seedNativeTx(p2, '2026-01-02T00:00:00.000Z');
+  await seedNativeTx(p1, '2026-01-03T00:00:00.000Z');
+
+  const res = await app.request(`${OVERVIEW_BASE}/transactions`, { headers: { Cookie: cookies } });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as TxListResponse;
+  // All three, newest-first (NOT limited by the /overview txLimit default of 10).
+  expect(body.data.transactions.map((t) => t.timestamp)).toEqual([
+    '2026-01-03T00:00:00.000Z',
+    '2026-01-02T00:00:00.000Z',
+    '2026-01-01T00:00:00.000Z',
+  ]);
+  expect(body.data.transactions[0]!.portfolioId).toBe(p1);
+});
+
+it('r46-tx-limit: GET /overview/transactions?limit=2 caps the list; bad limit clamps (never 400)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const p = await createManualPortfolio(userId, 'P');
+  await seedNativeTx(p, '2026-02-01T00:00:00.000Z');
+  await seedNativeTx(p, '2026-02-02T00:00:00.000Z');
+  await seedNativeTx(p, '2026-02-03T00:00:00.000Z');
+
+  const capped = await app.request(`${OVERVIEW_BASE}/transactions?limit=2`, {
+    headers: { Cookie: cookies },
+  });
+  expect(capped.status).toBe(200);
+  const cappedBody = (await capped.json()) as TxListResponse;
+  expect(cappedBody.data.transactions).toHaveLength(2);
+  expect(cappedBody.data.transactions[0]!.timestamp).toBe('2026-02-03T00:00:00.000Z');
+
+  // Non-numeric limit → clamp-never-400 stance: defaults to 500, returns all 3.
+  const garbage = await app.request(`${OVERVIEW_BASE}/transactions?limit=abc`, {
+    headers: { Cookie: cookies },
+  });
+  expect(garbage.status).toBe(200);
+  const garbageBody = (await garbage.json()) as TxListResponse;
+  expect(garbageBody.data.transactions).toHaveLength(3);
+});
+
+it('r46-tx-auth: GET /overview/transactions no session → 401', async () => {
+  const res = await app.request(`${OVERVIEW_BASE}/transactions`);
+  expect(res.status).toBe(401);
+});

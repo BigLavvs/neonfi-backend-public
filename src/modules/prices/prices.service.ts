@@ -11,6 +11,8 @@ import { portfolioDerivedCacheKeys } from '../../lib/portfolio-cache-keys.js';
 import { __internals as resolverInternals } from '../../lib/price-resolver.js';
 import { getCatalogSymbols } from '../../lib/price-symbols.js';
 import { CoinMarketCapTokenMetadataProvider } from '../tokens/sync/coinmarketcap-provider.js';
+import { findBulkTokenPriceSnapshotsSince } from '../tokens/tokens.repository.js';
+import type { HistoryRange } from './prices.schemas.js';
 
 const PRICE_TTL_S = 60;
 
@@ -160,16 +162,24 @@ export function _setCmcProvider(p: CoinMarketCapTokenMetadataProvider): void {
 }
 
 // ---------------------------------------------------------------------------
-// Intraday price history (retrofit-43) — GET /prices/history
+// Price history (retrofit-43 intraday + retrofit-46 daily) — GET /prices/history
 //
-// Symbol-keyed sampled price series read straight from the resolver's Redis buffer
-// (`price_hist:<SYMBOL>`, ≤24h, 3-min samples, "<tsMs>|<price>" entries, newest→oldest).
-// Powers the 1H/1D chart ranges; daily balance snapshots still power 1W+. Redis-only — no
-// Postgres read/write. A missing/empty key, malformed entry, or Redis hiccup yields [] for
-// that symbol and never throws.
+// One symbol-keyed "price-at-time" series per requested symbol, at ANY range:
+//   - 1H/1D → the resolver's Redis buffer (`price_hist:<SYMBOL>`, ≤24h, 3-min samples,
+//     "<tsMs>|<price>" entries, newest→oldest). Redis-only — no Postgres.
+//   - 1W/1M/1Y/ALL → the daily close series from TokenPriceSnapshot (one row per UTC day),
+//     `t` = the snapshot's UTC-midnight epoch ms. ALL caps at 365 days like 1Y.
+// Both paths return `{ [symbol]: Array<{t,p}> }`, ascending, missing/unknown symbol → [].
+// A Redis hiccup (intraday) yields [] for that symbol and never throws.
 // ---------------------------------------------------------------------------
 
 const RANGE_MS: Record<'1H' | '1D', number> = { '1H': 60 * 60_000, '1D': 24 * 60 * 60_000 };
+const RANGE_DAYS: Record<'1W' | '1M' | '1Y' | 'ALL', number> = {
+  '1W': 7,
+  '1M': 30,
+  '1Y': 365,
+  ALL: 365,
+};
 
 export interface PricePoint {
   t: number;
@@ -178,8 +188,18 @@ export interface PricePoint {
 
 export async function getPriceHistory(
   symbols: string[],
-  range: '1H' | '1D',
+  range: HistoryRange,
   now: number = Date.now(),
+): Promise<Record<string, PricePoint[]>> {
+  if (range === '1H' || range === '1D') return getIntradayHistory(symbols, range, now);
+  return getDailyHistory(symbols, range, now);
+}
+
+// 1H/1D: sampled intraday series from the Redis buffer (retrofit-43).
+async function getIntradayHistory(
+  symbols: string[],
+  range: '1H' | '1D',
+  now: number,
 ): Promise<Record<string, PricePoint[]>> {
   const cutoff = now - RANGE_MS[range];
   const out: Record<string, PricePoint[]> = {};
@@ -202,6 +222,40 @@ export async function getPriceHistory(
       }
     }),
   );
+  return out;
+}
+
+// 1W/1M/1Y/ALL: daily-close series from TokenPriceSnapshot (retrofit-46). One bulk query
+// over the held tokenIds; `t` is each snapshot's UTC-midnight epoch ms (snapshotDate is
+// @db.Date), `p` its close. Ascending per symbol (the bulk query orders snapshotDate ASC).
+async function getDailyHistory(
+  symbols: string[],
+  range: '1W' | '1M' | '1Y' | 'ALL',
+  now: number,
+): Promise<Record<string, PricePoint[]>> {
+  const out: Record<string, PricePoint[]> = {};
+  for (const sym of symbols) out[sym] = []; // unknown / no-snapshot symbol → []
+  if (symbols.length === 0) return out;
+
+  const tokens = await prisma.token.findMany({
+    where: { symbol: { in: symbols } },
+    select: { id: true, symbol: true },
+  });
+  if (tokens.length === 0) return out;
+
+  const symbolByTokenId = new Map(tokens.map((t) => [t.id, t.symbol]));
+
+  // since = todayUTC midnight − RANGE_DAYS.
+  const since = new Date(now);
+  since.setUTCHours(0, 0, 0, 0);
+  since.setUTCDate(since.getUTCDate() - RANGE_DAYS[range]);
+
+  const rows = await findBulkTokenPriceSnapshotsSince([...symbolByTokenId.keys()], since);
+  for (const row of rows) {
+    const sym = symbolByTokenId.get(row.tokenId);
+    if (sym === undefined) continue;
+    out[sym]!.push({ t: row.snapshotDate.getTime(), p: row.price });
+  }
   return out;
 }
 

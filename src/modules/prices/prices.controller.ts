@@ -6,7 +6,7 @@ import { redis } from '../../lib/redis.js';
 import { ok, err } from '../../lib/envelope.js';
 import { requireAuth } from '../auth/middleware.js';
 import type { AuthEnv } from '../auth/middleware.js';
-import { refreshBodySchema, historyQuerySchema } from './prices.schemas.js';
+import { refreshBodySchema, historyQuerySchema, type HistoryQuery } from './prices.schemas.js';
 import { resolveSymbolsForUser, refreshPrices, getPriceDebug, getPriceHistory } from './prices.service.js';
 
 const RATE_LIMIT_TTL_S = 30;
@@ -73,19 +73,19 @@ pricesRouter.post('/refresh', requireAuth, async (c) => {
   return c.json(ok({ prices: result.prices, ...(result.partialFailure ? { partialFailure: true } : {}) }), 200);
 });
 
-// GET /api/v1/prices/history?symbols=BTC,ETH&range=1H — sampled intraday price series per
-// symbol, from the resolver's Redis buffer (≤24h, 3-min samples). Auth-required, not Pro-gated
-// (read-only catalog price data — same stance as GET /tokens/:id/history). Powers the 1H/1D
-// chart ranges; daily snapshots still power 1W+.
+// GET /api/v1/prices/history?symbols=BTC,ETH&range=1H — one price-at-time series per symbol at
+// any range. 1H/1D come from the resolver's Redis buffer (≤24h, 3-min samples); 1W/1M/1Y/ALL
+// come from the daily TokenPriceSnapshot close series (retrofit-46). Auth-required, not Pro-gated
+// (read-only catalog price data — same stance as GET /tokens/:id/history).
 pricesRouter.get('/history', requireAuth, async (c) => {
-  let q: { symbols: string[]; range: '1H' | '1D' };
+  let q: HistoryQuery;
   try {
     q = historyQuerySchema.parse({
       symbols: c.req.query('symbols') ?? '',
       range: c.req.query('range') ?? '1H',
     });
   } catch {
-    return c.json(err('VALIDATION_ERROR', 'symbols required; range must be 1H or 1D'), 400);
+    return c.json(err('VALIDATION_ERROR', 'symbols required; range must be one of 1H,1D,1W,1M,1Y,ALL'), 400);
   }
   if (q.symbols.length === 0) return c.json(ok({ history: {} }), 200);
   const history = await getPriceHistory(q.symbols, q.range);

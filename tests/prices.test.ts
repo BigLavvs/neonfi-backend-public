@@ -574,3 +574,112 @@ it('r43-ep-auth: GET /prices/history no auth → 401', async () => {
   const res = await app.request(`${PRICES_BASE}/history?symbols=BTC&range=1H`);
   expect(res.status).toBe(401);
 });
+
+// ---------------------------------------------------------------------------
+// retrofit-46 — daily price history (TokenPriceSnapshot) for 1W/1M/1Y/ALL
+// ---------------------------------------------------------------------------
+
+// UTC-midnight Date for a fixed calendar day (snapshotDate is @db.Date → stored date-only).
+function utcDate(y: number, mZeroBased: number, d: number): Date {
+  return new Date(Date.UTC(y, mZeroBased, d));
+}
+
+it('r46-schema: historyQuerySchema accepts the widened daily ranges (1W/1M/1Y/ALL)', () => {
+  for (const range of ['1W', '1M', '1Y', 'ALL'] as const) {
+    expect(historyQuerySchema.parse({ symbols: 'BTC', range }).range).toBe(range);
+  }
+});
+
+it('r46-svc-daily: getPriceHistory(1Y) returns the daily-close series from TokenPriceSnapshot, ascending {t,p}; pre-window rows excluded', async () => {
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btc.id } });
+  // Fixed UTC "now" = 2026-06-18; 1Y window since = 2025-06-18. One row predates it (excluded).
+  const now = Date.UTC(2026, 5, 18);
+  await prisma.tokenPriceSnapshot.createMany({
+    data: [
+      { tokenId: btc.id, snapshotDate: utcDate(2025, 0, 1), price: '40000' }, // before since → excluded
+      { tokenId: btc.id, snapshotDate: utcDate(2026, 5, 15), price: '60000' },
+      { tokenId: btc.id, snapshotDate: utcDate(2026, 5, 16), price: '61000' },
+      { tokenId: btc.id, snapshotDate: utcDate(2026, 5, 17), price: '62000' },
+    ],
+  });
+
+  try {
+    const h = await getPriceHistory(['BTC'], '1Y', now);
+    expect(h.BTC).toEqual([
+      { t: Date.UTC(2026, 5, 15), p: 60000 },
+      { t: Date.UTC(2026, 5, 16), p: 61000 },
+      { t: Date.UTC(2026, 5, 17), p: 62000 },
+    ]); // ascending; UTC-midnight epoch ms; the 2025-01-01 row dropped
+  } finally {
+    await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btc.id } });
+  }
+});
+
+it('r46-svc-1w-window: getPriceHistory(1W) only returns snapshots within the last 7 days', async () => {
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btc.id } });
+  const now = Date.UTC(2026, 5, 18); // since(1W) = 2026-06-11
+  await prisma.tokenPriceSnapshot.createMany({
+    data: [
+      { tokenId: btc.id, snapshotDate: utcDate(2026, 5, 1), price: '50000' },  // 17d ago → excluded
+      { tokenId: btc.id, snapshotDate: utcDate(2026, 5, 12), price: '55000' }, // in 7d window
+      { tokenId: btc.id, snapshotDate: utcDate(2026, 5, 17), price: '58000' }, // in 7d window
+    ],
+  });
+
+  try {
+    const h = await getPriceHistory(['BTC'], '1W', now);
+    expect(h.BTC).toEqual([
+      { t: Date.UTC(2026, 5, 12), p: 55000 },
+      { t: Date.UTC(2026, 5, 17), p: 58000 },
+    ]);
+  } finally {
+    await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btc.id } });
+  }
+});
+
+it('r46-ep-daily: GET /prices/history?range=1Y → 200 per-symbol daily series; unknown symbol → []', async () => {
+  const cookie = await registerAndLogin();
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  const eth = await prisma.token.findUniqueOrThrow({ where: { symbol: 'ETH' } });
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: { in: [btc.id, eth.id] } } });
+
+  // Recent rows (relative to the real clock the controller uses) so they fall in the 1Y window.
+  const mid = new Date();
+  mid.setUTCHours(0, 0, 0, 0);
+  const daysAgo = (n: number): Date => {
+    const d = new Date(mid);
+    d.setUTCDate(d.getUTCDate() - n);
+    return d;
+  };
+  const d3 = daysAgo(3);
+  const d2 = daysAgo(2);
+  const d1 = daysAgo(1);
+  await prisma.tokenPriceSnapshot.createMany({
+    data: [
+      { tokenId: btc.id, snapshotDate: d3, price: '60000' },
+      { tokenId: btc.id, snapshotDate: d2, price: '61000' },
+      { tokenId: btc.id, snapshotDate: d1, price: '62000' },
+    ],
+  });
+  // ETH has no snapshots → its series is [].
+
+  try {
+    const res = await app.request(`${PRICES_BASE}/history?symbols=BTC,ETH&range=1Y`, {
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { history: Record<string, Array<{ t: number; p: number }>> };
+    };
+    expect(body.data.history.BTC).toEqual([
+      { t: d3.getTime(), p: 60000 },
+      { t: d2.getTime(), p: 61000 },
+      { t: d1.getTime(), p: 62000 },
+    ]); // ascending
+    expect(body.data.history.ETH).toEqual([]);
+  } finally {
+    await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: { in: [btc.id, eth.id] } } });
+  }
+});
