@@ -27,7 +27,7 @@ import {
 } from '../snapshots/snapshots.service.js';
 import {
   listRecentUserTransactions,
-  countUserTransactions,
+  countUserTransactionsByPortfolio,
 } from '../transactions/transactions.service.js';
 import type { OverviewDTO } from './overview.dto.js';
 
@@ -208,19 +208,32 @@ async function buildOverview(
     assetsList,
     snapshotsList,
     recentTransactions,
-    transactionCount,
+    dbTxCountByPortfolio,
     snaps24hAgo,
   ] = await Promise.all([
     Promise.all(portfolios.map((p) => computeDerived(p.id))),
     Promise.all(portfolios.map((p) => findAllAssetsByPortfolioId(p.id))),
     Promise.all(portfolios.map((p) => findAllSnapshotsAscByPortfolio(p.id))),
     listRecentUserTransactions(userId, txLimit),
-    countUserTransactions(userId),
+    // retrofit-49 (#8): per-portfolio DB tx counts. A connected portfolio shows its REAL
+    // on-chain total (externalTxCount) even though only ~100 rows are imported; manual +
+    // connected-without-a-provider-total fall back to the imported DB row count.
+    countUserTransactionsByPortfolio(userId),
     // retrofit-20: the most recent snapshot per portfolio dated ≤ now−24h (daysAgo=1,
     // i.e. the last daily close) — the same source/read the Stage-14 analytics summary
     // uses (findSnapshotNearDaysAgo), so the 24h baseline stays module-isolated.
     Promise.all(portfolios.map((p) => findSnapshotNearDaysAgo(p.id, 1))),
   ]);
+
+  // retrofit-49 (#8): Σ over the user's portfolios of the connected-wallet on-chain total
+  // (externalTxCount) when known, else the imported DB row count for that portfolio.
+  let transactionCount = 0;
+  for (const p of portfolios) {
+    transactionCount +=
+      p.type.name === 'connected' && p.externalTxCount != null
+        ? p.externalTxCount
+        : (dbTxCountByPortfolio.get(p.id) ?? 0);
+  }
 
   // ---- totals (sum the value fields, recompute aggregate %s) ----
   let totalValue = 0;

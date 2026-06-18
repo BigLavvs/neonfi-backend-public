@@ -32,9 +32,61 @@ export interface ProviderResult {
   summary?: WalletSummary; // present when status === 'ok'
 }
 
+// ---------------------------------------------------------------------------
+// Transfer history (retrofit-49)
+// ---------------------------------------------------------------------------
+
+// One on-chain movement relative to the wallet — native, ERC-20, or NFT. Several of these
+// can share a `hash` when a single tx moved more than one asset; the importer keys one
+// Transaction row per hash (the existing unique constraint), so multi-asset txs surface
+// their first leg (mirrors the webhook path).
+export interface WalletTransfer {
+  type: 'native' | 'erc20' | 'nft';
+  direction: 'in' | 'out'; // relative to the wallet
+  hash: string | null;
+  from: string | null;
+  to: string | null;
+  symbol: string | null; // null for nft
+  name: string | null;
+  contractAddress: string | null;
+  amount: number | null; // token qty (nft: 1)
+  usdValue: number | null; // historical USD at tx time when the provider gives it
+  gasFee: number | null; // native gas paid for the tx (attached to the tx's first leg only)
+  timestamp: string; // ISO, the REAL block time
+  logoUrl: string | null;
+  // nft only:
+  nftTokenId: string | null;
+  collectionName: string | null;
+}
+
+export interface TransferPage {
+  transfers: WalletTransfer[];
+  nextCursor: string | null; // null when no more
+  totalCount: number | null; // provider's total tx count for the wallet, when available (#8)
+}
+
+// A currently-held NFT (predating the transfer window) — mirrors the `Nft` table shape the
+// webhook upserts (moralis-handlers.processNftTransfers).
+export interface WalletNftHolding {
+  contractAddress: string;
+  tokenId: string;
+  name: string | null;
+  collectionName: string | null;
+  logoUrl: string | null;
+  tokenStandard: string | null;
+}
+
 export interface WalletDataProvider {
   name: string;
   isConfigured(): boolean;            // key present?
   supportsChain(chainSlug: string): boolean;
   getSummary(address: string, chainSlug: string): Promise<ProviderResult>;
+  // retrofit-49: optional real-history capability. A provider that can't supply history for
+  // a chain returns null and the orchestrator falls through to the next (Moralis first).
+  getTransferHistory?(
+    address: string,
+    chainSlug: string,
+    opts: { cursor?: string | null; limit?: number },
+  ): Promise<TransferPage | null>;
+  getNftHoldings?(address: string, chainSlug: string): Promise<WalletNftHolding[] | null>;
 }

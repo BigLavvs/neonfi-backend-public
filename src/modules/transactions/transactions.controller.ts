@@ -18,6 +18,7 @@ import {
   UpdateTransactionBodySchema,
   TransferBodySchema,
 } from './transactions.schemas.js';
+import { importMoreTransfers } from '../wallet-data/sync.js';
 
 type TxEnv = AuthEnv & { Variables: { portfolio: PortfolioWithRelations } };
 
@@ -138,6 +139,20 @@ router.get('', async (c) => {
   });
 
   return c.json(ok({ transactions: result.transactions }, result.meta), 200);
+});
+
+// ---------------------------------------------------------------------------
+// GET /portfolios/:portfolioId/transactions/sync-more  (retrofit-49 §6)
+// ---------------------------------------------------------------------------
+// "Load more": import the next page (~100) of the connected wallet's real transfers using
+// the portfolio's stored provider cursor, advance the cursor, and report what was imported.
+// Authed + ownership-gated by the middleware above. A manual portfolio (or a connected one
+// with no remaining cursor) returns { imported: 0, nextCursor: null }. Registered BEFORE the
+// dynamic GET '/:id' so the literal path isn't captured as an id.
+router.get('/sync-more', async (c) => {
+  const portfolio = c.get('portfolio');
+  const result = await importMoreTransfers(portfolio.id);
+  return c.json(ok(result), 200);
 });
 
 // ---------------------------------------------------------------------------

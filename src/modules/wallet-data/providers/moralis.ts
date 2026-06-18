@@ -6,7 +6,14 @@
 // endpoint. Network/HTTP/parse failure → { status: 'error' } (never throws out).
 
 import { CHAINS } from '../../chains/chains.constants.js';
-import type { ProviderResult, WalletDataProvider, WalletToken } from '../types.js';
+import type {
+  ProviderResult,
+  TransferPage,
+  WalletDataProvider,
+  WalletNftHolding,
+  WalletToken,
+  WalletTransfer,
+} from '../types.js';
 import { buildSummary, NATIVE_SYMBOLS } from '../build-summary.js';
 
 // slug → Moralis chain identifier (hex for EVM, 'solana' for Solana).
@@ -33,6 +40,76 @@ interface MoralisSolanaPortfolio {
     amount?: string;
     decimals?: number;
   }>;
+}
+
+// --- Wallet history endpoint (retrofit-49) -----------------------------------
+// /wallets/{address}/history returns one decoded item per tx, each carrying nested
+// native/erc20/nft transfer arrays. Every field is optional — Moralis omits prices,
+// logos, and names when it can't resolve them.
+interface MoralisHistoryNativeTransfer {
+  from_address?: string | null;
+  to_address?: string | null;
+  value_formatted?: string | null;
+  value?: string | null;
+  token_symbol?: string | null;
+  token_logo?: string | null;
+  value_usd?: number | string | null;
+}
+interface MoralisHistoryErc20Transfer {
+  from_address?: string | null;
+  to_address?: string | null;
+  value_formatted?: string | null;
+  token_symbol?: string | null;
+  token_name?: string | null;
+  address?: string | null; // token contract
+  token_logo?: string | null;
+  value_usd?: number | string | null;
+}
+interface MoralisHistoryNftTransfer {
+  from_address?: string | null;
+  to_address?: string | null;
+  token_address?: string | null;
+  token_id?: string | null;
+  token_ids?: string[] | null;
+  amount?: string | null;
+  token_name?: string | null;
+  collection_name?: string | null;
+  collection_logo?: string | null;
+  contract_type?: string | null;
+}
+interface MoralisHistoryItem {
+  hash?: string | null;
+  block_timestamp?: string | null;
+  from_address?: string | null;
+  to_address?: string | null;
+  transaction_fee?: string | null;
+  native_transfers?: MoralisHistoryNativeTransfer[] | null;
+  erc20_transfers?: MoralisHistoryErc20Transfer[] | null;
+  nft_transfers?: MoralisHistoryNftTransfer[] | null;
+}
+interface MoralisHistoryResponse {
+  result?: MoralisHistoryItem[];
+  cursor?: string | null;
+  total?: number | null;
+}
+
+// /wallets/{address}/nfts — current NFT holdings.
+interface MoralisNftHolding {
+  token_address?: string | null;
+  token_id?: string | null;
+  name?: string | null;
+  contract_type?: string | null;
+  collection_logo?: string | null;
+  normalized_metadata?: { name?: string | null; image?: string | null } | null;
+}
+interface MoralisNftHoldingsResponse {
+  result?: MoralisNftHolding[];
+}
+
+function toNum(v: number | string | null | undefined): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 export class MoralisWalletProvider implements WalletDataProvider {
@@ -147,5 +224,152 @@ export class MoralisWalletProvider implements WalletDataProvider {
 
     if (kept.length === 0) return { status: 'empty' };
     return { status: 'ok', summary: buildSummary(this.name, kept, 'SOL') };
+  }
+
+  // --- Transfer history (retrofit-49) ----------------------------------------
+  // Pulls one page of the wallet's REAL transfers (native + ERC-20 + NFT) with their block
+  // time, hash, from/to, gas, amount, and historical USD value. Solana is unsupported here
+  // (the gateway has no equivalent decoded-history endpoint) → null, so the orchestrator
+  // falls through and the sync degrades to opening-lot-only. Network/HTTP/parse failure →
+  // null (never throws): a missing history must not abort portfolio creation.
+  async getTransferHistory(
+    address: string,
+    chainSlug: string,
+    opts: { cursor?: string | null; limit?: number },
+  ): Promise<TransferPage | null> {
+    if (chainSlug === 'solana') return null;
+    const hex = CHAIN_ID.get(chainSlug);
+    if (!hex) return null;
+    const limit = opts.limit ?? 100;
+    const wallet = address.toLowerCase();
+    try {
+      const params = new URLSearchParams({ chain: hex, order: 'DESC', limit: String(limit) });
+      if (opts.cursor) params.set('cursor', opts.cursor);
+      const url = `${this.deepIndexBase}/wallets/${address}/history?${params.toString()}`;
+      const res = await fetch(url, { headers: this.headers() });
+      if (!res.ok) return null;
+      const json = (await res.json()) as MoralisHistoryResponse;
+      const items = Array.isArray(json.result) ? json.result : [];
+
+      const transfers: WalletTransfer[] = [];
+      for (const item of items) {
+        const ts = item.block_timestamp ?? new Date(0).toISOString();
+        const gas = toNum(item.transaction_fee);
+        // Attach the tx-level gas to the FIRST leg of the tx only, so summing the row gas
+        // back up equals the real fee (a tx with several transfers paid gas once).
+        let gasAttached = false;
+        const takeGas = (): number | null => {
+          if (gasAttached) return null;
+          gasAttached = true;
+          return gas;
+        };
+        const dirOf = (to: string | null | undefined): 'in' | 'out' =>
+          (to ?? '').toLowerCase() === wallet ? 'in' : 'out';
+
+        for (const t of item.native_transfers ?? []) {
+          transfers.push({
+            type: 'native',
+            direction: dirOf(t.to_address),
+            hash: item.hash ?? null,
+            from: t.from_address ?? null,
+            to: t.to_address ?? null,
+            symbol: (t.token_symbol ?? NATIVE_SYMBOLS[chainSlug] ?? '').toUpperCase() || null,
+            name: t.token_symbol ?? null,
+            contractAddress: null,
+            amount: toNum(t.value_formatted),
+            usdValue: toNum(t.value_usd),
+            gasFee: takeGas(),
+            timestamp: ts,
+            logoUrl: t.token_logo ?? null,
+            nftTokenId: null,
+            collectionName: null,
+          });
+        }
+        for (const t of item.erc20_transfers ?? []) {
+          transfers.push({
+            type: 'erc20',
+            direction: dirOf(t.to_address),
+            hash: item.hash ?? null,
+            from: t.from_address ?? null,
+            to: t.to_address ?? null,
+            symbol: (t.token_symbol ?? '').toUpperCase() || null,
+            name: t.token_name ?? t.token_symbol ?? null,
+            contractAddress: t.address ?? null,
+            amount: toNum(t.value_formatted),
+            usdValue: toNum(t.value_usd),
+            gasFee: takeGas(),
+            timestamp: ts,
+            logoUrl: t.token_logo ?? null,
+            nftTokenId: null,
+            collectionName: null,
+          });
+        }
+        for (const t of item.nft_transfers ?? []) {
+          const tokenId = t.token_id ?? (Array.isArray(t.token_ids) ? t.token_ids[0] : null) ?? null;
+          transfers.push({
+            type: 'nft',
+            direction: dirOf(t.to_address),
+            hash: item.hash ?? null,
+            from: t.from_address ?? null,
+            to: t.to_address ?? null,
+            symbol: null,
+            name: t.token_name ?? t.collection_name ?? null,
+            contractAddress: t.token_address ?? null,
+            amount: toNum(t.amount) ?? 1,
+            usdValue: null,
+            gasFee: takeGas(),
+            timestamp: ts,
+            logoUrl: t.collection_logo ?? null,
+            nftTokenId: tokenId,
+            collectionName: t.collection_name ?? null,
+          });
+        }
+      }
+
+      return {
+        transfers,
+        nextCursor: json.cursor ?? null,
+        // Moralis history doesn't always expose a cheap total; surface it when present, else
+        // null (the count falls back to the imported DB row count, §4).
+        totalCount: toNum(json.total),
+      };
+    } catch (e) {
+      console.error('[wallet-data] moralis getTransferHistory failed', (e as Error).message);
+      return null;
+    }
+  }
+
+  // --- Current NFT holdings (retrofit-49) -------------------------------------
+  // The transfer window only covers recent transfers, so NFTs acquired earlier won't appear
+  // there — pull the wallet's current NFT set directly. Solana unsupported → null.
+  async getNftHoldings(address: string, chainSlug: string): Promise<WalletNftHolding[] | null> {
+    if (chainSlug === 'solana') return null;
+    const hex = CHAIN_ID.get(chainSlug);
+    if (!hex) return null;
+    try {
+      const url = `${this.deepIndexBase}/wallets/${address}/nfts?chain=${hex}`;
+      const res = await fetch(url, { headers: this.headers() });
+      if (!res.ok) return null;
+      const json = (await res.json()) as MoralisNftHoldingsResponse;
+      const items = Array.isArray(json.result) ? json.result : [];
+      const holdings: WalletNftHolding[] = [];
+      for (const it of items) {
+        const contractAddress = (it.token_address ?? '').toLowerCase();
+        const tokenId = it.token_id ?? '';
+        if (!contractAddress || !tokenId) continue;
+        holdings.push({
+          contractAddress,
+          tokenId,
+          name: it.normalized_metadata?.name ?? it.name ?? null,
+          collectionName: it.name ?? null,
+          logoUrl: it.normalized_metadata?.image ?? it.collection_logo ?? null,
+          tokenStandard: it.contract_type ?? null,
+        });
+      }
+      return holdings;
+    } catch (e) {
+      console.error('[wallet-data] moralis getNftHoldings failed', (e as Error).message);
+      return null;
+    }
   }
 }

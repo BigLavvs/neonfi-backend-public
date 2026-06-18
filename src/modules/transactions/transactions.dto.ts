@@ -37,6 +37,10 @@ export interface TransactionListDTO {
   amount: number | null;
   symbol: string | null;
   usdValue: number | null;
+  // retrofit-49 (#6): the token's stored logo so connected (and manual) transactions can
+  // render the token image. Resolved by the service from the Token catalog by symbol and
+  // passed in; null when the symbol has no logo, for nft rows, or when not resolved.
+  logoUrl: string | null;
   // retrofit-7: free-text user note (null for webhook/connected or when omitted).
   notes: string | null;
   // retrofit-10: shared id linking the two legs of a cross-portfolio transfer (the
@@ -75,7 +79,14 @@ export interface TransactionDetailDTO extends TransactionListDTO {
   detail: NativeDetailDTO | Erc20DetailDTO | NftDetailDTO;
 }
 
-export function toTransactionListDTO(tx: TransactionWithListIncludes): TransactionListDTO {
+// retrofit-49: `logoUrl` is resolved by the service (Token catalog by symbol) and passed
+// in — the list/detail row carries no Token relation, so the mapper can't read it itself.
+// Defaults to null so the many existing callers (and write-path detail responses) compile
+// unchanged and simply omit the image.
+export function toTransactionListDTO(
+  tx: TransactionWithListIncludes,
+  logoUrl: string | null = null,
+): TransactionListDTO {
   let amount: number | null = null;
   let symbol: string | null = null;
   let usdValue: number | null = null;
@@ -104,6 +115,7 @@ export function toTransactionListDTO(tx: TransactionWithListIncludes): Transacti
     amount,
     symbol,
     usdValue,
+    logoUrl,
     notes: tx.notes ?? null,
     transferGroupId: tx.transferGroupId ?? null,
     timestamp: tx.timestamp.toISOString(),
@@ -111,8 +123,11 @@ export function toTransactionListDTO(tx: TransactionWithListIncludes): Transacti
   };
 }
 
-export function toTransactionDetailDTO(tx: TransactionWithAllRelations): TransactionDetailDTO {
-  const base = toTransactionListDTO(tx);
+export function toTransactionDetailDTO(
+  tx: TransactionWithAllRelations,
+  logoUrl: string | null = null,
+): TransactionDetailDTO {
+  const base = toTransactionListDTO(tx, logoUrl);
   let detail: NativeDetailDTO | Erc20DetailDTO | NftDetailDTO;
 
   if (tx.type.name === 'native' && tx.nativeDetail) {

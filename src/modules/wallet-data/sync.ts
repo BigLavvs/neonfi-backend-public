@@ -1,36 +1,71 @@
-// Neonfi backend — initial holdings sync for connected portfolios (retrofit-47, retrofit-48).
+// Neonfi backend — connected-portfolio history import (retrofit-47/48, reworked retrofit-49).
 //
-// Runs ONCE at connect time (createPortfolio, connected branch), best-effort: seeds the
-// wallet's CURRENT holdings so the portfolio shows them immediately. The Moralis stream
-// keeps it updated afterward — the stream only captures transfers AFTER creation, so
-// seeding the current balance now + future webhook deltas = correct (no double counting).
+// Runs ONCE at connect time (createPortfolio, connected branch), best-effort. retrofit-47
+// seeded a single synthetic "opening" buy per held token, so every connected transaction
+// showed the sync date with no hash/from/to/gas and a placeholder value. retrofit-49 replaces
+// that with the wallet's REAL transfers:
 //
-// ACCURACY FIX vs the webhook stream path (moralis-handlers skips unknown tokens to keep
-// spam airdrops out of the catalog): here the provider already gave us a real balance +
-// price and the provider layer already excluded spam/dust, so a non-catalog holding is
-// AUTO-LISTED rather than dropped — the initial sync reflects the user's real bag.
+//   1. Import the first page (~100) of real transfers (native + ERC-20 + NFT) with their REAL
+//      block time, hash, from/to, gas, amount, and historical USD value (#3, #4).
+//   2. Import current NFT holdings (which may predate the transfer window) AND NFT transfer
+//      history (#2).
+//   3. Reconcile a RESIDUAL opening lot per held token = providerCurrentBalance − netImported,
+//      dated just before the earliest imported transfer, so the displayed balance still equals
+//      the on-chain balance exactly and value history can be rebuilt from start + transactions
+//      (#7, #9). When there is NO history (Solana / empty page) this reduces to the old
+//      behaviour: the residual = the full balance → one opening lot per holding.
+//   4. Persist the provider pagination cursor + total tx count for the "load more" endpoint
+//      (#5, #8).
 //
-// retrofit-48: resolution is now contract-first (the on-chain identity) with a symbol
-// fallback, and auto-listed rows carry `contractAddress` + `autoListed: true` so the
+// The Moralis stream keeps the portfolio updated AFTER creation; this seeds the past. Every
+// step is per-item best-effort — one bad token/transfer logs and continues, and the whole sync
+// is wrapped by the caller so a failure still leaves the portfolio created.
+//
+// retrofit-48: token resolution is contract-first (the on-chain identity) with a symbol
+// fallback; auto-listed rows carry `contractAddress` + `autoListed: true` so the
 // connected-reprice job can refresh their (off-firehose) price by contract.
 
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { seedAcquisitionInTx, invalidatePnlCache } from '../transactions/transactions.service.js';
-import { fetchWalletSummary } from './index.js';
-import type { WalletToken } from './types.js';
+import { toDecimalString } from '../../lib/decimal.js';
+import {
+  seedAcquisitionInTx,
+  invalidatePnlCache,
+  createTransactionFromWebhook,
+  createNftTransactionFromWebhook,
+  TransactionError,
+} from '../transactions/transactions.service.js';
+import type { CreateTransactionBody } from '../transactions/transactions.schemas.js';
+import { findPortfolioById } from '../portfolios/portfolios.repository.js';
+import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
+import { fetchWalletSummary, fetchTransferPage, fetchNftHoldings } from './index.js';
+import type { WalletNftHolding, WalletTransfer } from './types.js';
 
-// Decimal(20,8) column scale — format without exponent notation so Prisma accepts it.
+// How many transfers to pull per page (initial sync + each "load more").
+const PAGE_LIMIT = 100;
+// Below this the residual is float noise / dust — don't seed a reconciling lot for it.
+const RESIDUAL_EPSILON = 1e-8;
+
+// Decimal(20,8) column scale for PRICES (kept at full 8-dp, unlike trimmed amounts).
 function dec8(n: number): string {
   return n.toFixed(8);
+}
+
+interface TokenResolveInput {
+  symbol: string;
+  name: string | null;
+  contractAddress: string | null;
+  usdPrice: number | null;
+  logoUrl?: string | null;
 }
 
 // Resolve a wallet token to its catalog row, auto-listing it when no row exists.
 //
 // `symbol` stays the UNIQUE catalog key (re-keying to (symbol, contract) is out of scope),
 // so there is still exactly one row per ticker. `contractAddress` makes resolution PRECISE:
-// we match on the on-chain identity first and only fall back to the ticker.
-async function resolveOrCreateToken(t: WalletToken) {
+// we match on the on-chain identity first and only fall back to the ticker. retrofit-49 also
+// backfills a missing `logoUrl` from the provider so transactions can render the token image.
+async function resolveOrCreateToken(t: TokenResolveInput) {
   const symbol = t.symbol.toUpperCase();
   // Lower-case EVM contracts to match the wallet-validator's normalization; Solana mints are
   // case-sensitive but arrive already-normalized from the provider, so .toLowerCase() is a
@@ -75,6 +110,10 @@ async function resolveOrCreateToken(t: WalletToken) {
         });
       }
     }
+    // retrofit-49: backfill a missing logo from the provider (never overwrite an existing one).
+    if (token.logoUrl == null && t.logoUrl) {
+      token = await prisma.token.update({ where: { id: token.id }, data: { logoUrl: t.logoUrl } });
+    }
     return token;
   }
 
@@ -90,7 +129,7 @@ async function resolveOrCreateToken(t: WalletToken) {
         name: t.name ?? t.symbol,
         currentPrice: t.usdPrice != null ? dec8(t.usdPrice) : '0',
         rank: null,
-        logoUrl: null,
+        logoUrl: t.logoUrl ?? null,
         autoListed: true,
         contractAddress: contract,
       },
@@ -106,54 +145,327 @@ async function resolveOrCreateToken(t: WalletToken) {
   }
 }
 
+function isDuplicateHash(e: unknown): boolean {
+  return e instanceof TransactionError && e.code === 'TRANSACTION_HASH_DUPLICATE';
+}
+
+// Import one native/erc20 transfer as a real transaction. direction: in→buy, out→sell.
+// amount/gas trimmed to Decimal(20,8); usdValue is the provider's HISTORICAL value at tx time
+// (override). Returns true when a row was created, false when the hash was already imported
+// (dedupe via the unique constraint — also how a multi-asset tx's extra legs collapse).
+async function importFungibleTransfer(
+  portfolio: PortfolioWithRelations,
+  tr: WalletTransfer,
+): Promise<boolean> {
+  if (!tr.symbol) return false;
+  const token = await resolveOrCreateToken({
+    symbol: tr.symbol,
+    name: tr.name,
+    contractAddress: tr.contractAddress,
+    usdPrice: null, // history carries no per-unit price; valuation comes from usdValue
+    logoUrl: tr.logoUrl,
+  });
+
+  const direction = tr.direction === 'in' ? 'buy' : 'sell';
+  const amount = toDecimalString(tr.amount);
+  const gasFee = tr.gasFee != null ? toDecimalString(tr.gasFee) : null;
+
+  const body: CreateTransactionBody =
+    tr.type === 'native'
+      ? {
+          type: 'native',
+          direction,
+          amount,
+          symbol: token.symbol,
+          timestamp: tr.timestamp,
+          ...(tr.hash ? { transactionHash: tr.hash } : {}),
+          from: tr.from,
+          to: tr.to,
+          gasFee,
+        }
+      : {
+          type: 'erc20',
+          direction,
+          amount,
+          symbol: token.symbol,
+          tokenContractAddress: tr.contractAddress ?? '',
+          tokenName: tr.name ?? token.symbol,
+          tokenSymbol: tr.symbol,
+          timestamp: tr.timestamp,
+          ...(tr.hash ? { transactionHash: tr.hash } : {}),
+          from: tr.from,
+          to: tr.to,
+          gasFee,
+        };
+
+  try {
+    await createTransactionFromWebhook({ portfolio, body, usdValueOverride: tr.usdValue });
+    return true;
+  } catch (e) {
+    if (isDuplicateHash(e)) return false;
+    throw e;
+  }
+}
+
+// Import one NFT transfer: maintain the Nft holdings row (upsert on in, delete on out —
+// both idempotent) AND record the transfer as an nft transaction (skip on duplicate hash).
+async function importNftTransfer(
+  portfolio: PortfolioWithRelations,
+  tr: WalletTransfer,
+): Promise<boolean> {
+  const contract = (tr.contractAddress ?? '').toLowerCase();
+  const tokenId = tr.nftTokenId ?? '';
+  if (!contract || !tokenId) return false;
+  const chainSlug = portfolio.chain?.slug ?? '';
+
+  if (tr.direction === 'in') {
+    await prisma.nft.upsert({
+      where: {
+        portfolioId_contractAddress_tokenId: { portfolioId: portfolio.id, contractAddress: contract, tokenId },
+      },
+      create: {
+        portfolioId: portfolio.id,
+        contractAddress: contract,
+        tokenId,
+        name: tr.name ?? null,
+        collectionName: tr.collectionName ?? null,
+        logoUrl: tr.logoUrl ?? null,
+        chain: chainSlug,
+      },
+      update: {
+        ...(tr.logoUrl ? { logoUrl: tr.logoUrl } : {}),
+        ...(tr.name ? { name: tr.name } : {}),
+      },
+    });
+  } else {
+    await prisma.nft.deleteMany({
+      where: { portfolioId: portfolio.id, contractAddress: contract, tokenId },
+    });
+  }
+
+  try {
+    await createNftTransactionFromWebhook({
+      portfolio,
+      body: {
+        direction: tr.direction === 'in' ? 'buy' : 'sell',
+        tokenContractAddress: contract,
+        nftTokenId: tokenId,
+        ...(tr.name ? { nftName: tr.name } : {}),
+        ...(tr.collectionName ? { collectionName: tr.collectionName } : {}),
+        timestamp: tr.timestamp,
+        ...(tr.hash ? { transactionHash: tr.hash } : {}),
+        from: tr.from,
+        to: tr.to,
+        gasFee: tr.gasFee != null ? toDecimalString(tr.gasFee) : null,
+      },
+    });
+    return true;
+  } catch (e) {
+    if (isDuplicateHash(e)) return false;
+    throw e;
+  }
+}
+
+// Import a page of transfers oldest→newest (so balances build forward). Per-item best-effort.
+// Returns the number of transactions actually created (excludes duplicates/errors).
+async function importTransfers(
+  portfolio: PortfolioWithRelations,
+  transfers: WalletTransfer[],
+): Promise<number> {
+  // The provider returns DESC (newest first); replay oldest→newest.
+  const ordered = [...transfers].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  let imported = 0;
+  for (const tr of ordered) {
+    try {
+      const did =
+        tr.type === 'nft'
+          ? await importNftTransfer(portfolio, tr)
+          : await importFungibleTransfer(portfolio, tr);
+      if (did) imported += 1;
+    } catch (e) {
+      console.error('[wallet-sync] transfer import failed', { hash: tr.hash, type: tr.type }, (e as Error).message);
+    }
+  }
+  return imported;
+}
+
+// Upsert the wallet's CURRENT NFT holdings (predating the transfer window). Per-item best-effort.
+async function importNftHoldings(
+  portfolio: PortfolioWithRelations,
+  holdings: WalletNftHolding[],
+): Promise<void> {
+  const chainSlug = portfolio.chain?.slug ?? '';
+  for (const h of holdings) {
+    try {
+      await prisma.nft.upsert({
+        where: {
+          portfolioId_contractAddress_tokenId: {
+            portfolioId: portfolio.id,
+            contractAddress: h.contractAddress,
+            tokenId: h.tokenId,
+          },
+        },
+        create: {
+          portfolioId: portfolio.id,
+          contractAddress: h.contractAddress,
+          tokenId: h.tokenId,
+          name: h.name,
+          collectionName: h.collectionName,
+          logoUrl: h.logoUrl,
+          chain: chainSlug,
+          tokenStandard: h.tokenStandard,
+        },
+        update: {
+          ...(h.logoUrl ? { logoUrl: h.logoUrl } : {}),
+          ...(h.name ? { name: h.name } : {}),
+        },
+      });
+    } catch (e) {
+      console.error('[wallet-sync] nft holding import failed', { contract: h.contractAddress, tokenId: h.tokenId }, (e as Error).message);
+    }
+  }
+}
+
+// Reconcile each held token's balance to the on-chain truth: residual = providerBalance −
+// (balance built from the imported transfers). When the residual is meaningful, seed ONE
+// opening lot for it (the "starting balance"), dated just before the earliest import so the
+// chart can rebuild value from start + transactions. With no transfers the residual is the
+// full balance, so this degrades to one opening lot per holding (the retrofit-47 behaviour).
+async function reconcileOpeningLots(
+  portfolioId: number,
+  held: Array<{ tokenId: number; symbol: string; balance: number; usdPrice: number | null }>,
+  openingAt: Date,
+): Promise<void> {
+  for (const h of held) {
+    try {
+      const asset = await prisma.asset.findUnique({
+        where: { portfolioId_tokenId: { portfolioId, tokenId: h.tokenId } },
+      });
+      const current = asset ? Number(asset.balance.toString()) : 0;
+      const residual = h.balance - current;
+      if (residual <= RESIDUAL_EPSILON) continue;
+
+      await prisma.$transaction(
+        async (tx) => {
+          await tx.asset.upsert({
+            where: { portfolioId_tokenId: { portfolioId, tokenId: h.tokenId } },
+            update: {},
+            create: { portfolioId, tokenId: h.tokenId },
+          });
+          await seedAcquisitionInTx(tx, {
+            portfolioId,
+            tokenId: h.tokenId,
+            symbol: h.symbol,
+            amount: toDecimalString(residual),
+            timestamp: openingAt.toISOString(),
+            ...(h.usdPrice != null ? { priceAtTime: dec8(h.usdPrice) } : {}),
+          });
+        },
+        { timeout: 15000 },
+      );
+    } catch (e) {
+      console.error('[wallet-sync] opening-lot reconcile failed', { symbol: h.symbol }, (e as Error).message);
+    }
+  }
+}
+
 export async function syncConnectedHoldings(
   portfolioId: number,
   address: string,
   chain: { slug: string },
 ): Promise<void> {
-  const summary = await fetchWalletSummary(address, chain);
-  if (!summary || summary.tokens.length === 0) return;
+  // Need the full portfolio (type + chain) for the webhook-style transaction writes.
+  const portfolio = await findPortfolioById(portfolioId);
+  if (!portfolio) return;
 
-  let seededAny = false;
-  for (const t of summary.tokens) {
+  // Current balances (for reconciliation) + the first page of real history, in parallel.
+  const [summary, page] = await Promise.all([
+    fetchWalletSummary(address, chain),
+    fetchTransferPage(address, chain, { limit: PAGE_LIMIT }),
+  ]);
+
+  // Pass 1: pre-resolve every held token (creates catalog rows with price/contract/logo) and
+  // record the held list BEFORE importing transfers, so a transfer for an auto-listed token
+  // resolves to a row that already carries the right price. Per-token best-effort.
+  const held: Array<{ tokenId: number; symbol: string; balance: number; usdPrice: number | null }> = [];
+  for (const t of summary?.tokens ?? []) {
     if (!(t.balance > 0) || !t.symbol) continue;
     try {
-      // Resolve OR auto-create the catalog Token (contract-first, symbol fallback). An
-      // existing catalog row is left untouched for name/price/rank (the catalog is
-      // authoritative); only a missing contract is backfilled onto it.
-      const token = await resolveOrCreateToken(t);
-
-      // Seed an opening position for the current balance via the shared acquisition seed
-      // (native buy). priceAtTime = the provider's per-unit price ⇒ cost basis ≈ current
-      // value ⇒ unrealized PnL starts ≈ 0; omit when the provider couldn't price it.
-      // Each token's seed is its own atomic $transaction so one bad token can't abort the
-      // rest. The asset is upserted first because seedAcquisitionInTx recalcs an EXISTING
-      // asset row.
-      await prisma.$transaction(
-        async (tx) => {
-          await tx.asset.upsert({
-            where: { portfolioId_tokenId: { portfolioId, tokenId: token.id } },
-            update: {},
-            create: { portfolioId, tokenId: token.id },
-          });
-          await seedAcquisitionInTx(tx, {
-            portfolioId,
-            tokenId: token.id,
-            symbol: token.symbol,
-            amount: dec8(t.balance),
-            ...(t.usdPrice != null ? { priceAtTime: dec8(t.usdPrice) } : {}),
-          });
-        },
-        { timeout: 15000 },
-      );
-      seededAny = true;
+      const token = await resolveOrCreateToken({
+        symbol: t.symbol,
+        name: t.name,
+        contractAddress: t.contractAddress,
+        usdPrice: t.usdPrice,
+      });
+      held.push({ tokenId: token.id, symbol: token.symbol, balance: t.balance, usdPrice: t.usdPrice });
     } catch (e) {
-      // Per-token failure: log & continue — one bad token must not abort the rest.
-      console.error('[wallet-sync] token seed failed', { symbol: t.symbol }, (e as Error).message);
+      console.error('[wallet-sync] token resolve failed', { symbol: t.symbol }, (e as Error).message);
     }
   }
 
-  // Mirror the manual-create seeding path: recalc happens inside seedAcquisitionInTx;
-  // flush the derived PnL/analytics caches once after the loop.
-  if (seededAny) await invalidatePnlCache(portfolioId);
+  // Pass 2: import the real transfer history (native + erc20 + nft transactions + Nft rows).
+  const transfers = page?.transfers ?? [];
+  await importTransfers(portfolio, transfers);
+
+  // Pass 3: import the wallet's current NFT holdings (may predate the transfer window).
+  const nftHoldings = await fetchNftHoldings(address, chain);
+  if (nftHoldings && nftHoldings.length > 0) await importNftHoldings(portfolio, nftHoldings);
+
+  // Pass 4: reconcile the residual opening lots, dated just before the earliest import.
+  const earliest = transfers.reduce<number | null>((min, tr) => {
+    const ts = Date.parse(tr.timestamp);
+    return Number.isFinite(ts) && (min === null || ts < min) ? ts : min;
+  }, null);
+  const openingAt = earliest !== null ? new Date(earliest - 1000) : new Date();
+  if (held.length > 0) await reconcileOpeningLots(portfolioId, held, openingAt);
+
+  // Pass 5: persist the cursor + provider total for the "load more" endpoint (#5/#8).
+  await prisma.portfolio.update({
+    where: { id: portfolioId },
+    data: { syncCursor: page?.nextCursor ?? null, externalTxCount: page?.totalCount ?? null },
+  });
+
+  // Flush the derived PnL/analytics caches once after the whole sync.
+  await invalidatePnlCache(portfolioId);
+}
+
+// retrofit-49 §6: import the NEXT page of transfers for a connected portfolio (the frontend's
+// "Load more"). Reads the stored cursor, imports the page exactly like the initial sync's
+// transfer pass (same resolution/trim/dedupe), advances the cursor, and returns the count +
+// the next cursor. A manual portfolio, a missing wallet, or a null cursor (no more / done) →
+// { imported: 0, nextCursor: null }. NOTE: this does NOT re-reconcile the opening lot — older
+// transfers are already folded into the residual seeded at connect time, so they appear in the
+// activity feed without re-deriving the starting balance (a full re-reconcile is future work).
+export async function importMoreTransfers(
+  portfolioId: number,
+): Promise<{ imported: number; nextCursor: string | null }> {
+  const portfolio = await findPortfolioById(portfolioId);
+  if (
+    !portfolio ||
+    portfolio.type.name !== 'connected' ||
+    !portfolio.walletAddress ||
+    !portfolio.chain ||
+    !portfolio.syncCursor
+  ) {
+    return { imported: 0, nextCursor: null };
+  }
+
+  const page = await fetchTransferPage(
+    portfolio.walletAddress,
+    { slug: portfolio.chain.slug },
+    { cursor: portfolio.syncCursor, limit: PAGE_LIMIT },
+  );
+  if (!page) {
+    // Provider can't continue — clear the cursor so the UI stops offering "load more".
+    await prisma.portfolio.update({ where: { id: portfolioId }, data: { syncCursor: null } });
+    return { imported: 0, nextCursor: null };
+  }
+
+  const imported = await importTransfers(portfolio, page.transfers);
+  await prisma.portfolio.update({
+    where: { id: portfolioId },
+    data: { syncCursor: page.nextCursor ?? null },
+  });
+  if (imported > 0) await invalidatePnlCache(portfolioId);
+  return { imported, nextCursor: page.nextCursor ?? null };
 }

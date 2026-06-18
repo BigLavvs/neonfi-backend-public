@@ -10,7 +10,12 @@
 
 import { config } from '../../lib/config.js';
 import { validateWalletAddress } from '../portfolios/wallet-validator.js';
-import type { WalletDataProvider, WalletSummary } from './types.js';
+import type {
+  TransferPage,
+  WalletDataProvider,
+  WalletNftHolding,
+  WalletSummary,
+} from './types.js';
 import { MoralisWalletProvider } from './providers/moralis.js';
 import { GoldRushWalletProvider } from './providers/goldrush.js';
 import { AlchemyWalletProvider } from './providers/alchemy.js';
@@ -60,4 +65,39 @@ export async function fetchWalletSummary(
 ): Promise<WalletSummary | null> {
   const p = await previewWallet(address, chain, providers);
   return p.summary ?? null;
+}
+
+// retrofit-49: real transfer-history import. Returns the first configured provider's
+// non-null history page (Moralis first — primary + richest); a provider that doesn't
+// implement getTransferHistory, isn't configured, doesn't support the chain, or returns
+// null is skipped. null overall = no provider can supply history (e.g. Solana) → the sync
+// degrades to opening-lot-only. The address is assumed already validated/normalized (the
+// connected portfolio stored its normalized walletAddress at create time).
+export async function fetchTransferPage(
+  address: string,
+  chain: { slug: string },
+  opts: { cursor?: string | null; limit?: number },
+  providers: WalletDataProvider[] = PROVIDERS,
+): Promise<TransferPage | null> {
+  for (const p of providers) {
+    if (!p.isConfigured() || !p.supportsChain(chain.slug) || !p.getTransferHistory) continue;
+    const page = await p.getTransferHistory(address, chain.slug, opts);
+    if (page) return page;
+  }
+  return null;
+}
+
+// retrofit-49: current NFT holdings (predating the transfer window). Same first-non-null
+// fall-through as fetchTransferPage.
+export async function fetchNftHoldings(
+  address: string,
+  chain: { slug: string },
+  providers: WalletDataProvider[] = PROVIDERS,
+): Promise<WalletNftHolding[] | null> {
+  for (const p of providers) {
+    if (!p.isConfigured() || !p.supportsChain(chain.slug) || !p.getNftHoldings) continue;
+    const holdings = await p.getNftHoldings(address, chain.slug);
+    if (holdings) return holdings;
+  }
+  return null;
 }

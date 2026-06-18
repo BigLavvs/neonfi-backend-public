@@ -24,6 +24,9 @@ vi.mock('../src/lib/moralis-streams-client.js', () => ({
 // wallet-data.test.ts / wallet-preview.test.ts).
 vi.mock('../src/modules/wallet-data/sync.js', () => ({
   syncConnectedHoldings: vi.fn().mockResolvedValue(undefined),
+  // retrofit-49: transactions.controller imports this from sync.js; stub it so the mocked
+  // module is complete (these create tests never hit the sync-more endpoint).
+  importMoreTransfers: vi.fn().mockResolvedValue({ imported: 0, nextCursor: null }),
 }));
 
 vi.mock('../src/modules/email/email.service.js', () => ({

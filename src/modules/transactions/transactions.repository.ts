@@ -95,6 +95,20 @@ export async function countTransactionsForUser(userId: number): Promise<number> 
   return prisma.transaction.count({ where: { portfolio: { userId } } });
 }
 
+// retrofit-49 (#8): DB transaction count grouped per portfolio for all the user's
+// portfolios, in one round-trip. The Overview uses this as the per-portfolio fallback for
+// portfolios that aren't connected or have no provider-reported externalTxCount.
+export async function countTransactionsByPortfolioForUser(
+  userId: number,
+): Promise<Map<number, number>> {
+  const grouped = await prisma.transaction.groupBy({
+    by: ['portfolioId'],
+    where: { portfolio: { userId } },
+    _count: { _all: true },
+  });
+  return new Map(grouped.map((g) => [g.portfolioId, g._count._all]));
+}
+
 interface CreateTransactionData {
   portfolioId: number;
   typeId: number;

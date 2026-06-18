@@ -9,6 +9,7 @@
 import { it, beforeEach, afterAll, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { redis } from '../src/lib/redis.js';
 import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 vi.mock('../src/lib/moralis-streams-client.js', () => ({
@@ -21,15 +22,21 @@ vi.mock('../src/modules/email/email.service.js', () => ({
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
 }));
 
-// Controllable read-side provider chain. The controller imports previewWallet and
-// syncConnectedHoldings imports fetchWalletSummary — both from this module.
-const { previewWalletMock, fetchWalletSummaryMock } = vi.hoisted(() => ({
-  previewWalletMock: vi.fn(),
-  fetchWalletSummaryMock: vi.fn(),
-}));
+// Controllable read-side provider chain. The controller imports previewWallet; the sync
+// (sync.ts) imports fetchWalletSummary + fetchTransferPage + fetchNftHoldings — all from
+// this module, so mock all four (retrofit-49 added the history + nft-holdings reads).
+const { previewWalletMock, fetchWalletSummaryMock, fetchTransferPageMock, fetchNftHoldingsMock } =
+  vi.hoisted(() => ({
+    previewWalletMock: vi.fn(),
+    fetchWalletSummaryMock: vi.fn(),
+    fetchTransferPageMock: vi.fn(),
+    fetchNftHoldingsMock: vi.fn(),
+  }));
 vi.mock('../src/modules/wallet-data/index.js', () => ({
   previewWallet: previewWalletMock,
   fetchWalletSummary: fetchWalletSummaryMock,
+  fetchTransferPage: fetchTransferPageMock,
+  fetchNftHoldings: fetchNftHoldingsMock,
 }));
 
 const AUTH_BASE = '/api/v1/auth';
@@ -72,15 +79,33 @@ async function portPost(path: string, body: Record<string, unknown>, cookie: str
   });
 }
 
+function syncMoreGet(portfolioId: number, cookie: string): Promise<Response> {
+  return app.request(`${PORT_BASE}/${portfolioId}/transactions/sync-more`, {
+    headers: { Cookie: cookie },
+  });
+}
+
+function overviewGet(cookie: string): Promise<Response> {
+  return app.request('/api/v1/overview', { headers: { Cookie: cookie } });
+}
+
 beforeEach(async () => {
   // truncate first (clears assets so the auto-listed token has no FK refs), then drop the
   // auto-listed token so each run re-creates it from scratch.
   await truncateAllUserData();
   await prisma.token.deleteMany({ where: { symbol: { in: SYNC_TEST_SYMBOLS } } });
   await clearRedisAuthKeys();
+  // truncateAllUserData flushes portfolio_pnl/analytics but not overview:* — clear it so the
+  // overview count test (416) can't get a stale per-user hit (userIds repeat after truncate).
+  const overviewKeys = await redis.keys('overview:*');
+  if (overviewKeys.length > 0) await redis.del(overviewKeys);
   previewWalletMock.mockReset();
   fetchWalletSummaryMock.mockReset();
+  fetchTransferPageMock.mockReset();
+  fetchNftHoldingsMock.mockReset();
   fetchWalletSummaryMock.mockResolvedValue(null); // default: connected create seeds nothing
+  fetchTransferPageMock.mockResolvedValue(null); // default: no transfer history
+  fetchNftHoldingsMock.mockResolvedValue(null); // default: no current nft holdings
 });
 
 afterAll(async () => {
@@ -343,4 +368,191 @@ it('410: a same-ticker / different-contract collision maps to the existing row +
     expect.objectContaining({ symbol: 'ZZCOLLIDE48', existing: '0xaaa111', incoming: '0xbbb222' }),
   );
   warn.mockRestore();
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-49 — real transfer-history import + NFT + sync-more + overview count
+// ---------------------------------------------------------------------------
+
+it('413: connected create imports REAL transfers + reconciles a residual opening lot to the on-chain balance', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const catalog = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
+
+  // The wallet currently holds 5 (provider summary); history shows +2.1234567891 in, -0.5 out.
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: catalog.symbol, nativeBalance: 5, totalUsd: 5000, tokenCount: 1,
+    tokens: [{ symbol: catalog.symbol, name: catalog.name, contractAddress: null, balance: 5, decimals: 18, usdPrice: 1000, usdValue: 5000, isNative: true }],
+    provider: 'moralis',
+  });
+  fetchTransferPageMock.mockResolvedValue({
+    transfers: [
+      // intentionally newest-first (provider returns DESC) — the importer replays oldest→newest
+      { type: 'native', direction: 'out', hash: '0xbbb413', from: '0xwallet413', to: '0xrecv413', symbol: catalog.symbol, name: catalog.name, contractAddress: null, amount: 0.5, usdValue: 600, gasFee: null, timestamp: '2026-01-12T00:00:00.000Z', logoUrl: null, nftTokenId: null, collectionName: null },
+      { type: 'native', direction: 'in', hash: '0xaaa413', from: '0xsender413', to: '0xwallet413', symbol: catalog.symbol, name: catalog.name, contractAddress: null, amount: 2.1234567891, usdValue: 2000, gasFee: 0.005, timestamp: '2026-01-10T00:00:00.000Z', logoUrl: null, nftTokenId: null, collectionName: null },
+    ],
+    nextCursor: 'CURSOR2', totalCount: 42,
+  });
+
+  const res = await portPost('', { name: 'Real History', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(res.status).toBe(201);
+  const portfolioId = (await res.json()).data.portfolio.id as number;
+
+  // Two imported transfers + one reconciling opening lot = 3 transactions.
+  const txns = await prisma.transaction.findMany({
+    where: { portfolioId },
+    include: { nativeDetail: true, direction: true, type: true },
+    orderBy: { timestamp: 'asc' },
+  });
+  expect(txns).toHaveLength(3);
+
+  // The 'in' transfer kept its REAL hash / from / to / timestamp / gas / historical usdValue.
+  const inTx = txns.find((t) => t.transactionHash === '0xaaa413')!;
+  expect(inTx).toBeDefined();
+  expect(inTx.direction.name).toBe('buy');
+  expect(inTx.from).toBe('0xsender413');
+  expect(inTx.to).toBe('0xwallet413');
+  expect(inTx.timestamp.toISOString()).toBe('2026-01-10T00:00:00.000Z');
+  expect(Number(inTx.gasFee)).toBe(0.005);
+  expect(Number(inTx.nativeDetail!.usdValue)).toBe(2000);
+  // amount trimmed to Decimal(20,8): 2.1234567891 → 2.12345679 (≤ 8 dp, no overflow).
+  expect(inTx.nativeDetail!.amount.toString()).toBe('2.12345679');
+
+  const outTx = txns.find((t) => t.transactionHash === '0xbbb413')!;
+  expect(outTx.direction.name).toBe('sell');
+
+  // The opening lot is the third tx (no hash) dated BEFORE the earliest import.
+  const opening = txns.find((t) => t.transactionHash === null)!;
+  expect(opening.direction.name).toBe('buy');
+  expect(opening.timestamp.getTime()).toBeLessThan(new Date('2026-01-10T00:00:00.000Z').getTime());
+
+  // Reconciled balance == provider current balance (residual lot makes it exact).
+  const asset = await prisma.asset.findFirstOrThrow({ where: { portfolioId, tokenId: catalog.id } });
+  expect(Number(asset.balance)).toBeCloseTo(5, 6);
+
+  // Cursor + provider total persisted for "load more" / the overview count.
+  const portfolio = await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } });
+  expect(portfolio.syncCursor).toBe('CURSOR2');
+  expect(portfolio.externalTxCount).toBe(42);
+});
+
+it('414: an NFT transfer creates an nft transaction + an Nft row; current NFT holdings imported', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: 'ETH', nativeBalance: 0, totalUsd: null, tokenCount: 0, tokens: [], provider: 'moralis',
+  });
+  fetchTransferPageMock.mockResolvedValue({
+    transfers: [
+      { type: 'nft', direction: 'in', hash: '0xnft414', from: '0xsender414', to: '0xwallet414', symbol: null, name: 'Cool Ape #7', contractAddress: '0xNFTCONTRACT414', amount: 1, usdValue: null, gasFee: null, timestamp: '2026-02-01T00:00:00.000Z', logoUrl: 'http://img/7', nftTokenId: '7', collectionName: 'Cool Apes' },
+    ],
+    nextCursor: null, totalCount: null,
+  });
+  // A current holding that predates the transfer window.
+  fetchNftHoldingsMock.mockResolvedValue([
+    { contractAddress: '0xheldcontract414', tokenId: '99', name: 'Held One', collectionName: 'Held Coll', logoUrl: 'http://img/99', tokenStandard: 'ERC721' },
+  ]);
+
+  const res = await portPost('', { name: 'NFT Wallet', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(res.status).toBe(201);
+  const portfolioId = (await res.json()).data.portfolio.id as number;
+
+  // The NFT transfer is recorded as an nft-type transaction.
+  const nftTx = await prisma.transaction.findFirstOrThrow({
+    where: { portfolioId, transactionHash: '0xnft414' },
+    include: { nftDetail: true, type: true, direction: true },
+  });
+  expect(nftTx.type.name).toBe('nft');
+  expect(nftTx.direction.name).toBe('buy');
+  expect(nftTx.nftDetail!.tokenContractAddress).toBe('0xnftcontract414');
+  expect(nftTx.nftDetail!.nftTokenId).toBe('7');
+
+  // Two Nft holdings rows: the received-in-window NFT + the current-holdings NFT.
+  const nfts = await prisma.nft.findMany({ where: { portfolioId }, orderBy: { contractAddress: 'asc' } });
+  expect(nfts.map((n) => [n.contractAddress, n.tokenId])).toEqual([
+    ['0xheldcontract414', '99'],
+    ['0xnftcontract414', '7'],
+  ]);
+});
+
+it('415: sync-more imports the next page using the stored cursor and advances/clears it', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const catalog = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
+
+  const page2 = {
+    transfers: [
+      { type: 'native', direction: 'in', hash: '0xpage2tx', from: '0xolder', to: '0xwallet415', symbol: catalog.symbol, name: catalog.name, contractAddress: null, amount: 1, usdValue: 100, gasFee: null, timestamp: '2025-12-01T00:00:00.000Z', logoUrl: null, nftTokenId: null, collectionName: null },
+    ],
+    nextCursor: null as string | null, totalCount: null as number | null,
+  };
+  const page1 = { transfers: [] as unknown[], nextCursor: 'CURSOR2' as string | null, totalCount: null as number | null };
+  // Initial sync (cursor undefined) → page1 (just sets the cursor); sync-more (cursor CURSOR2) → page2.
+  fetchTransferPageMock.mockImplementation(async (_addr: string, _chain: unknown, opts: { cursor?: string | null }) =>
+    opts.cursor === 'CURSOR2' ? page2 : page1,
+  );
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: catalog.symbol, nativeBalance: 1, totalUsd: 1000, tokenCount: 1,
+    tokens: [{ symbol: catalog.symbol, name: catalog.name, contractAddress: null, balance: 1, decimals: 18, usdPrice: 1000, usdValue: 1000, isNative: true }],
+    provider: 'moralis',
+  });
+
+  const created = await portPost('', { name: 'Paged Wallet', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  const portfolioId = (await created.json()).data.portfolio.id as number;
+  // Initial sync stored the cursor.
+  expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } })).syncCursor).toBe('CURSOR2');
+
+  const before = await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xpage2tx' } });
+  expect(before).toBe(0);
+
+  const res = await syncMoreGet(portfolioId, cookie);
+  expect(res.status).toBe(200);
+  const body = (await res.json()).data;
+  expect(body).toEqual({ imported: 1, nextCursor: null });
+
+  // The older transfer is now imported and the cursor cleared (no more pages).
+  expect(await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xpage2tx' } })).toBe(1);
+  expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } })).syncCursor).toBeNull();
+});
+
+it('416: overview transactionCount uses externalTxCount for connected, DB count for manual', async () => {
+  const { cookie, userId } = await registerAndLogin();
+  // Upgrade to Pro so the user can hold both a connected and a manual portfolio.
+  const pro = await prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } });
+  await prisma.subscription.update({ where: { userId }, data: { planId: pro.id } });
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const catalog = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
+
+  // Connected: empty history page but a provider total of 137; sync still seeds ONE opening lot.
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: catalog.symbol, nativeBalance: 2, totalUsd: 2000, tokenCount: 1,
+    tokens: [{ symbol: catalog.symbol, name: catalog.name, contractAddress: null, balance: 2, decimals: 18, usdPrice: 1000, usdValue: 2000, isNative: true }],
+    provider: 'moralis',
+  });
+  fetchTransferPageMock.mockResolvedValue({ transfers: [], nextCursor: null, totalCount: 137 });
+
+  const conn = await portPost('', { name: 'Conn 416', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(conn.status).toBe(201);
+  const connId = (await conn.json()).data.portfolio.id as number;
+  // The connected portfolio actually has 1 DB tx (the opening lot) — but externalTxCount wins.
+  expect(await prisma.transaction.count({ where: { portfolioId: connId } })).toBe(1);
+  expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: connId } })).externalTxCount).toBe(137);
+
+  // Manual: seed 3 bare transaction rows → DB count = 3 (no externalTxCount).
+  const manual = await portPost('', { name: 'Manual 416', type: 'manual' }, cookie);
+  const manualId = (await manual.json()).data.portfolio.id as number;
+  const nativeType = await prisma.transactionType.findUniqueOrThrow({ where: { name: 'native' } });
+  const buyDir = await prisma.transactionDirection.findUniqueOrThrow({ where: { name: 'buy' } });
+  for (let i = 0; i < 3; i++) {
+    await prisma.transaction.create({
+      data: { portfolioId: manualId, typeId: nativeType.id, directionId: buyDir.id, timestamp: new Date('2026-03-01T00:00:00.000Z') },
+    });
+  }
+
+  const res = await overviewGet(cookie);
+  expect(res.status).toBe(200);
+  const d = (await res.json()).data;
+  // 137 (connected external total) + 3 (manual DB rows) = 140 — NOT 1 + 3.
+  expect(d.totals.transactionCount).toBe(140);
 });

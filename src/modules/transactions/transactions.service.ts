@@ -21,6 +21,7 @@ import {
   countTransactions,
   listRecentTransactionsForUser,
   countTransactionsForUser,
+  countTransactionsByPortfolioForUser,
   type ListTransactionsFilter,
 } from './transactions.repository.js';
 import {
@@ -36,6 +37,7 @@ import type {
 } from './transactions.schemas.js';
 import { recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
 import { computeUsdValue } from './usd-value.js';
+import { toDecimalString } from '../../lib/decimal.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 
 // PnL/analytics cache invalidation (retrofit-2 §1.6; extended Stage 14 §1.9). Build
@@ -282,8 +284,13 @@ export async function createTransaction(
 export async function createTransactionFromWebhook(params: {
   portfolio: PortfolioWithRelations;
   body: CreateTransactionBody;
+  // retrofit-49: a historical USD value supplied by the provider's transfer history. When
+  // present (≥ 0) it drives usdValue directly (the REAL value at tx time) instead of the
+  // current-price computeUsdValue lookup. Trimmed to Decimal(20,8). The live webhook path
+  // omits it and keeps the current-price behaviour unchanged.
+  usdValueOverride?: number | null;
 }): Promise<TransactionDetailDTO> {
-  const { portfolio, body } = params;
+  const { portfolio, body, usdValueOverride } = params;
 
   const [typeRow, directionRow] = await Promise.all([
     prisma.transactionType.findUniqueOrThrow({ where: { name: body.type } }),
@@ -305,9 +312,13 @@ export async function createTransactionFromWebhook(params: {
 
   // USD value at write-time for balance-affecting types (retrofit-2 §1.3).
   // Webhooks only ever produce native/erc20 transfers (NFTs are handled separately).
+  // retrofit-49: a provided historical usdValueOverride wins over the current-price lookup.
   let usdValue: string | null = null;
   if (body.type === 'native' || body.type === 'erc20') {
-    usdValue = await computeUsdValue(body.symbol, body.amount);
+    usdValue =
+      usdValueOverride != null
+        ? toDecimalString(usdValueOverride)
+        : await computeUsdValue(body.symbol, body.amount);
   }
 
   const newTxId = await prisma.$transaction(
@@ -379,6 +390,74 @@ export async function createTransactionFromWebhook(params: {
   const full = await findTransactionById(newTxId);
   if (!full) throw new Error('Transaction not found after creation');
   return toTransactionDetailDTO(full);
+}
+
+// ---------------------------------------------------------------------------
+// NFT transaction from import (retrofit-49)
+// ---------------------------------------------------------------------------
+
+// Writes an `nft`-type transaction for an imported NFT transfer (connected-wallet history
+// import, wallet-data/sync.ts). The Nft *holdings* row is managed separately by the caller
+// (the holdings table is portfolio-owned, like the webhook NFT path) — this only records the
+// transfer as a transaction so it appears in the activity feed. NFTs carry no amount/usdValue
+// and never touch Asset balances, so there is NO recalc and NO PnL-cache invalidation.
+// Dedupe: a duplicate transactionHash (the leg was already imported, OR another leg of the
+// same multi-asset tx already claimed the hash) surfaces as TRANSACTION_HASH_DUPLICATE for
+// the caller to skip — mirrors createTransactionFromWebhook.
+export async function createNftTransactionFromWebhook(params: {
+  portfolio: PortfolioWithRelations;
+  body: {
+    direction: 'buy' | 'sell';
+    tokenContractAddress: string;
+    nftTokenId: string;
+    nftName?: string;
+    collectionName?: string;
+    timestamp: string;
+    transactionHash?: string;
+    from?: string | null;
+    to?: string | null;
+    gasFee?: string | null;
+  };
+}): Promise<void> {
+  const { portfolio, body } = params;
+  const [typeRow, directionRow] = await Promise.all([
+    prisma.transactionType.findUniqueOrThrow({ where: { name: 'nft' } }),
+    prisma.transactionDirection.findUniqueOrThrow({ where: { name: body.direction } }),
+  ]);
+
+  await prisma.$transaction(
+    async (tx) => {
+      let created: { id: number };
+      try {
+        created = await createTransactionRow(tx, {
+          portfolioId: portfolio.id,
+          typeId: typeRow.id,
+          directionId: directionRow.id,
+          from: body.from ?? null,
+          to: body.to ?? null,
+          gasFee: body.gasFee ?? null,
+          transactionHash: body.transactionHash,
+          timestamp: new Date(body.timestamp),
+        });
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          throw new TransactionError(
+            409,
+            'TRANSACTION_HASH_DUPLICATE',
+            'A transaction with this hash already exists',
+          );
+        }
+        throw e;
+      }
+      await createNftDetail(tx, created.id, {
+        tokenContractAddress: body.tokenContractAddress,
+        nftTokenId: body.nftTokenId,
+        nftName: body.nftName,
+        collectionName: body.collectionName,
+      });
+    },
+    { timeout: 15000 },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +672,33 @@ export async function createCrossPortfolioTransfer(
 // GET list
 // ---------------------------------------------------------------------------
 
+// retrofit-49 (#6): resolve each row's token logo from the Token catalog by symbol, in a
+// single `IN` query, then map symbol → logoUrl. nft rows (no symbol) get null. Returns the
+// mapper input so a row with no matching catalog entry simply renders without an image.
+async function buildLogoMap(
+  rows: Array<{ nativeDetail?: { symbol: string } | null; erc20Detail?: { symbol: string } | null }>,
+): Promise<Map<string, string | null>> {
+  const symbols = new Set<string>();
+  for (const r of rows) {
+    const s = r.nativeDetail?.symbol ?? r.erc20Detail?.symbol;
+    if (s) symbols.add(s);
+  }
+  if (symbols.size === 0) return new Map();
+  const tokens = await prisma.token.findMany({
+    where: { symbol: { in: [...symbols] } },
+    select: { symbol: true, logoUrl: true },
+  });
+  return new Map(tokens.map((t) => [t.symbol, t.logoUrl]));
+}
+
+function logoFor(
+  row: { nativeDetail?: { symbol: string } | null; erc20Detail?: { symbol: string } | null },
+  logoMap: Map<string, string | null>,
+): string | null {
+  const s = row.nativeDetail?.symbol ?? row.erc20Detail?.symbol;
+  return s ? (logoMap.get(s) ?? null) : null;
+}
+
 export async function listPortfolioTransactions(
   portfolio: PortfolioWithRelations,
   filters: ListTransactionsFilter,
@@ -601,8 +707,9 @@ export async function listPortfolioTransactions(
     listTransactions(portfolio.id, filters),
     countTransactions(portfolio.id, filters.type),
   ]);
+  const logoMap = await buildLogoMap(transactions);
   return {
-    transactions: transactions.map(toTransactionListDTO),
+    transactions: transactions.map((t) => toTransactionListDTO(t, logoFor(t, logoMap))),
     meta: { limit: filters.limit, offset: filters.offset, total },
   };
 }
@@ -621,11 +728,18 @@ export async function listRecentUserTransactions(
   limit: number,
 ): Promise<TransactionListDTO[]> {
   const rows = await listRecentTransactionsForUser(userId, limit);
-  return rows.map(toTransactionListDTO);
+  const logoMap = await buildLogoMap(rows);
+  return rows.map((t) => toTransactionListDTO(t, logoFor(t, logoMap)));
 }
 
 export function countUserTransactions(userId: number): Promise<number> {
   return countTransactionsForUser(userId);
+}
+
+// retrofit-49 (#8): per-portfolio DB tx counts for the Overview's transactionCount, which
+// blends these with each connected portfolio's provider-reported externalTxCount.
+export function countUserTransactionsByPortfolio(userId: number): Promise<Map<number, number>> {
+  return countTransactionsByPortfolioForUser(userId);
 }
 
 // ---------------------------------------------------------------------------
