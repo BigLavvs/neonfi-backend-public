@@ -21,14 +21,17 @@ import { computeDerived } from '../portfolios/derive.js';
 import { findPortfoliosByUserId } from '../portfolios/portfolios.repository.js';
 import { slugify } from '../portfolios/slug.js';
 import { findAllAssetsByPortfolioId } from '../assets/assets.repository.js';
-import {
-  findAllSnapshotsAscByPortfolio,
-  findSnapshotNearDaysAgo,
-} from '../snapshots/snapshots.service.js';
+import type { AssetWithToken } from '../assets/assets.dto.js';
+import { findSnapshotNearDaysAgo } from '../snapshots/snapshots.service.js';
 import {
   listRecentUserTransactions,
   countUserTransactions,
 } from '../transactions/transactions.service.js';
+import {
+  findUserTokenTxEvents,
+  type TokenTxEvent,
+} from '../transactions/transactions.repository.js';
+import { findBulkTokenPriceSnapshotsSince } from '../tokens/tokens.repository.js';
 import type { OverviewDTO } from './overview.dto.js';
 
 const CACHE_TTL_S = 60;
@@ -99,6 +102,7 @@ function emptyOverview(): OverviewAggregate {
     allocation: [],
     holdings: [],
     recentTransactions: [],
+    markers: [],
   };
 }
 
@@ -201,19 +205,21 @@ async function buildOverview(
     return emptyOverview();
   }
 
-  // 2-5. Fetch per-portfolio derived numbers, assets, and snapshots in parallel, plus
-  //      the cross-portfolio recent txs + count. derive.ts is already Redis-cached.
+  // 2-5. Fetch per-portfolio derived numbers, assets, and cross-portfolio data in parallel.
+  //      retrofit-45: snapshotsList/findAllSnapshotsAscByPortfolio replaced by tx events
+  //      + bulk price history for the transaction-aware reconstruction. Price snapshots
+  //      need tokenIds from assetsList, so they run in a second sequential step below.
   const [
     derivedList,
     assetsList,
-    snapshotsList,
+    txEvents,
     recentTransactions,
     transactionCount,
     snaps24hAgo,
   ] = await Promise.all([
     Promise.all(portfolios.map((p) => computeDerived(p.id))),
     Promise.all(portfolios.map((p) => findAllAssetsByPortfolioId(p.id))),
-    Promise.all(portfolios.map((p) => findAllSnapshotsAscByPortfolio(p.id))),
+    findUserTokenTxEvents(userId),
     listRecentUserTransactions(userId, txLimit),
     countUserTransactions(userId),
     // retrofit-20: the most recent snapshot per portfolio dated ≤ now−24h (daysAgo=1,
@@ -221,6 +227,34 @@ async function buildOverview(
     // uses (findSnapshotNearDaysAgo), so the 24h baseline stays module-isolated.
     Promise.all(portfolios.map((p) => findSnapshotNearDaysAgo(p.id, 1))),
   ]);
+
+  // Build the `days`-length UTC date axis (oldest→newest) and fetch TokenPriceSnapshots
+  // for all held tokens starting from the first day in the axis.
+  const allAssets = assetsList.flat();
+  const tokenIds = [...new Set(allAssets.map((a) => a.tokenId))];
+  const now = new Date();
+  const axis: string[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setUTCDate(d.getUTCDate() - i);
+    axis.push(d.toISOString().slice(0, 10));
+  }
+  const rangeStart = new Date(`${axis[0]!}T00:00:00.000Z`);
+  const priceSnapRows = await findBulkTokenPriceSnapshotsSince(tokenIds, rangeStart);
+
+  // priceByToken: Map<tokenId, sorted ASC list of {ymd, price}> — from the bulk query.
+  const priceByToken = new Map<number, Array<{ ymd: string; price: number }>>();
+  for (const row of priceSnapRows) {
+    const ymd = row.snapshotDate.toISOString().slice(0, 10);
+    const list = priceByToken.get(row.tokenId) ?? [];
+    list.push({ ymd, price: row.price });
+    priceByToken.set(row.tokenId, list);
+  }
+  // currentPriceByToken: fallback when no snapshot exists for a day.
+  const currentPriceByToken = new Map<number, number>();
+  for (const a of allAssets) {
+    currentPriceByToken.set(a.tokenId, Number(a.token.currentPrice.toString()));
+  }
 
   // ---- totals (sum the value fields, recompute aggregate %s) ----
   let totalValue = 0;
@@ -373,8 +407,13 @@ async function buildOverview(
     })
     .sort((a, b) => a.symbol.localeCompare(b.symbol));
 
-  // ---- value history (aggregate chart, forward-filled) ----
-  const valueHistory = buildValueHistory(snapshotsList, days);
+  // ---- value history + markers (transaction-aware reconstruction, retrofit-45) ----
+  const valueHistory = buildReconstructedValueHistory(
+    allAssets, txEvents, priceByToken, currentPriceByToken, axis,
+  );
+  const markers = buildTransactionMarkers(
+    allAssets, txEvents, priceByToken, currentPriceByToken, rangeStart,
+  );
 
   return {
     totals: {
@@ -395,46 +434,161 @@ async function buildOverview(
     allocation,
     holdings,
     recentTransactions,
+    markers,
   };
 }
 
-// Aggregate per-portfolio snapshot series into one chart series. For each kept date,
-// sum each portfolio's most recent snapshot value ON OR BEFORE that date (forward-fill);
-// a portfolio with no snapshot yet contributes 0. This keeps the total from dipping when
-// a newer portfolio simply has fewer points than an older one.
-function buildValueHistory(
-  snapshotsList: Array<Array<{ snapshotDate: Date; value: { toString(): string } }>>,
-  days: number,
-): Array<{ date: string; value: number }> {
-  // Per-portfolio [date, value] arrays, ASC by date (the repo already orders ASC).
-  const series = snapshotsList.map((snaps) =>
-    snaps.map((s) => ({
-      date: s.snapshotDate.toISOString().slice(0, 10),
-      value: Number(s.value.toString()),
-    })),
-  );
+// ---- Value history + marker helpers (retrofit-45) ----------------------------------
+//
+// Both builders share the same per-token running-balance walk: opening lots seed the
+// starting balance; sorted buy/sell events advance it chronologically. The price at any
+// given UTC calendar day is the most recent TokenPriceSnapshot on/before that day (or
+// Token.currentPrice when no snapshot exists). Walk is O(events + days) per token via
+// advancing cursors (never restarting per day).
 
-  const allDates = new Set<string>();
-  for (const s of series) {
-    for (const point of s) allDates.add(point.date);
+type PriceMap = Map<number, Array<{ ymd: string; price: number }>>;
+type CurrPriceMap = Map<number, number>;
+
+function buildOpeningByToken(allAssets: AssetWithToken[]): Map<number, number> {
+  const m = new Map<number, number>();
+  for (const a of allAssets) {
+    m.set(a.tokenId, (m.get(a.tokenId) ?? 0) + Number(a.openingBalance.toString()));
   }
-  if (allDates.size === 0) return [];
+  return m;
+}
 
-  // YYYY-MM-DD sorts lexicographically == chronologically. Keep only the last `days`.
-  const keptDates = [...allDates].sort().slice(-days);
+function buildSymbolToTokenId(allAssets: AssetWithToken[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const a of allAssets) m.set(a.token.symbol, a.tokenId);
+  return m;
+}
 
-  return keptDates.map((date) => {
-    let sum = 0;
-    for (const s of series) {
-      // Most recent value on/before `date`. Series is ASC, so the last point with
-      // point.date <= date wins; once we pass `date` we can stop.
-      let v = 0;
-      for (const point of s) {
-        if (point.date <= date) v = point.value;
-        else break;
-      }
-      sum += v;
+// Look up the most recent snapshot price on/before `ymd`. `list` is sorted ASC.
+function priceAt(list: Array<{ ymd: string; price: number }>, ymd: string, fallback: number): number {
+  let p: number | undefined;
+  for (const snap of list) {
+    if (snap.ymd <= ymd) p = snap.price;
+    else break;
+  }
+  return p ?? fallback;
+}
+
+function buildReconstructedValueHistory(
+  allAssets: AssetWithToken[],
+  events: TokenTxEvent[],
+  priceByToken: PriceMap,
+  currentPriceByToken: CurrPriceMap,
+  axis: string[],
+): Array<{ date: string; value: number }> {
+  if (axis.length === 0 || allAssets.length === 0) return [];
+
+  const openingByToken = buildOpeningByToken(allAssets);
+  const symbolToTokenId = buildSymbolToTokenId(allAssets);
+  const allTokenIds = [...openingByToken.keys()];
+  if (allTokenIds.length === 0) return [];
+
+  // Group events by tokenId (events already sorted ASC by query).
+  const eventsByToken = new Map<number, TokenTxEvent[]>();
+  for (const e of events) {
+    const tokenId = symbolToTokenId.get(e.symbol);
+    if (tokenId === undefined) continue;
+    const list = eventsByToken.get(tokenId) ?? [];
+    list.push(e);
+    eventsByToken.set(tokenId, list);
+  }
+
+  // Per-token advancing cursors (O(events + days) total).
+  const balCursors = new Map(allTokenIds.map((id) => [id, openingByToken.get(id) ?? 0]));
+  const evtCursors = new Map(allTokenIds.map((id) => [id, 0]));
+  const pricePtrs = new Map(allTokenIds.map((id) => [id, 0]));
+
+  const result: Array<{ date: string; value: number }> = [];
+
+  for (const day of axis) {
+    // Advance price pointers: keep ptr pointing past last snapshot ≤ day.
+    for (const tokenId of allTokenIds) {
+      const list = priceByToken.get(tokenId) ?? [];
+      let ptr = pricePtrs.get(tokenId) ?? 0;
+      while (ptr < list.length && list[ptr]!.ymd <= day) ptr++;
+      pricePtrs.set(tokenId, ptr);
     }
-    return { date, value: round(sum) };
-  });
+
+    // Apply all events whose UTC date is on/before this day.
+    for (const tokenId of allTokenIds) {
+      const evts = eventsByToken.get(tokenId);
+      if (!evts) continue;
+      let idx = evtCursors.get(tokenId) ?? 0;
+      let bal = balCursors.get(tokenId) ?? 0;
+      while (idx < evts.length && evts[idx]!.ts.toISOString().slice(0, 10) <= day) {
+        const e = evts[idx]!;
+        bal += e.dir === 'buy' ? e.amount : -e.amount;
+        idx++;
+      }
+      evtCursors.set(tokenId, idx);
+      balCursors.set(tokenId, bal);
+    }
+
+    let dayValue = 0;
+    for (const tokenId of allTokenIds) {
+      const bal = balCursors.get(tokenId) ?? 0;
+      const list = priceByToken.get(tokenId) ?? [];
+      const ptr = pricePtrs.get(tokenId) ?? 0;
+      const price = ptr > 0 ? list[ptr - 1]!.price : (currentPriceByToken.get(tokenId) ?? 0);
+      dayValue += bal * price;
+    }
+    result.push({ date: day, value: round(dayValue) });
+  }
+
+  return result;
+}
+
+function buildTransactionMarkers(
+  allAssets: AssetWithToken[],
+  events: TokenTxEvent[],
+  priceByToken: PriceMap,
+  currentPriceByToken: CurrPriceMap,
+  rangeStart: Date,
+): OverviewDTO['markers'] {
+  if (allAssets.length === 0) return [];
+
+  const openingByToken = buildOpeningByToken(allAssets);
+  const symbolToTokenId = buildSymbolToTokenId(allAssets);
+  const allTokenIds = [...openingByToken.keys()];
+
+  const balCursors = new Map(allTokenIds.map((id) => [id, openingByToken.get(id) ?? 0]));
+  const rangeStartYmd = rangeStart.toISOString().slice(0, 10);
+
+  const markers: OverviewDTO['markers'] = [];
+
+  for (const e of events) {
+    const tokenId = symbolToTokenId.get(e.symbol);
+    if (tokenId === undefined) continue;
+
+    // Always advance the running balance (even pre-range events affect later values).
+    const cur = balCursors.get(tokenId) ?? 0;
+    balCursors.set(tokenId, e.dir === 'buy' ? cur + e.amount : cur - e.amount);
+
+    const eventYmd = e.ts.toISOString().slice(0, 10);
+    // Emit marker only for in-range, non-transfer-leg events.
+    if (eventYmd < rangeStartYmd || e.transferGroupId !== null) continue;
+
+    // valueAfter: Σ(balance × price at eventYmd) right after this event.
+    let valueAfter = 0;
+    for (const tid of allTokenIds) {
+      const fallback = currentPriceByToken.get(tid) ?? 0;
+      const price = priceAt(priceByToken.get(tid) ?? [], eventYmd, fallback);
+      valueAfter += (balCursors.get(tid) ?? 0) * price;
+    }
+
+    markers.push({
+      timestamp: e.ts.toISOString(),
+      direction: e.dir,
+      symbol: e.symbol,
+      usdValue: e.usdValue,
+      valueAfter: round(valueAfter),
+    });
+  }
+
+  // Cap to 500 newest, return newest-first.
+  return markers.slice(-500).reverse();
 }

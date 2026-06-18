@@ -87,6 +87,14 @@ interface OverviewData {
     realizedPnl: number;
   }>;
   recentTransactions: Array<{ id: number; portfolioId: number; timestamp: string }>;
+  // retrofit-45: per-transaction chart markers, newest-first.
+  markers: Array<{
+    timestamp: string;
+    direction: string;
+    symbol: string;
+    usdValue: number;
+    valueAfter: number;
+  }>;
   topMovers: Array<{ symbol: string; name: string; change24h: number; spark: number[] }>;
 }
 
@@ -228,6 +236,76 @@ async function seedNativeTx(
   });
 }
 
+// retrofit-45 reconstruction helpers --------------------------------------------------
+
+// 'YYYY-MM-DD' for `n` whole days before now (UTC). The reconstruction axis is anchored
+// to the real clock (last `days` UTC days ending today), so reconstruction tests MUST
+// derive their dates from now — NOT hardcode them (mirrors test 390's ymd25hAgo).
+function ymdDaysAgo(n: number): string {
+  return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// An asset whose OPENING lot (the reconstruction's starting balance) is set explicitly.
+// `balance` (the live field, irrelevant to the reconstruction) defaults to openingBalance.
+async function seedAssetWithOpening(
+  portfolioId: number,
+  tokenId: number,
+  openingBalance: number,
+  balance?: number,
+): Promise<void> {
+  await prisma.asset.create({
+    data: {
+      portfolioId,
+      tokenId,
+      balance: (balance ?? openingBalance).toString(),
+      openingBalance: openingBalance.toString(),
+    },
+  });
+}
+
+// A daily global price row (the reconstruction's per-day price source; carries forward).
+async function seedTokenPriceSnapshot(tokenId: number, ymd: string, price: number): Promise<void> {
+  await prisma.tokenPriceSnapshot.create({
+    data: { tokenId, snapshotDate: new Date(`${ymd}T00:00:00.000Z`), price: price.toString() },
+  });
+}
+
+// A native buy/sell with an explicit amount/usdValue/timestamp (and optional transfer
+// group). Drives the reconstruction's event stream. Timestamp is fixed at noon UTC of
+// `ymd` so its UTC calendar date is unambiguous.
+async function seedTokenTx(
+  portfolioId: number,
+  opts: {
+    ymd: string;
+    direction: 'buy' | 'sell';
+    amount: number;
+    usdValue: number;
+    symbol?: string;
+    transferGroupId?: string;
+  },
+): Promise<void> {
+  const [typeRow, dirRow] = await Promise.all([
+    prisma.transactionType.findUniqueOrThrow({ where: { name: 'native' } }),
+    prisma.transactionDirection.findUniqueOrThrow({ where: { name: opts.direction } }),
+  ]);
+  await prisma.transaction.create({
+    data: {
+      portfolioId,
+      typeId: typeRow.id,
+      directionId: dirRow.id,
+      timestamp: new Date(`${opts.ymd}T12:00:00.000Z`),
+      ...(opts.transferGroupId ? { transferGroupId: opts.transferGroupId } : {}),
+      nativeDetail: {
+        create: {
+          amount: opts.amount.toString(),
+          symbol: opts.symbol ?? 'BTC',
+          usdValue: opts.usdValue.toString(),
+        },
+      },
+    },
+  });
+}
+
 function overviewGet(cookies?: string, query = ''): Promise<Response> {
   return app.request(`${OVERVIEW_BASE}${query}`, {
     method: 'GET',
@@ -251,6 +329,10 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await prisma.balanceSnapshot.deleteMany({});
+  // retrofit-45: token_price_snapshot is a GLOBAL catalog table (not user data, so
+  // truncateAllUserData leaves it). The reconstruction reads it — clear so a row seeded
+  // by a prior test (or another file) can't bleed a price into the value series.
+  await prisma.tokenPriceSnapshot.deleteMany({});
   await truncateAllUserData();
   await clearRedisAuthKeys();
   // truncateAllUserData flushes portfolio_pnl/analytics caches but not overview:* —
@@ -269,6 +351,7 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await prisma.balanceSnapshot.deleteMany({});
+  await prisma.tokenPriceSnapshot.deleteMany({});
 });
 
 // ---------------------------------------------------------------------------
@@ -301,6 +384,7 @@ it('371: empty user (no portfolios) → 200, all totals 0, all arrays empty (NOT
   expect(d.allocation).toEqual([]);
   expect(d.holdings).toEqual([]);
   expect(d.recentTransactions).toEqual([]);
+  expect(d.markers).toEqual([]); // retrofit-45
 });
 
 // ---------------------------------------------------------------------------
@@ -361,55 +445,166 @@ it('372: aggregates totals, merges allocation/holdings by symbol, per-portfolio 
 });
 
 // ---------------------------------------------------------------------------
-// 373 — value-history forward-fill (aggregate chart)
+// 373 — reconstructed value history steps on buy/sell (retrofit-45, replaces the
+//       old BalanceSnapshot forward-fill). Opening lot + a buy + a sell, valued at
+//       that day's TokenPriceSnapshot, must STEP up on the buy day and down on the sell.
 // ---------------------------------------------------------------------------
 
-it('373: valueHistory forward-fills each portfolio across the union of snapshot dates', async () => {
+it('373: valueHistory reconstructs actual holdings — steps up on the buy, down on the sell', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const p1 = await createManualPortfolio(userId, 'P1');
-  const p2 = await createManualPortfolio(userId, 'P2');
-  // P1 has snapshots on 06-10 and 06-12; P2 only on 06-11.
-  await seedSnapshot(p1, userId, '2026-06-10', 100);
-  await seedSnapshot(p1, userId, '2026-06-12', 120);
-  await seedSnapshot(p2, userId, '2026-06-11', 50);
+  // Opening BTC lot of 1.0; a +1.0 buy 4 days ago; a -0.5 sell 2 days ago.
+  await seedAssetWithOpening(p1, btcId, 1.0);
+  await seedTokenTx(p1, { ymd: ymdDaysAgo(4), direction: 'buy', amount: 1.0, usdValue: 100 });
+  await seedTokenTx(p1, { ymd: ymdDaysAgo(2), direction: 'sell', amount: 0.5, usdValue: 55 });
+  // One price snapshot 6 days ago = 100 carries forward across the whole window.
+  await seedTokenPriceSnapshot(btcId, ymdDaysAgo(6), 100);
 
   const res = await overviewGet(cookies);
   expect(res.status).toBe(200);
   const d = await getData(res);
 
-  // Union dates asc: 06-10, 06-11, 06-12.
-  // 06-10: P1=100, P2 has no snapshot on/before → 0           => 100
-  // 06-11: P1 forward-fills its 06-10 value (100), P2=50      => 150
-  // 06-12: P1=120, P2 forward-fills its 06-11 value (50)      => 170
+  // Reconstructed balance × 100 on each key day (carry-forward price):
+  //   6d ago: 1.0 (opening, pre-buy)            → 100
+  //   4d ago: 2.0 (after +1.0 buy)              → 200
+  //   2d ago: 1.5 (after −0.5 sell)             → 150
+  //   today : 1.5 (no later events)             → 150
+  const at = (n: number) => d.valueHistory.find((p) => p.date === ymdDaysAgo(n));
+  expect(at(6)).toEqual({ date: ymdDaysAgo(6), value: 100 });
+  expect(at(4)).toEqual({ date: ymdDaysAgo(4), value: 200 });
+  expect(at(2)).toEqual({ date: ymdDaysAgo(2), value: 150 });
+  expect(at(0)).toEqual({ date: ymdDaysAgo(0), value: 150 });
+});
+
+// ---------------------------------------------------------------------------
+// 374 — ?days=N clamps the axis to the last N days, AND pre-window events still
+//       seed the starting balance (the reconstruction never "forgets" earlier txs).
+// ---------------------------------------------------------------------------
+
+it('374: ?days=3 returns exactly 3 days; events before the window still count toward balance', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const p1 = await createManualPortfolio(userId, 'P1');
+  await seedAssetWithOpening(p1, btcId, 1.0);
+  // The 4d-ago buy is fully OUTSIDE the 3-day window (window = last 3 days: 2d,1d,today);
+  // the 2d-ago sell lands on the window edge. Both must still seed the balance.
+  await seedTokenTx(p1, { ymd: ymdDaysAgo(4), direction: 'buy', amount: 1.0, usdValue: 100 });
+  await seedTokenTx(p1, { ymd: ymdDaysAgo(2), direction: 'sell', amount: 0.5, usdValue: 55 });
+  // Price snapshot must be WITHIN the fetched window (the bulk fetch is snapshotDate >=
+  // rangeStart, per spec), so seed it at the window start; it carries forward across all 3.
+  await seedTokenPriceSnapshot(btcId, ymdDaysAgo(2), 100);
+
+  const res = await overviewGet(cookies, '?days=3');
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // Window = [2d, 1d, today]. By the first day (2d ago) BOTH events have applied →
+  // balance 1.0 + 1.0 − 0.5 = 1.5 → 150, flat across the 3 days.
   expect(d.valueHistory).toEqual([
-    { date: '2026-06-10', value: 100 },
-    { date: '2026-06-11', value: 150 },
-    { date: '2026-06-12', value: 170 },
+    { date: ymdDaysAgo(2), value: 150 },
+    { date: ymdDaysAgo(1), value: 150 },
+    { date: ymdDaysAgo(0), value: 150 },
   ]);
 });
 
 // ---------------------------------------------------------------------------
-// 374 — days window clamps the chart to the last N dates
+// r45a — markers: one entry per buy/sell, newest-first, with valueAfter = the
+//        reconstructed total right AFTER the tx at that day's price.
 // ---------------------------------------------------------------------------
 
-it('374: ?days=2 keeps only the last two snapshot dates (forward-fill preserved)', async () => {
+it('r45a: markers carry direction/symbol/usdValue + reconstructed valueAfter, newest-first', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const p1 = await createManualPortfolio(userId, 'P1');
+  await seedAssetWithOpening(p1, btcId, 1.0);
+  await seedTokenTx(p1, { ymd: ymdDaysAgo(4), direction: 'buy', amount: 1.0, usdValue: 100 });
+  await seedTokenTx(p1, { ymd: ymdDaysAgo(2), direction: 'sell', amount: 0.5, usdValue: 55 });
+  await seedTokenPriceSnapshot(btcId, ymdDaysAgo(6), 100);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // Newest-first: the 2d-ago sell, then the 4d-ago buy.
+  expect(d.markers).toHaveLength(2);
+  expect(d.markers[0]).toEqual({
+    timestamp: `${ymdDaysAgo(2)}T12:00:00.000Z`,
+    direction: 'sell',
+    symbol: 'BTC',
+    usdValue: 55,
+    valueAfter: 150, // balance 1.5 × 100
+  });
+  expect(d.markers[1]).toEqual({
+    timestamp: `${ymdDaysAgo(4)}T12:00:00.000Z`,
+    direction: 'buy',
+    symbol: 'BTC',
+    usdValue: 100,
+    valueAfter: 200, // balance 2.0 × 100
+  });
+});
+
+// ---------------------------------------------------------------------------
+// r45b — a token with NO price snapshot on a day falls back to Token.currentPrice.
+// ---------------------------------------------------------------------------
+
+it('r45b: a held token with no snapshots values at Token.currentPrice (fallback)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const p1 = await createManualPortfolio(userId, 'P1');
+  // Opening 2.0 BTC, NO TokenPriceSnapshot rows → every day falls back to the seeded
+  // catalog currentPrice (BTC 93000). No events → balance is flat 2.0 across the axis.
+  await seedAssetWithOpening(p1, btcId, 2.0);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // Today's point uses the currentPrice fallback: 2.0 × 93000 = 186000.
+  expect(d.valueHistory.at(-1)).toEqual({ date: ymdDaysAgo(0), value: 186000 });
+  // Flat (no events, single carry-forward price) across the whole series.
+  expect(d.valueHistory.every((p) => p.value === 186000)).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// r45c — transfer-group legs MOVE balance (so they net to zero in the aggregate
+//        series across portfolios) but are EXCLUDED from markers.
+// ---------------------------------------------------------------------------
+
+it('r45c: transfer legs net-zero in the series and are excluded from markers', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const p1 = await createManualPortfolio(userId, 'P1');
   const p2 = await createManualPortfolio(userId, 'P2');
-  await seedSnapshot(p1, userId, '2026-06-10', 100);
-  await seedSnapshot(p1, userId, '2026-06-12', 120);
-  await seedSnapshot(p2, userId, '2026-06-11', 50);
+  // Aggregate opening BTC = 2.0 (all in P1; P2 holds the token at 0 so it's in scope).
+  await seedAssetWithOpening(p1, btcId, 2.0);
+  await seedAssetWithOpening(p2, btcId, 0.0);
+  // A real (non-transfer) +0.5 buy 4 days ago → appears in markers.
+  await seedTokenTx(p1, { ymd: ymdDaysAgo(4), direction: 'buy', amount: 0.5, usdValue: 50 });
+  // A cross-portfolio transfer 2 days ago: −1.0 from P1, +1.0 into P2 (same group).
+  await seedTokenTx(p1, { ymd: ymdDaysAgo(2), direction: 'sell', amount: 1.0, usdValue: 100, transferGroupId: 'grp-1' });
+  await seedTokenTx(p2, { ymd: ymdDaysAgo(2), direction: 'buy', amount: 1.0, usdValue: 100, transferGroupId: 'grp-1' });
+  await seedTokenPriceSnapshot(btcId, ymdDaysAgo(6), 100);
 
-  const res = await overviewGet(cookies, '?days=2');
+  const res = await overviewGet(cookies);
   expect(res.status).toBe(200);
   const d = await getData(res);
 
-  expect(d.valueHistory).toEqual([
-    { date: '2026-06-11', value: 150 },
-    { date: '2026-06-12', value: 170 },
-  ]);
+  const at = (n: number) => d.valueHistory.find((p) => p.date === ymdDaysAgo(n));
+  // 6d: 2.0 → 200; 4d: 2.5 (after +0.5 buy) → 250; 2d: still 2.5 (transfer nets 0) → 250.
+  expect(at(6)).toEqual({ date: ymdDaysAgo(6), value: 200 });
+  expect(at(4)).toEqual({ date: ymdDaysAgo(4), value: 250 });
+  expect(at(2)).toEqual({ date: ymdDaysAgo(2), value: 250 });
+
+  // Only the non-transfer buy surfaces as a marker; both grp-1 legs are excluded.
+  expect(d.markers).toHaveLength(1);
+  expect(d.markers[0]).toEqual({
+    timestamp: `${ymdDaysAgo(4)}T12:00:00.000Z`,
+    direction: 'buy',
+    symbol: 'BTC',
+    usdValue: 50,
+    valueAfter: 250, // aggregate balance 2.5 × 100
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -207,3 +207,51 @@ export async function updateNftDetail(
 export async function deleteTransactionRow(tx: TxClient, id: number): Promise<void> {
   await tx.transaction.delete({ where: { id } });
 }
+
+// retrofit-45: cross-portfolio buy/sell event stream for the overview reconstruction.
+// Returns all buy/sell events (native + erc20, NFT excluded) across every portfolio the
+// user owns, sorted ASC by timestamp then id (same tie-break as recalc). Transfer-group
+// legs (transferGroupId != null) are included here — the balance reconstruction applies
+// them; the markers builder skips them separately.
+export interface TokenTxEvent {
+  symbol: string;
+  dir: 'buy' | 'sell';
+  amount: number;
+  usdValue: number;
+  ts: Date;
+  portfolioId: number;
+  transferGroupId: string | null;
+}
+
+export async function findUserTokenTxEvents(userId: number): Promise<TokenTxEvent[]> {
+  const rows = await prisma.transaction.findMany({
+    where: {
+      portfolio: { userId },
+      direction: { name: { in: ['buy', 'sell'] } },
+      OR: [{ nativeDetail: { isNot: null } }, { erc20Detail: { isNot: null } }],
+    },
+    select: {
+      id: true,
+      portfolioId: true,
+      transferGroupId: true,
+      timestamp: true,
+      direction: { select: { name: true } },
+      nativeDetail: { select: { symbol: true, amount: true, usdValue: true } },
+      erc20Detail: { select: { symbol: true, amount: true, usdValue: true } },
+    },
+    orderBy: [{ timestamp: 'asc' }, { id: 'asc' }],
+  });
+
+  return rows.map((row) => {
+    const detail = (row.nativeDetail ?? row.erc20Detail)!;
+    return {
+      symbol: detail.symbol,
+      dir: row.direction.name as 'buy' | 'sell',
+      amount: Number(detail.amount.toString()),
+      usdValue: Number(detail.usdValue.toString()),
+      ts: row.timestamp,
+      portfolioId: row.portfolioId,
+      transferGroupId: row.transferGroupId,
+    };
+  });
+}
