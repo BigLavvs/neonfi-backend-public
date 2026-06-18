@@ -74,17 +74,6 @@ export interface OverviewDTO {
     realizedPnl: number;
   }>;
   recentTransactions: TransactionListDTO[]; // most recent `txLimit`, desc by timestamp
-  // retrofit-45: per-transaction chart markers — one entry per buy/sell in the range,
-  // newest-first, capped at 500. Transfer-group legs are excluded (they net to zero
-  // across portfolios and would confuse the chart). `valueAfter` is the reconstructed
-  // portfolio total right AFTER the transaction at that day's price.
-  markers: Array<{
-    timestamp: string;  // ISO 8601
-    direction: string;  // 'buy' | 'sell'
-    symbol: string;
-    usdValue: number;
-    valueAfter: number;
-  }>;
   // retrofit-18: catalog tokens with a live `price:<SYMBOL>` tick, ranked by |24h change|
   // desc and capped at 6 (biggest movers in EITHER direction). Global (same for every
   // user), cached under `overview_top_movers`; `[]` when no symbol has a fresh tick.
