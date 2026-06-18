@@ -7,6 +7,7 @@
 
 import { Hono } from 'hono';
 import { ok, err } from '../../lib/envelope.js';
+import { prisma } from '../../lib/prisma.js';
 import type { AuthEnv } from '../auth/middleware.js';
 import { requireAuth } from '../auth/middleware.js';
 import {
@@ -21,7 +22,9 @@ import {
   CreatePortfolioBodySchema,
   ListPortfoliosQuerySchema,
   UpdatePortfolioBodySchema,
+  walletPreviewSchema,
 } from './portfolios.schemas.js';
+import { previewWallet } from '../wallet-data/index.js';
 
 const router = new Hono<AuthEnv>();
 
@@ -61,6 +64,32 @@ router.post('', requireAuth, async (c) => {
     }
     throw e;
   }
+});
+
+// ---------------------------------------------------------------------------
+// POST /portfolios/wallet/preview  (retrofit-47)
+//
+// Looks the wallet up across the read-side providers and returns one of three outcomes
+// the frontend branches on: found (+summary), empty (add-anyway), invalid. Registered
+// BEFORE the /:id routes so the static path isn't shadowed by the dynamic param route.
+// ---------------------------------------------------------------------------
+
+router.post('/wallet/preview', requireAuth, async (c) => {
+  const rawBody = await c.req.json().catch(() => null);
+  if (rawBody === null) {
+    return c.json(err('VALIDATION_ERROR', 'Request body required'), 400);
+  }
+  const parsed = walletPreviewSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return c.json(err('VALIDATION_ERROR', issue?.message ?? 'Validation failed'), 400);
+  }
+  const chain = await prisma.chain.findUnique({ where: { id: parsed.data.chainId } });
+  if (!chain) {
+    return c.json(err('INVALID_CHAIN', 'Chain not found'), 400);
+  }
+  const preview = await previewWallet(parsed.data.walletAddress, chain);
+  return c.json(ok(preview), 200);
 });
 
 // ---------------------------------------------------------------------------

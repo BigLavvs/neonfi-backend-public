@@ -44,3 +44,13 @@ export const UpdatePortfolioBodySchema = z.object({
 }).strict();
 
 export type UpdatePortfolioBody = z.infer<typeof UpdatePortfolioBodySchema>;
+
+// retrofit-47: connected-wallet preview request. Same wallet+chain shape as the
+// connected create body, but used by POST /portfolios/wallet/preview to look the wallet
+// up across the read-side providers before the user commits to creating the portfolio.
+export const walletPreviewSchema = z.object({
+  walletAddress: z.string().min(1),
+  chainId: z.number().int().positive(),
+}).strict();
+
+export type WalletPreviewBody = z.infer<typeof walletPreviewSchema>;

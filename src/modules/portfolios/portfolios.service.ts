@@ -16,6 +16,7 @@ import { toPortfolioDTO, type PortfolioDTO } from './portfolios.dto.js';
 import { seedAcquisitionInTx, invalidatePnlCache } from '../transactions/transactions.service.js';
 import { slugify } from './slug.js';
 import { validateWalletAddress } from './wallet-validator.js';
+import { syncConnectedHoldings } from '../wallet-data/sync.js';
 import type { CreatePortfolioBody, ListPortfoliosQuery, UpdatePortfolioBody } from './portfolios.schemas.js';
 
 const PLAN_CAPS: Record<'free' | 'pro', number> = { free: 1, pro: 10 };
@@ -118,7 +119,18 @@ export async function createPortfolio(
       console.error('[moralis-streams] create stream failed', streamErr);
     }
 
-    return await toPortfolioDTO(portfolio);
+    // retrofit-47: initial holdings sync. Best-effort — log & continue on failure (the
+    // portfolio is still created; the stream will populate it going forward).
+    try {
+      await syncConnectedHoldings(portfolio.id, validation.normalized!, chain);
+    } catch (e) {
+      console.error('[wallet-sync] initial sync failed', e);
+    }
+
+    // Re-read AFTER the sync so the DTO reflects the seeded netDeposit (mirrors the
+    // manual-create seeding path). Fall back to the pre-sync row if the re-read misses.
+    const full = await findPortfolioById(portfolio.id);
+    return await toPortfolioDTO(full ?? portfolio);
   }
 
   // type === 'manual'

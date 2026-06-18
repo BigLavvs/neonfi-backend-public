@@ -55,6 +55,15 @@ const schema = z
     MORALIS_WEBHOOK_SECRET: z.string().min(1),
     COINBASE_WS_URL: z.string().min(1),
 
+    // retrofit-47: read-side wallet-data providers. Moralis (already required) is primary; these
+    // three are OPTIONAL fallbacks — a provider with no key is skipped in the preview/sync chain.
+    GOLDRUSH_API_KEY: z.string().optional(),   // Covalent / GoldRush (covalenthq.com); key prefix cqt_
+    ALCHEMY_API_KEY: z.string().optional(),
+    ANKR_API_KEY: z.string().optional(),
+    // Moralis Web3 Data API base (distinct from the streams base in moralis-streams-client.ts).
+    MORALIS_DEEP_INDEX_BASE: z.string().min(1).default('https://deep-index.moralis.io/api/v2.2'),
+    MORALIS_SOLANA_BASE: z.string().min(1).default('https://solana-gateway.moralis.io'),
+
     // --- Multi-exchange price ingestion (retrofit-16) ---
     // Binance market data is reachable only from permitted SERVER egress regions
     // (not per-user). Set BINANCE_ENABLED=false on a Binance-blocked host so the

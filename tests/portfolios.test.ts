@@ -18,6 +18,14 @@ vi.mock('../src/lib/moralis-streams-client.js', () => ({
   deleteStream: vi.fn().mockResolvedValue(undefined),
 }));
 
+// retrofit-47: connected create now runs an initial holdings sync that would otherwise
+// hit the real read-side providers over the network. Stub it to a no-op so these
+// pre-retrofit-47 create tests stay hermetic (the sync itself is covered in
+// wallet-data.test.ts / wallet-preview.test.ts).
+vi.mock('../src/modules/wallet-data/sync.js', () => ({
+  syncConnectedHoldings: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('../src/modules/email/email.service.js', () => ({
   sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
