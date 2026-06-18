@@ -33,6 +33,8 @@ import {
   invalidatePnlCache,
   createTransactionFromWebhook,
   createNftTransactionFromWebhook,
+  reconcileWalletOpeningLot,
+  WALLET_SYNC_OPENING_NOTE,
   TransactionError,
 } from '../transactions/transactions.service.js';
 import type { CreateTransactionBody } from '../transactions/transactions.schemas.js';
@@ -358,6 +360,9 @@ async function reconcileOpeningLots(
             symbol: h.symbol,
             amount: toDecimalString(residual),
             timestamp: openingAt.toISOString(),
+            // retrofit-50: tag the reconciling lot so a later resync UPDATES it in place
+            // (idempotent) instead of inserting a duplicate.
+            notes: WALLET_SYNC_OPENING_NOTE,
             ...(h.usdPrice != null ? { priceAtTime: dec8(h.usdPrice) } : {}),
           });
         },
@@ -367,6 +372,48 @@ async function reconcileOpeningLots(
       console.error('[wallet-sync] opening-lot reconcile failed', { symbol: h.symbol }, (e as Error).message);
     }
   }
+}
+
+interface HeldToken {
+  tokenId: number;
+  symbol: string;
+  balance: number;
+  usdPrice: number | null;
+}
+
+// Resolve/auto-list every held token from the provider summary (creating catalog rows with
+// price/contract/logo) and return the held list. Done BEFORE importing transfers so a transfer
+// for an auto-listed token resolves to a row that already carries the right price. Per-token
+// best-effort — a token that can't be resolved (e.g. an over-long symbol) is logged & skipped.
+async function resolveHeldTokens(
+  summary: Awaited<ReturnType<typeof fetchWalletSummary>>,
+): Promise<HeldToken[]> {
+  const held: HeldToken[] = [];
+  for (const t of summary?.tokens ?? []) {
+    if (!(t.balance > 0) || !t.symbol) continue;
+    try {
+      const token = await resolveOrCreateToken({
+        symbol: t.symbol,
+        name: t.name,
+        contractAddress: t.contractAddress,
+        usdPrice: t.usdPrice,
+      });
+      held.push({ tokenId: token.id, symbol: token.symbol, balance: t.balance, usdPrice: t.usdPrice });
+    } catch (e) {
+      console.error('[wallet-sync] token resolve failed', { symbol: t.symbol }, (e as Error).message);
+    }
+  }
+  return held;
+}
+
+// The opening lot is dated just before the earliest imported transfer (or now if none) so the
+// chart can rebuild value from the starting balance forward.
+function openingDateFor(transfers: WalletTransfer[]): Date {
+  const earliest = transfers.reduce<number | null>((min, tr) => {
+    const ts = Date.parse(tr.timestamp);
+    return Number.isFinite(ts) && (min === null || ts < min) ? ts : min;
+  }, null);
+  return earliest !== null ? new Date(earliest - 1000) : new Date();
 }
 
 export async function syncConnectedHoldings(
@@ -384,24 +431,8 @@ export async function syncConnectedHoldings(
     fetchTransferPage(address, chain, { limit: PAGE_LIMIT }),
   ]);
 
-  // Pass 1: pre-resolve every held token (creates catalog rows with price/contract/logo) and
-  // record the held list BEFORE importing transfers, so a transfer for an auto-listed token
-  // resolves to a row that already carries the right price. Per-token best-effort.
-  const held: Array<{ tokenId: number; symbol: string; balance: number; usdPrice: number | null }> = [];
-  for (const t of summary?.tokens ?? []) {
-    if (!(t.balance > 0) || !t.symbol) continue;
-    try {
-      const token = await resolveOrCreateToken({
-        symbol: t.symbol,
-        name: t.name,
-        contractAddress: t.contractAddress,
-        usdPrice: t.usdPrice,
-      });
-      held.push({ tokenId: token.id, symbol: token.symbol, balance: t.balance, usdPrice: t.usdPrice });
-    } catch (e) {
-      console.error('[wallet-sync] token resolve failed', { symbol: t.symbol }, (e as Error).message);
-    }
-  }
+  // Pass 1: pre-resolve held tokens (so prices/contract/logo exist before import).
+  const held = await resolveHeldTokens(summary);
 
   // Pass 2: import the real transfer history (native + erc20 + nft transactions + Nft rows).
   const transfers = page?.transfers ?? [];
@@ -412,12 +443,7 @@ export async function syncConnectedHoldings(
   if (nftHoldings && nftHoldings.length > 0) await importNftHoldings(portfolio, nftHoldings);
 
   // Pass 4: reconcile the residual opening lots, dated just before the earliest import.
-  const earliest = transfers.reduce<number | null>((min, tr) => {
-    const ts = Date.parse(tr.timestamp);
-    return Number.isFinite(ts) && (min === null || ts < min) ? ts : min;
-  }, null);
-  const openingAt = earliest !== null ? new Date(earliest - 1000) : new Date();
-  if (held.length > 0) await reconcileOpeningLots(portfolioId, held, openingAt);
+  if (held.length > 0) await reconcileOpeningLots(portfolioId, held, openingDateFor(transfers));
 
   // Pass 5: persist the cursor + provider total for the "load more" endpoint (#5/#8).
   await prisma.portfolio.update({
@@ -427,6 +453,71 @@ export async function syncConnectedHoldings(
 
   // Flush the derived PnL/analytics caches once after the whole sync.
   await invalidatePnlCache(portfolioId);
+}
+
+// retrofit-50: idempotent RESYNC for a connected portfolio (POST /portfolios/:id/resync).
+// Catches transfers a missed/late webhook never delivered and re-reconciles the balance to
+// on-chain. Reuses the retrofit-49 import path but every step is idempotent:
+//   - Re-import the latest transfer page — dedupe on tx hash (the unique constraint makes
+//     already-recorded transfers no-ops; only genuinely missed ones insert).
+//   - Re-import current NFT holdings (upsert); the page's in/out NFT transfers also replay.
+//   - Re-reconcile each held token by UPDATING its tagged opening lot (never inserting a new
+//     one), so running resync twice in a row changes nothing.
+// Best-effort throughout; returns { importedTransfers, reconciled }. The "load more" cursor is
+// intentionally left untouched (resync re-reads the newest page; older pages stay deduped).
+export async function resyncConnectedHoldings(
+  portfolioId: number,
+  address: string | null,
+  chain: { slug: string } | null,
+): Promise<{ importedTransfers: number; reconciled: number }> {
+  const portfolio = await findPortfolioById(portfolioId);
+  if (!portfolio || !address || !chain) return { importedTransfers: 0, reconciled: 0 };
+
+  const [summary, page] = await Promise.all([
+    fetchWalletSummary(address, chain),
+    fetchTransferPage(address, chain, { limit: PAGE_LIMIT }),
+  ]);
+
+  // Resolve held tokens (refreshes prices/contract/logo + the held list).
+  const held = await resolveHeldTokens(summary);
+
+  // Re-import the latest transfer page (missed transfers insert; recorded ones are no-ops).
+  const transfers = page?.transfers ?? [];
+  const importedTransfers = await importTransfers(portfolio, transfers);
+
+  // Re-import current NFT holdings (upsert).
+  const nftHoldings = await fetchNftHoldings(address, chain);
+  if (nftHoldings && nftHoldings.length > 0) await importNftHoldings(portfolio, nftHoldings);
+
+  // Re-reconcile by UPDATING the tagged opening lot per held token (idempotent).
+  const openingAt = openingDateFor(transfers).toISOString();
+  let reconciled = 0;
+  for (const h of held) {
+    try {
+      await reconcileWalletOpeningLot({
+        portfolio,
+        tokenId: h.tokenId,
+        symbol: h.symbol,
+        providerBalance: h.balance,
+        usdPrice: h.usdPrice,
+        openingAt,
+      });
+      reconciled += 1;
+    } catch (e) {
+      console.error('[wallet-sync] resync reconcile failed', { symbol: h.symbol }, (e as Error).message);
+    }
+  }
+
+  // Refresh the provider total (keeps the overview count fresh); leave syncCursor alone.
+  if (page?.totalCount != null) {
+    await prisma.portfolio.update({
+      where: { id: portfolioId },
+      data: { externalTxCount: page.totalCount },
+    });
+  }
+
+  await invalidatePnlCache(portfolioId);
+  return { importedTransfers, reconciled };
 }
 
 // retrofit-49 §6: import the NEXT page of transfers for a connected portfolio (the frontend's

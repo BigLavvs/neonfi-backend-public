@@ -82,9 +82,16 @@ export async function countTransactions(
 export async function listRecentTransactionsForUser(
   userId: number,
   limit: number,
+  portfolioIds?: number[],
 ): Promise<TransactionWithListIncludes[]> {
+  // retrofit-50: an optional portfolio whitelist scopes the overview recent-tx list to the
+  // selected portfolios. `portfolio: { userId }` still enforces ownership, so a foreign id
+  // in the list matches nothing.
   return prisma.transaction.findMany({
-    where: { portfolio: { userId } },
+    where: {
+      portfolio: { userId },
+      ...(portfolioIds ? { portfolioId: { in: portfolioIds } } : {}),
+    },
     orderBy: { timestamp: 'desc' },
     take: limit,
     include: LIST_INCLUDE,

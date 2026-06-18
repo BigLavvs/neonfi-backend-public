@@ -510,6 +510,97 @@ export async function seedAcquisitionInTx(
 }
 
 // ---------------------------------------------------------------------------
+// Connected-wallet reconciling opening lot (retrofit-49 tag / retrofit-50 idempotent update)
+// ---------------------------------------------------------------------------
+
+// The wallet-sync reconciling opening lot (the residual "starting balance" seeded so the
+// stored balance equals on-chain) is TAGGED with this note so a later resync can find and
+// UPDATE it in place instead of inserting a duplicate. Manual transactions never use it.
+export const WALLET_SYNC_OPENING_NOTE = 'wallet-sync:opening';
+
+// retrofit-50: idempotently reconcile a held token's balance to the on-chain truth by
+// UPDATING its tagged opening lot (never inserting a second one). residual = providerBalance
+// − (current asset balance − the opening lot's current amount); i.e. the starting balance the
+// recorded non-opening transactions don't account for. Re-runnable: a second call recomputes
+// the same residual and writes the same amount, so balances/rows don't drift. When no tagged
+// lot exists yet (a token first seen on this resync) one is created — only when the residual
+// is meaningful. The Transaction/Asset writes stay in the transactions module (isolation); the
+// caller (wallet-data/sync) supplies the provider balance + price and flushes caches once.
+export async function reconcileWalletOpeningLot(params: {
+  portfolio: PortfolioWithRelations;
+  tokenId: number;
+  symbol: string;
+  providerBalance: number;
+  usdPrice: number | null;
+  openingAt: string; // ISO — used only when creating a lot that didn't exist before
+}): Promise<void> {
+  const { portfolio, tokenId, symbol, providerBalance, usdPrice, openingAt } = params;
+  const portfolioId = portfolio.id;
+
+  const [asset, opening] = await Promise.all([
+    prisma.asset.findUnique({ where: { portfolioId_tokenId: { portfolioId, tokenId } } }),
+    prisma.transaction.findFirst({
+      where: { portfolioId, notes: WALLET_SYNC_OPENING_NOTE, nativeDetail: { symbol } },
+      include: { nativeDetail: true },
+    }),
+  ]);
+
+  const currentBalance = asset ? Number(asset.balance.toString()) : 0;
+  const openingAmt = opening?.nativeDetail ? Number(opening.nativeDetail.amount.toString()) : 0;
+  // The opening lot can only reconcile UP — a missed sell beyond the window can't push it
+  // below 0 (same limitation as the initial sync). max(0, …) guards that.
+  const residual = Math.max(0, providerBalance - (currentBalance - openingAmt));
+  const amountStr = toDecimalString(residual);
+
+  if (opening?.nativeDetail) {
+    // Re-price the lot to the current price when the provider supplies one; else keep its
+    // stored priceAtTime so cost basis stays stable. usdValue follows the new amount.
+    const priceAtTime =
+      usdPrice != null
+        ? usdPrice.toFixed(8)
+        : opening.nativeDetail.priceAtTime != null
+          ? opening.nativeDetail.priceAtTime.toString()
+          : undefined;
+    const usdValue = await computeUsdValue(symbol, amountStr, priceAtTime);
+    await prisma.$transaction(
+      async (tx) => {
+        await updateNativeDetail(tx, opening.id, {
+          amount: amountStr,
+          usdValue,
+          ...(priceAtTime !== undefined ? { priceAtTime } : {}),
+        });
+        await recalcAssetBalance(tx, portfolioId, tokenId);
+        await recalcPortfolioNetDeposit(tx, portfolioId);
+      },
+      { timeout: 15000 },
+    );
+    return;
+  }
+
+  // No tagged lot yet — create one (tagged), only if the residual is worth a lot.
+  if (residual <= 0) return;
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.asset.upsert({
+        where: { portfolioId_tokenId: { portfolioId, tokenId } },
+        update: {},
+        create: { portfolioId, tokenId },
+      });
+      await seedAcquisitionInTx(tx, {
+        portfolioId,
+        tokenId,
+        symbol,
+        amount: amountStr,
+        timestamp: openingAt,
+        notes: WALLET_SYNC_OPENING_NOTE,
+        ...(usdPrice != null ? { priceAtTime: usdPrice.toFixed(8) } : {}),
+      });
+    },
+    { timeout: 15000 },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Cross-portfolio transfer (retrofit-10 / C4b)
 // ---------------------------------------------------------------------------
 
@@ -726,8 +817,9 @@ export async function listPortfolioTransactions(
 export async function listRecentUserTransactions(
   userId: number,
   limit: number,
+  portfolioIds?: number[], // retrofit-50: scope to the overview portfolio filter when set
 ): Promise<TransactionListDTO[]> {
-  const rows = await listRecentTransactionsForUser(userId, limit);
+  const rows = await listRecentTransactionsForUser(userId, limit, portfolioIds);
   const logoMap = await buildLogoMap(rows);
   return rows.map((t) => toTransactionListDTO(t, logoFor(t, logoMap)));
 }

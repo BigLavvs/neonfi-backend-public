@@ -17,6 +17,7 @@ import {
   getPortfolio,
   updatePortfolio,
   deletePortfolioById,
+  resyncPortfolio,
 } from './portfolios.service.js';
 import {
   CreatePortfolioBodySchema,
@@ -154,6 +155,29 @@ router.patch('/:id', requireAuth, async (c) => {
   } catch (e) {
     if (e instanceof PortfolioError) {
       return c.json(portfolioErr(e, e.statusCode), e.statusCode as 400 | 403 | 409);
+    }
+    throw e;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /portfolios/:id/resync  (retrofit-50, connected only)
+// ---------------------------------------------------------------------------
+// Re-imports the latest transfer page (deduped on hash) + re-reconciles the balance to
+// on-chain — catching transfers a missed/late webhook never delivered. Idempotent: running
+// it twice changes nothing. Authed + ownership-gated in the service.
+router.post('/:id/resync', requireAuth, async (c) => {
+  const id = parsePortfolioId(c.req.param('id'));
+  if (id === null) {
+    return c.json(err('VALIDATION_ERROR', 'Portfolio ID must be a positive integer'), 400);
+  }
+  const user = c.get('user');
+  try {
+    const result = await resyncPortfolio(user.id, id);
+    return c.json(ok(result), 200);
+  } catch (e) {
+    if (e instanceof PortfolioError) {
+      return c.json(portfolioErr(e, e.statusCode), e.statusCode as 400 | 403);
     }
     throw e;
   }

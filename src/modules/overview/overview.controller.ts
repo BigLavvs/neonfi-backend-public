@@ -44,7 +44,18 @@ router.get('/', async (c) => {
     days: c.req.query('days'),
     txLimit: c.req.query('txLimit'),
   });
-  const data = await getOverview(user.id, { days, txLimit });
+  // retrofit-50: optional comma-separated positive ints scoping the aggregate to a subset of
+  // the user's portfolios. Empty/absent/all-garbage → undefined (= all). Ownership is enforced
+  // in the service's where-clause, so unknown/foreign ids are silently dropped, never a 400.
+  const ids = (c.req.query('portfolioIds') ?? '')
+    .split(',')
+    .map((s) => parseInt(s, 10))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  const data = await getOverview(user.id, {
+    days,
+    txLimit,
+    portfolioIds: ids.length ? ids : undefined,
+  });
   return c.json(ok(data), 200);
 });
 

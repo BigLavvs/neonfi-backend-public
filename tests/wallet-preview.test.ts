@@ -85,6 +85,10 @@ function syncMoreGet(portfolioId: number, cookie: string): Promise<Response> {
   });
 }
 
+function resyncPost(portfolioId: number, cookie: string): Promise<Response> {
+  return app.request(`${PORT_BASE}/${portfolioId}/resync`, { method: 'POST', headers: { Cookie: cookie } });
+}
+
 function overviewGet(cookie: string): Promise<Response> {
   return app.request('/api/v1/overview', { headers: { Cookie: cookie } });
 }
@@ -555,4 +559,83 @@ it('416: overview transactionCount uses externalTxCount for connected, DB count 
   const d = (await res.json()).data;
   // 137 (connected external total) + 3 (manual DB rows) = 140 — NOT 1 + 3.
   expect(d.totals.transactionCount).toBe(140);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-50 — POST /portfolios/:id/resync (idempotent)
+// ---------------------------------------------------------------------------
+
+it('417: resync re-imports a deleted transfer, keeps balance on-chain, and is a no-op the 2nd time', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const catalog = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
+
+  // On-chain balance 5; history = +3 in (0xaaa417), -1 out (0xbbb417) → net +2, residual lot 3.
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: catalog.symbol, nativeBalance: 5, totalUsd: 5000, tokenCount: 1,
+    tokens: [{ symbol: catalog.symbol, name: catalog.name, contractAddress: null, balance: 5, decimals: 18, usdPrice: 1000, usdValue: 5000, isNative: true }],
+    provider: 'moralis',
+  });
+  fetchTransferPageMock.mockResolvedValue({
+    transfers: [
+      { type: 'native', direction: 'in', hash: '0xaaa417', from: '0xsender', to: '0xwallet417', symbol: catalog.symbol, name: catalog.name, contractAddress: null, amount: 3, usdValue: 3000, gasFee: null, timestamp: '2026-01-10T00:00:00.000Z', logoUrl: null, nftTokenId: null, collectionName: null },
+      { type: 'native', direction: 'out', hash: '0xbbb417', from: '0xwallet417', to: '0xrecv', symbol: catalog.symbol, name: catalog.name, contractAddress: null, amount: 1, usdValue: 1000, gasFee: null, timestamp: '2026-01-12T00:00:00.000Z', logoUrl: null, nftTokenId: null, collectionName: null },
+    ],
+    nextCursor: null, totalCount: null,
+  });
+
+  const created = await portPost('', { name: 'Resync Wallet', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(created.status).toBe(201);
+  const portfolioId = (await created.json()).data.portfolio.id as number;
+
+  // Initial sync: 2 transfers + 1 reconciling opening lot = 3 txns; balance == on-chain 5.
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(3);
+  const balanceOf = async () =>
+    Number((await prisma.asset.findFirstOrThrow({ where: { portfolioId, tokenId: catalog.id } })).balance);
+  expect(await balanceOf()).toBeCloseTo(5, 6);
+
+  // Simulate a transfer that a missed webhook dropped: delete the 'in' transaction.
+  await prisma.transaction.deleteMany({ where: { portfolioId, transactionHash: '0xaaa417' } });
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(2);
+
+  // Resync re-imports exactly the missing transfer (the other is deduped on hash).
+  const r1 = await resyncPost(portfolioId, cookie);
+  expect(r1.status).toBe(200);
+  expect((await r1.json()).data).toEqual({ importedTransfers: 1, reconciled: 1 });
+  expect(await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xaaa417' } })).toBe(1);
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(3);
+  expect(await balanceOf()).toBeCloseTo(5, 6);
+
+  // Running it again is a no-op: nothing imported, no duplicate rows, balance unchanged.
+  const r2 = await resyncPost(portfolioId, cookie);
+  expect((await r2.json()).data).toEqual({ importedTransfers: 0, reconciled: 1 });
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(3);
+  expect(await balanceOf()).toBeCloseTo(5, 6);
+});
+
+it('418: resync on a manual portfolio → 400 NOT_CONNECTED', async () => {
+  const { cookie } = await registerAndLogin();
+  const created = await portPost('', { name: 'Manual Resync', type: 'manual' }, cookie);
+  expect(created.status).toBe(201);
+  const portfolioId = (await created.json()).data.portfolio.id as number;
+
+  const res = await resyncPost(portfolioId, cookie);
+  expect(res.status).toBe(400);
+  expect((await res.json()).error.code).toBe('NOT_CONNECTED');
+});
+
+it('419: resync another user\'s portfolio → 403 FORBIDDEN', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const created = await portPost('', { name: 'Owned', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  const portfolioId = (await created.json()).data.portfolio.id as number;
+
+  // A second user must not resync the first user's portfolio.
+  await authPost('/register', { email: 'wallet.preview.b@neonfi.test', password: TEST_PASSWORD, fullName: 'Other' });
+  const loginB = await authPost('/login', { email: 'wallet.preview.b@neonfi.test', password: TEST_PASSWORD });
+  const cookieB = `session=${cookieValue(loginB, 'session')!}`;
+
+  const res = await resyncPost(portfolioId, cookieB);
+  expect(res.status).toBe(403);
+  expect((await res.json()).error.code).toBe('FORBIDDEN');
 });

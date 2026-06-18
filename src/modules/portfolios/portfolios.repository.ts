@@ -12,17 +12,24 @@ export async function findPortfolioById(id: number): Promise<PortfolioWithRelati
 
 export async function findPortfoliosByUserId(
   userId: number,
-  opts: { limit: number; offset: number },
+  opts: { limit: number; offset: number; ids?: number[] },
 ): Promise<{ portfolios: PortfolioWithRelations[]; total: number }> {
+  // retrofit-50: an optional id whitelist scopes the read to a subset of the user's
+  // portfolios (the overview portfolio filter). Keeping `userId` in the where means a
+  // foreign id simply matches nothing — ownership is never bypassed.
+  const where: Prisma.PortfolioWhereInput = {
+    userId,
+    ...(opts.ids ? { id: { in: opts.ids } } : {}),
+  };
   const [portfolios, total] = await prisma.$transaction([
     prisma.portfolio.findMany({
-      where: { userId },
+      where,
       orderBy: { createdAt: 'asc' },
       take: opts.limit,
       skip: opts.offset,
       ...PORTFOLIO_INCLUDE,
     }),
-    prisma.portfolio.count({ where: { userId } }),
+    prisma.portfolio.count({ where }),
   ]);
   return { portfolios, total };
 }

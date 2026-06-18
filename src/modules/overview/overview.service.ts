@@ -45,6 +45,9 @@ const TOP_MOVERS_LIMIT = 6;
 export interface OverviewParams {
   days: number;
   txLimit: number;
+  // retrofit-50: optional whitelist of the user's portfolio ids to scope the aggregate to
+  // (the Performance page's portfolio selector). undefined = all of the user's portfolios.
+  portfolioIds?: number[];
 }
 
 /**
@@ -107,8 +110,12 @@ export async function getOverview(userId: number, params: OverviewParams): Promi
   // (`overview:<userId>:…`) and the global movers list (`overview_top_movers`). Keeping
   // topMovers OUTSIDE the per-user cache means a fresh 24h tick surfaces for every user
   // within the movers' own 60s window instead of being baked into each user's payload.
+  // retrofit-50: the portfolio filter is part of the cache identity — a filtered request
+  // must not read (or poison) the all-portfolios payload. Normalize the ids (sorted, '.'
+  // -joined) so {1,2} and {2,1} share a key; 'all' when unfiltered.
+  const idsKey = params.portfolioIds ? [...params.portfolioIds].sort((a, b) => a - b).join('.') : 'all';
   const [aggregate, topMovers] = await Promise.all([
-    withCache(`overview:${userId}:${params.days}:${params.txLimit}`, () =>
+    withCache(`overview:${userId}:${params.days}:${params.txLimit}:${idsKey}`, () =>
       buildOverview(userId, params),
     ),
     getTopMovers(),
@@ -189,13 +196,16 @@ async function computeTopMovers(): Promise<OverviewDTO['topMovers']> {
 
 async function buildOverview(
   userId: number,
-  { days, txLimit }: OverviewParams,
+  { days, txLimit, portfolioIds }: OverviewParams,
 ): Promise<OverviewAggregate> {
   // 1. Portfolios. Zero portfolios → an all-empty payload (NOT a 404): a brand-new
-  //    user still loads the dashboard.
+  //    user still loads the dashboard. retrofit-50: when a portfolio filter is set, the
+  //    id whitelist scopes this read (and therefore every per-portfolio derive/asset/
+  //    snapshot/count below, which all map over `portfolios`); foreign ids drop out.
   const { portfolios } = await findPortfoliosByUserId(userId, {
     limit: PORTFOLIO_FETCH_LIMIT,
     offset: 0,
+    ids: portfolioIds,
   });
   if (portfolios.length === 0) {
     return emptyOverview();
@@ -214,7 +224,8 @@ async function buildOverview(
     Promise.all(portfolios.map((p) => computeDerived(p.id))),
     Promise.all(portfolios.map((p) => findAllAssetsByPortfolioId(p.id))),
     Promise.all(portfolios.map((p) => findAllSnapshotsAscByPortfolio(p.id))),
-    listRecentUserTransactions(userId, txLimit),
+    // retrofit-50: scope the recent-tx list to the selected portfolios when filtering.
+    listRecentUserTransactions(userId, txLimit, portfolioIds),
     // retrofit-49 (#8): per-portfolio DB tx counts. A connected portfolio shows its REAL
     // on-chain total (externalTxCount) even though only ~100 rows are imported; manual +
     // connected-without-a-provider-total fall back to the imported DB row count.

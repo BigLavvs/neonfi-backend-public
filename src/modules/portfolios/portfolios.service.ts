@@ -16,7 +16,7 @@ import { toPortfolioDTO, type PortfolioDTO } from './portfolios.dto.js';
 import { seedAcquisitionInTx, invalidatePnlCache } from '../transactions/transactions.service.js';
 import { slugify } from './slug.js';
 import { validateWalletAddress } from './wallet-validator.js';
-import { syncConnectedHoldings } from '../wallet-data/sync.js';
+import { syncConnectedHoldings, resyncConnectedHoldings } from '../wallet-data/sync.js';
 import type { CreatePortfolioBody, ListPortfoliosQuery, UpdatePortfolioBody } from './portfolios.schemas.js';
 
 const PLAN_CAPS: Record<'free' | 'pro', number> = { free: 1, pro: 10 };
@@ -256,6 +256,23 @@ export async function updatePortfolio(
   await assertSlugAvailable(userId, body.name, id);
   const updated = await updatePortfolioName(id, body.name);
   return await toPortfolioDTO(updated);
+}
+
+// retrofit-50: idempotent resync of a connected portfolio's on-chain state. Ownership-gated
+// like the other portfolio mutations; manual portfolios are rejected (NOT_CONNECTED). Delegates
+// the work to wallet-data/sync.resyncConnectedHoldings and returns its counts.
+export async function resyncPortfolio(
+  userId: number,
+  id: number,
+): Promise<{ importedTransfers: number; reconciled: number }> {
+  const portfolio = await findPortfolioById(id);
+  if (!portfolio || portfolio.userId !== userId) {
+    throw new PortfolioError(403, 'FORBIDDEN', 'Forbidden');
+  }
+  if (portfolio.type.name !== 'connected') {
+    throw new PortfolioError(400, 'NOT_CONNECTED', 'Resync is only for connected wallet portfolios');
+  }
+  return resyncConnectedHoldings(portfolio.id, portfolio.walletAddress, portfolio.chain);
 }
 
 export async function deletePortfolioById(userId: number, id: number): Promise<void> {

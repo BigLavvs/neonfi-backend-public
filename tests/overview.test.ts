@@ -753,3 +753,47 @@ it('r46-tx-auth: GET /overview/transactions no session → 401', async () => {
   const res = await app.request(`${OVERVIEW_BASE}/transactions`);
   expect(res.status).toBe(401);
 });
+
+// ---------------------------------------------------------------------------
+// retrofit-50 — ?portfolioIds= scopes the aggregate to the selected portfolios
+// ---------------------------------------------------------------------------
+
+it('r50-filter: ?portfolioIds= scopes totals/holdings/recentTransactions/count; foreign ids ignored; absent = all', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const p1 = await createManualPortfolio(userId, 'P1');
+  const p2 = await createManualPortfolio(userId, 'P2');
+  // P1: BTC 1.0 (value 93000) + two txns. P2: ETH 1.0 (value 3200) + one txn.
+  await seedAsset(p1, btcId, 1.0);
+  await seedAsset(p2, ethId, 1.0);
+  await seedNativeTx(p1, '2026-01-01T00:00:00.000Z');
+  await seedNativeTx(p1, '2026-01-03T00:00:00.000Z');
+  await seedNativeTx(p2, '2026-01-02T00:00:00.000Z');
+
+  // --- filter to P1 only ---
+  const justP1 = await getData(await overviewGet(cookies, `?portfolioIds=${p1}`));
+  expect(justP1.totals.totalValue).toBeCloseTo(93000, 2);
+  expect(justP1.totals.portfolioCount).toBe(1);
+  expect(justP1.totals.transactionCount).toBe(2); // only P1's txns
+  expect(justP1.portfolios.map((p) => p.name)).toEqual(['P1']);
+  expect(justP1.allocation.map((a) => a.symbol)).toEqual(['BTC']);
+  expect(justP1.holdings.map((h) => h.symbol)).toEqual(['BTC']);
+  expect(justP1.recentTransactions.every((t) => t.portfolioId === p1)).toBe(true);
+  expect(justP1.recentTransactions).toHaveLength(2);
+
+  // --- a foreign / non-owned id in the list is silently dropped (no leak, no 400) ---
+  const withForeign = await getData(await overviewGet(cookies, `?portfolioIds=${p1},999999`));
+  expect(withForeign.totals.portfolioCount).toBe(1);
+  expect(withForeign.totals.totalValue).toBeCloseTo(93000, 2);
+
+  // --- both ids → both portfolios ---
+  const both = await getData(await overviewGet(cookies, `?portfolioIds=${p1},${p2}`));
+  expect(both.totals.portfolioCount).toBe(2);
+  expect(both.totals.totalValue).toBeCloseTo(96200, 2);
+  expect(both.totals.transactionCount).toBe(3);
+
+  // --- absent filter → all portfolios (unchanged behaviour) ---
+  const all = await getData(await overviewGet(cookies));
+  expect(all.totals.portfolioCount).toBe(2);
+  expect(all.totals.totalValue).toBeCloseTo(96200, 2);
+});
