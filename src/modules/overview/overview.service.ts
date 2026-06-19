@@ -98,6 +98,7 @@ function emptyOverview(): OverviewAggregate {
       allTimePnlValue: 0,
       portfolioCount: 0,
       transactionCount: 0,
+      onChainTransactionCount: 0,
     },
     portfolios: [],
     valueHistory: [],
@@ -250,14 +251,17 @@ async function buildOverview(
   const allSymbols = assetsList.flat().map((a) => a.token.symbol);
   const liveMap = await getLivePriceMap(allSymbols);
 
-  // retrofit-49 (#8): Σ over the user's portfolios of the connected-wallet on-chain total
-  // (externalTxCount) when known, else the imported DB row count for that portfolio.
+  // retrofit-73 (H10): the headline "Transactions" = the imported/DB rows the list can show, so
+  // it never reads 421 next to a 17-row list. The connected wallets' real on-chain total
+  // (externalTxCount) is surfaced separately as onChainTransactionCount (a clearly-labelled stat),
+  // not folded into the headline.
   let transactionCount = 0;
+  let onChainTransactionCount = 0;
   for (const p of portfolios) {
-    transactionCount +=
-      p.type.name === 'connected' && p.externalTxCount != null
-        ? p.externalTxCount
-        : (dbTxCountByPortfolio.get(p.id) ?? 0);
+    transactionCount += dbTxCountByPortfolio.get(p.id) ?? 0;
+    if (p.type.name === 'connected' && p.externalTxCount != null) {
+      onChainTransactionCount += p.externalTxCount;
+    }
   }
 
   // ---- totals (sum the value fields, recompute aggregate %s) ----
@@ -443,6 +447,7 @@ async function buildOverview(
       allTimePnlValue: round(allTimePnlValue),
       portfolioCount: portfolios.length,
       transactionCount,
+      onChainTransactionCount,
     },
     portfolios: portfoliosDTO,
     valueHistory,

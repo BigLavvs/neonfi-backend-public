@@ -19,8 +19,11 @@ export async function listNfts(portfolio: PortfolioWithRelations): Promise<NftDT
   if (portfolio.type.name !== 'connected') {
     return [];
   }
+  // retrofit-73 (H13): hide provider-flagged spam (airdrop/scam) NFTs from the holdings list so
+  // the wallet doesn't show "Hefty Presents" ×17 / "Garbage Bags" as real holdings. The rows are
+  // still persisted (with the flag) — getNftById can surface a specific one if linked directly.
   const nfts = await findAllNftsByPortfolioId(portfolio.id);
-  return nfts.map((n) => toNftDTO(n, portfolio.walletAddress));
+  return nfts.filter((n) => !n.possibleSpam).map((n) => toNftDTO(n, portfolio.walletAddress));
 }
 
 export async function getNftById(

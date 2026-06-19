@@ -387,6 +387,7 @@ export class GoldRushWalletProvider implements WalletDataProvider {
             collectionName: c.contract_name ?? null,
             logoUrl: ed.image_512 ?? ed.image ?? ed.image_preview ?? null,
             tokenStandard,
+            possibleSpam: false, // retrofit-73 (H13): GoldRush already drops is_spam rows above
           });
         }
       }

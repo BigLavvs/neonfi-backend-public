@@ -18,6 +18,9 @@ export interface NftDTO {
   lastSaleNote: string | null;
   rarity: string | null;
   traits: unknown | null;
+  // retrofit-73 (H13): provider-flagged airdrop/scam NFT. Spam is filtered out of the holdings
+  // list, but the flag is exposed so a detail view / future "show spam" toggle can badge it.
+  possibleSpam: boolean;
   createdAt: Date;
 }
 
@@ -40,6 +43,7 @@ export function toNftDTO(nft: Nft, owner: string | null): NftDTO {
     lastSaleNote: nft.lastSaleNote ?? null,
     rarity: nft.rarity ?? null,
     traits: nft.traits ?? null,
+    possibleSpam: nft.possibleSpam,
     createdAt: nft.createdAt,
   };
 }

@@ -4,13 +4,35 @@ const directionEnum = z.enum(['buy', 'sell', 'transfer']);
 
 const decimalStr = z.string().regex(/^\d+(\.\d+)?$/, 'must be a non-negative decimal string');
 
+// retrofit-73 (R44): Decimal(20,8) holds 12 integer digits, so the magnitude must stay below
+// 10^12. An over-large amount used to overflow the column and surface as a 500; bounding it here
+// returns a clean 400 VALIDATION_ERROR instead. Applies to every decimal that reaches a
+// Decimal(20,8) column (amount, gasFee, priceAtTime).
+const MAX_DECIMAL = 1e12;
+const boundedDecimalStr = decimalStr.refine(
+  (v) => Number(v) < MAX_DECIMAL,
+  `value must be less than ${MAX_DECIMAL}`,
+);
+
+// retrofit-73 (R43): a tradeable amount must be strictly positive — 0 (and the regex already
+// blocks negatives) was being accepted and created a $0 transaction.
+const amountStr = boundedDecimalStr.refine((v) => Number(v) > 0, 'amount must be greater than 0');
+
+// retrofit-73 (R45): reject future-dated transactions (with a small clock-skew tolerance). A
+// 2099 date corrupts the value-history reconstruction and the chart x-axis.
+const CLOCK_SKEW_MS = 5 * 60 * 1000;
+const notFutureTimestamp = z
+  .string()
+  .datetime({ message: 'timestamp must be an ISO 8601 datetime string' })
+  .refine((v) => Date.parse(v) <= Date.now() + CLOCK_SKEW_MS, 'timestamp must not be in the future');
+
 const commonFields = {
   direction: directionEnum,
-  timestamp: z.string().datetime({ message: 'timestamp must be an ISO 8601 datetime string' }),
+  timestamp: notFutureTimestamp,
   transactionHash: z.string().max(255).optional(),
   from: z.string().max(255).nullable().optional(),
   to: z.string().max(255).nullable().optional(),
-  gasFee: decimalStr.nullable().optional(),
+  gasFee: boundedDecimalStr.nullable().optional(),
   // retrofit-7: optional free-text note (frontend AddTransactionModal). On all types.
   notes: z.string().max(2000).nullable().optional(),
 };
@@ -18,10 +40,10 @@ const commonFields = {
 const NativeTransactionSchema = z
   .object({
     type: z.literal('native'),
-    amount: decimalStr,
+    amount: amountStr,
     symbol: z.string().min(1).max(20),
     // retrofit-7: user-entered price override → drives usdValue (manual cost basis).
-    priceAtTime: decimalStr.optional(),
+    priceAtTime: boundedDecimalStr.optional(),
     ...commonFields,
   })
   .strict();
@@ -29,13 +51,13 @@ const NativeTransactionSchema = z
 const Erc20TransactionSchema = z
   .object({
     type: z.literal('erc20'),
-    amount: decimalStr,
+    amount: amountStr,
     symbol: z.string().min(1).max(20),
     tokenContractAddress: z.string().min(1).max(255),
     tokenName: z.string().min(1).max(255),
     tokenSymbol: z.string().min(1).max(20),
     // retrofit-7: user-entered price override → drives usdValue (manual cost basis).
-    priceAtTime: decimalStr.optional(),
+    priceAtTime: boundedDecimalStr.optional(),
     ...commonFields,
   })
   .strict();
@@ -67,9 +89,9 @@ export const UpdateTransactionBodySchema = z
     direction: directionEnum.optional(),
     from: z.string().max(255).nullable().optional(),
     to: z.string().max(255).nullable().optional(),
-    gasFee: decimalStr.nullable().optional(),
-    timestamp: z.string().datetime({ message: 'timestamp must be an ISO 8601 datetime string' }).optional(),
-    amount: decimalStr.optional(),
+    gasFee: boundedDecimalStr.nullable().optional(),
+    timestamp: notFutureTimestamp.optional(),
+    amount: amountStr.optional(),
     symbol: z.string().min(1).max(20).optional(),
     tokenContractAddress: z.string().max(255).optional(),
     tokenName: z.string().max(255).optional(),
@@ -78,7 +100,7 @@ export const UpdateTransactionBodySchema = z
     nftTokenId: z.string().max(255).optional(),
     collectionName: z.string().max(255).nullable().optional(),
     // retrofit-7: priceAtTime override (native/erc20 only) + free-text note.
-    priceAtTime: decimalStr.optional(),
+    priceAtTime: boundedDecimalStr.optional(),
     notes: z.string().max(2000).nullable().optional(),
   })
   .strict();
@@ -94,11 +116,8 @@ export const TransferBodySchema = z
   .object({
     destPortfolioId: z.number().int().positive(),
     symbol: z.string().min(1).max(20),
-    amount: decimalStr,
-    timestamp: z
-      .string()
-      .datetime({ message: 'timestamp must be an ISO 8601 datetime string' })
-      .optional(),
+    amount: amountStr,
+    timestamp: notFutureTimestamp.optional(),
     notes: z.string().max(2000).nullable().optional(),
   })
   .strict();

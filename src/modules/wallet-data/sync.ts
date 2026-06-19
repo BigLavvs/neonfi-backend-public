@@ -336,11 +336,13 @@ async function importNftHoldings(
           logoUrl: h.logoUrl,
           chain: chainSlug,
           tokenStandard: h.tokenStandard,
+          possibleSpam: h.possibleSpam, // retrofit-73 (H13)
         },
         update: {
           ...(h.logoUrl ? { logoUrl: h.logoUrl } : {}),
           ...(h.name ? { name: h.name } : {}),
           ...(h.description ? { description: h.description } : {}),
+          possibleSpam: h.possibleSpam, // retrofit-73 (H13): refresh the flag on re-sync
         },
       });
     } catch (e) {

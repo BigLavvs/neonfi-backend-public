@@ -224,6 +224,7 @@ describe('MoralisWalletProvider — getNftHoldings', () => {
       collectionName: 'Coll A',
       logoUrl: 'http://cdn/high', // CDN media wins over the ipfs metadata image
       tokenStandard: 'ERC721',
+      possibleSpam: false, // retrofit-73 (H13)
     });
     expect(out![1]!.logoUrl).toBe('https://ipfs.io/ipfs/bafyHash/img.png'); // ipfs:// rewritten
     expect(out![1]!.description).toBeNull();
@@ -516,6 +517,7 @@ describe('GoldRushWalletProvider — getTransferHistory (retrofit-63)', () => {
       collectionName: 'Azuki',
       logoUrl: 'http://img/512', // image_512 wins
       tokenStandard: 'ERC721',
+      possibleSpam: false, // retrofit-73 (H13): GoldRush drops is_spam rows upstream
     });
     const [url] = fetchMock.mock.calls[0]! as [string];
     expect(String(url)).toContain('/balances_nft/');
@@ -667,6 +669,7 @@ describe('AlchemyWalletProvider — getTransferHistory + getNftHoldings (retrofi
       collectionName: 'Azuki',
       logoUrl: 'http://cdn/cached', // cachedUrl wins
       tokenStandard: 'ERC721',
+      possibleSpam: false, // retrofit-73 (H13)
     });
     const [url] = fetchMock.mock.calls[0]! as [string];
     expect(String(url)).toContain('/nft/v3/al_key/getNFTsForOwner');

@@ -218,6 +218,7 @@ export class AlchemyWalletProvider implements WalletDataProvider {
           collectionName: it.contract?.name ?? it.collection?.name ?? null,
           logoUrl: img.cachedUrl ?? img.pngUrl ?? img.thumbnailUrl ?? img.originalUrl ?? null,
           tokenStandard: it.tokenType ?? it.contract?.tokenType ?? null,
+          possibleSpam: it.contract?.isSpam === true, // retrofit-73 (H13)
         });
       }
       return holdings;
@@ -278,7 +279,7 @@ interface AlchemyNftImage {
   originalUrl?: string | null;
 }
 interface AlchemyOwnedNft {
-  contract?: { address?: string | null; name?: string | null; tokenType?: string | null } | null;
+  contract?: { address?: string | null; name?: string | null; tokenType?: string | null; isSpam?: boolean | null } | null;
   tokenId?: string | null; // DECIMAL from getNFTsForOwner
   tokenType?: string | null;
   name?: string | null;

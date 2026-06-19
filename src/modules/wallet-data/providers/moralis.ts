@@ -101,6 +101,7 @@ interface MoralisNftHolding {
   name?: string | null;
   contract_type?: string | null;
   collection_logo?: string | null;
+  possible_spam?: boolean; // retrofit-73 (H13): provider-flagged airdrop/scam NFT
   normalized_metadata?: { name?: string | null; image?: string | null; description?: string | null } | null;
   // Moralis-cached media (only present when media_items=true). The CDN URLs here are far
   // more reliable than the raw IPFS/HTTP image in normalized_metadata (which often 404s).
@@ -407,6 +408,7 @@ export class MoralisWalletProvider implements WalletDataProvider {
           collectionName: it.name ?? null,
           logoUrl: mediaUrl ?? toHttpImage(it.normalized_metadata?.image) ?? it.collection_logo ?? null,
           tokenStandard: it.contract_type ?? null,
+          possibleSpam: it.possible_spam === true, // retrofit-73 (H13)
         });
       }
       return holdings;

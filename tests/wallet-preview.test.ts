@@ -554,7 +554,7 @@ it('415: sync-more imports the next page using the stored cursor and advances/cl
   expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } })).syncCursor).toBeNull();
 });
 
-it('416: overview transactionCount uses externalTxCount for connected, DB count for manual', async () => {
+it('416: overview transactionCount = imported DB rows (headline); connected on-chain total is a separate stat (retrofit-73 H10)', async () => {
   const { cookie, userId } = await registerAndLogin();
   // Upgrade to Pro so the user can hold both a connected and a manual portfolio.
   const pro = await prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } });
@@ -592,8 +592,11 @@ it('416: overview transactionCount uses externalTxCount for connected, DB count 
   const res = await overviewGet(cookie);
   expect(res.status).toBe(200);
   const d = (await res.json()).data;
-  // 137 (connected external total) + 3 (manual DB rows) = 140 — NOT 1 + 3.
-  expect(d.totals.transactionCount).toBe(140);
+  // retrofit-73 (H10): the headline counts the rows the list can show — 0 (connected, no imported
+  // rows) + 3 (manual) = 3 — never 137 next to a 3-row list. The connected wallet's real on-chain
+  // total (137) is surfaced separately as onChainTransactionCount.
+  expect(d.totals.transactionCount).toBe(3);
+  expect(d.totals.onChainTransactionCount).toBe(137);
 });
 
 // ---------------------------------------------------------------------------

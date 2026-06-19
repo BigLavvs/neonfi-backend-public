@@ -403,6 +403,52 @@ it('204: POST native with extra erc20 field → 400 VALIDATION_ERROR (strict)', 
   expect(json.error.code).toBe('VALIDATION_ERROR');
 });
 
+// retrofit-73 (R43/R44/R45): transaction input validation — zero, over-large, and future-dated.
+it('r73-amount-zero: POST amount 0 → 400 VALIDATION_ERROR (not a $0 transaction)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+
+  const res = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '0', symbol: 'BTC', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(400);
+  expect(((await res.json()) as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+});
+
+it('r73-amount-huge: POST amount 1e15 → 400 VALIDATION_ERROR (not a 500 Decimal overflow)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+
+  const res = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '1000000000000000', symbol: 'BTC', timestamp: TIMESTAMP },
+    cookies,
+  );
+  expect(res.status).toBe(400); // bounded by the schema, never reaches the Decimal column
+  expect(((await res.json()) as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+});
+
+it('r73-future-ts: POST timestamp in 2099 → 400 VALIDATION_ERROR', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await addAssetDirectly(portfolioId, btcId);
+
+  const res = await txPost(
+    portfolioId,
+    { type: 'native', direction: 'buy', amount: '1.0', symbol: 'BTC', timestamp: '2099-01-01T00:00:00.000Z' },
+    cookies,
+  );
+  expect(res.status).toBe(400);
+  expect(((await res.json()) as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+});
+
 it('205: POST duplicate transactionHash → 409 TRANSACTION_HASH_DUPLICATE', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();

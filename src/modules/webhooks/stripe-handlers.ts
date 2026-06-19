@@ -210,8 +210,12 @@ export async function handleInvoicePaymentSucceeded(event: Stripe.Event): Promis
   const periodEnd = new Date(invoice.period_end * 1000);
 
   await prisma.$transaction(async (tx) => {
-    await tx.payment.create({
-      data: {
+    // retrofit-73 (M19): UPSERT (not create) keyed on the unique stripePaymentIntentId so this is
+    // idempotent — Stripe sends BOTH `invoice.paid` and `invoice.payment_succeeded` for one paid
+    // invoice (both now routed here), and either alone must produce exactly one Payment row.
+    await tx.payment.upsert({
+      where: { stripePaymentIntentId: paymentIntentId },
+      create: {
         userId: localSub.userId,
         subscriptionId: localSub.id,
         stripePaymentIntentId: paymentIntentId,
@@ -220,6 +224,7 @@ export async function handleInvoicePaymentSucceeded(event: Stripe.Event): Promis
         statusId: succeededStatus.id,
         refundAvailable: true,
       },
+      update: {}, // already recorded by the sibling event → no-op
     });
     await tx.subscription.update({
       where: { id: localSub.id },

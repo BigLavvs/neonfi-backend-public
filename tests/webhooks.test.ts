@@ -410,6 +410,42 @@ it('92: invoice.payment_succeeded → Payment row created, Subscription period d
   expect(sub!.currentPeriodEnd?.getTime()).toBe(newPeriodEnd * 1000);
 });
 
+it('r73-invoice-paid: invoice.paid → Payment row created (M19); idempotent with payment_succeeded for the same PI', async () => {
+  const userId = await createUser();
+  const subId = await createProSubscription(userId);
+  const PI = 'pi_invoice_paid_001';
+  mockInvoicesRetrieve.mockResolvedValue({
+    payments: { data: [{ payment: { payment_intent: PI } }] },
+  });
+
+  const invoiceData = {
+    id: 'in_invoice_paid_001',
+    parent: { subscription_details: { subscription: STRIPE_SUB_ID } },
+    amount_paid: 1999,
+    currency: 'usd',
+    period_start: 1751356800,
+    period_end: 1753948800,
+  };
+
+  // 1) invoice.paid alone creates the Payment (the M19 gap — previously unhandled).
+  const paidEvent = makeEvent('invoice.paid', invoiceData, 'evt_invoice_paid_001');
+  mockConstructEvent.mockReturnValueOnce(paidEvent);
+  expect((await webhookPost(paidEvent)).status).toBe(200);
+
+  let payments = await prisma.payment.findMany({ where: { subscriptionId: subId } });
+  expect(payments).toHaveLength(1);
+  expect(payments[0]!.stripePaymentIntentId).toBe(PI);
+  expect(payments[0]!.amount).toBe(1999);
+
+  // 2) the sibling invoice.payment_succeeded for the SAME PI must NOT duplicate the row.
+  const succeededEvent = makeEvent('invoice.payment_succeeded', invoiceData, 'evt_invoice_succeeded_dup_001');
+  mockConstructEvent.mockReturnValueOnce(succeededEvent);
+  expect((await webhookPost(succeededEvent)).status).toBe(200);
+
+  payments = await prisma.payment.findMany({ where: { subscriptionId: subId } });
+  expect(payments).toHaveLength(1); // idempotent on stripePaymentIntentId
+});
+
 // ---------------------------------------------------------------------------
 // 93. invoice.payment_failed → Payment row created (failed); Subscription state unchanged
 // ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ interface OverviewData {
     pnlAllTimeValue: number;
     portfolioCount: number;
     transactionCount: number;
+    onChainTransactionCount: number;
   };
   portfolios: Array<{
     id: number;
@@ -313,6 +314,7 @@ it('371: empty user (no portfolios) → 200, all totals 0, all arrays empty (NOT
     allTimePnlValue: 0,
     portfolioCount: 0,
     transactionCount: 0,
+    onChainTransactionCount: 0, // retrofit-73 (H10)
   });
   expect(d.portfolios).toEqual([]);
   expect(d.valueHistory).toEqual([]);
@@ -541,6 +543,29 @@ it('375: recentTransactions = most recent txLimit across all portfolios (desc); 
   expect(d.recentTransactions[0]!.portfolioId).toBe(p2);
   expect(d.recentTransactions[1]!.timestamp).toBe('2026-01-03T00:00:00.000Z');
   expect(d.recentTransactions[1]!.portfolioId).toBe(p1);
+});
+
+it('r73-txcount: headline transactionCount = imported rows; connected on-chain total is a separate stat', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const manual = await createManualPortfolio(userId, 'M');
+  const connected = await createConnectedPortfolio(userId, 'C');
+  // The connected wallet reports 421 on-chain txns, but only 3 were imported as rows.
+  await prisma.portfolio.update({ where: { id: connected }, data: { externalTxCount: 421 } });
+  await seedNativeTx(manual, '2026-01-01T00:00:00.000Z');
+  await seedNativeTx(manual, '2026-01-02T00:00:00.000Z');
+  await seedNativeTx(connected, '2026-01-03T00:00:00.000Z');
+  await seedNativeTx(connected, '2026-01-04T00:00:00.000Z');
+  await seedNativeTx(connected, '2026-01-05T00:00:00.000Z');
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // retrofit-73 (H10): headline = the 5 rows the list can actually show, NOT 421.
+  expect(d.totals.transactionCount).toBe(5);
+  // The on-chain total is surfaced separately.
+  expect(d.totals.onChainTransactionCount).toBe(421);
 });
 
 // ---------------------------------------------------------------------------

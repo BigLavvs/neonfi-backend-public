@@ -76,6 +76,7 @@ export interface WalletNftHolding {
   collectionName: string | null;
   logoUrl: string | null;
   tokenStandard: string | null;
+  possibleSpam: boolean; // retrofit-73 (H13): provider-flagged airdrop/scam NFT
 }
 
 export interface WalletDataProvider {

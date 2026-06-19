@@ -19,6 +19,10 @@ const REDIS_TTL_30_DAYS = 2592000;
 const HANDLED_EVENT_TYPES = new Set([
   'checkout.session.completed',
   'invoice.payment_succeeded',
+  // retrofit-73 (M19): Stripe sends `invoice.paid` alongside (and in some integrations instead of)
+  // `invoice.payment_succeeded`. Handle it too so a paid invoice always persists a Payment row —
+  // the handler is idempotent on stripePaymentIntentId, so receiving both is safe.
+  'invoice.paid',
   'invoice.payment_failed',
   'customer.subscription.updated',
   'customer.subscription.deleted',
@@ -31,6 +35,7 @@ async function dispatch(event: Stripe.Event): Promise<void> {
       await handleCheckoutSessionCompleted(event);
       break;
     case 'invoice.payment_succeeded':
+    case 'invoice.paid': // retrofit-73 (M19): same handler, idempotent on stripePaymentIntentId
       await handleInvoicePaymentSucceeded(event);
       break;
     case 'invoice.payment_failed':

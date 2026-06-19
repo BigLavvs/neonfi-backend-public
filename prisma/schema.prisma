@@ -517,6 +517,10 @@ model Nft {
   lastSaleNote    String?   @db.VarChar(100)
   rarity          String?   @db.VarChar(100)
   traits          Json?
+  // retrofit-73 (H13): Moralis' possible_spam flag, persisted so airdrop/scam NFTs
+  // ("Hefty Presents" ×17, "Garbage Bags") can be filtered out of the holdings list / badged
+  // instead of presented as real holdings. Default false (legacy + non-spam rows).
+  possibleSpam    Boolean   @default(false)
 
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
