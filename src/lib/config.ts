@@ -178,6 +178,21 @@ const schema = z
       .default('*/30 * * * *')
       .refine((v) => cron.validate(v), 'CONNECTED_REPRICE_CRON must be a valid cron expression'),
 
+    // --- Live price → Token.currentPrice flush (retrofit-70 fix #2) ---
+    // Short-interval flush of the canonical live `price:<SYM>` ticks into Token.currentPrice
+    // so currentPrice-fallback reads (overview allocation, daily token_price_snapshot, token
+    // pages) aren't hours behind the feed. NOTE: explicit transform, NOT z.coerce.boolean() —
+    // Boolean("false") === true, so coercion would never disable it (same gotcha as
+    // TOKEN_SYNC_ENABLED / SNAPSHOT_ENABLED). Default ON.
+    LIVE_PRICE_FLUSH_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    LIVE_PRICE_FLUSH_CRON: z
+      .string()
+      .default('*/5 * * * *')
+      .refine((v) => cron.validate(v), 'LIVE_PRICE_FLUSH_CRON must be a valid cron expression'),
+
     // --- Daily balance snapshot job (Stage 13) ---
     // NOTE: deliberately NOT z.coerce.boolean() like TOKEN_SYNC_ENABLED above —
     // z.coerce.boolean() runs Boolean("false") === true, so "false" would NOT

@@ -26,6 +26,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { redis } from '../lib/redis.js';
 import { config } from '../lib/config.js';
+import { getLivePriceMap } from '../lib/live-price.js';
 import { SNAPSHOT_RETENTION_DAYS } from '../lib/constants.js';
 import { getEffectivePlan } from '../modules/subscriptions/subscriptions.service.js';
 import { listAllPortfolioIdsForJobs } from '../modules/portfolios/portfolios.service.js';
@@ -175,14 +176,20 @@ export async function runSnapshotJob(
   // the job still completes + returns); per-row isolation isn't needed because every row
   // comes from a token we just read (FK always valid) with a NOT NULL price. Snapshots
   // only accrue when this job runs — daily granularity, sparse in dev, like BalanceSnapshot.
-  const tokens = await prisma.token.findMany({ select: { id: true, currentPrice: true } });
+  const tokens = await prisma.token.findMany({ select: { id: true, symbol: true, currentPrice: true } });
   let tokenPricesSnapshotted = 0;
   if (tokens.length > 0) {
     try {
+      // retrofit-70 fix #2: snapshot today's point at the LIVE canonical price when a fresh
+      // tick exists, falling back to Token.currentPrice (itself kept fresh by the live-price
+      // flush job). This stops the chart's right edge inheriting an hours-stale CMC price and
+      // duplicating across days when CMC didn't refresh.
+      const liveMap = await getLivePriceMap(tokens.map((t) => t.symbol));
       const ymd = snapshotDate.toISOString().slice(0, 10); // 'YYYY-MM-DD' for the ::date cast
-      const rows = tokens.map(
-        (t) => Prisma.sql`(${t.id}::int, ${t.currentPrice.toString()}::decimal, ${ymd}::date)`,
-      );
+      const rows = tokens.map((t) => {
+        const price = liveMap.get(t.symbol) ?? Number(t.currentPrice.toString());
+        return Prisma.sql`(${t.id}::int, ${price.toString()}::decimal, ${ymd}::date)`;
+      });
       tokenPricesSnapshotted = await prisma.$executeRaw`
         INSERT INTO "token_price_snapshot" ("tokenId", "price", "snapshotDate")
         VALUES ${Prisma.join(rows)}

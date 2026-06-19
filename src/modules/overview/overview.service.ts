@@ -17,6 +17,7 @@
 
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
+import { getLivePriceMap } from '../../lib/live-price.js';
 import { computeDerived } from '../portfolios/derive.js';
 import { findPortfoliosByUserId } from '../portfolios/portfolios.repository.js';
 import { slugify } from '../portfolios/slug.js';
@@ -241,6 +242,14 @@ async function buildOverview(
     Promise.all(portfolios.map((p) => earliestUserTransactionDate(p.id))),
   ]);
 
+  // retrofit-70 (C2/C3/M20): value allocation off the SAME live price as totalValue. derive.ts
+  // already overlays the live `price:<SYM>` tick when computing each portfolio's totalValue, so
+  // valuing allocation/grandTotal off `Token.currentPrice` (stale until the 6-hourly CMC sync)
+  // made the donut slices not sum to the headline and the dashboard total flip across loads. One
+  // map for every symbol across every portfolio → allocation reconciles with totals.totalValue.
+  const allSymbols = assetsList.flat().map((a) => a.token.symbol);
+  const liveMap = await getLivePriceMap(allSymbols);
+
   // retrofit-49 (#8): Σ over the user's portfolios of the connected-wallet on-chain total
   // (externalTxCount) when known, else the imported DB row count for that portfolio.
   let transactionCount = 0;
@@ -293,12 +302,12 @@ async function buildOverview(
   // grandTotal drives the allocation %s. Only assets with balance > 0 contribute (matches
   // assetCount and the analytics holdings filter).
   //
-  // retrofit-28: the per-request live-price overlay (getLivePriceMap) is removed from this
-  // read path — allocation/holdings now return the daily/stored currentPrice and the
-  // client owns the live overlay (it recomputes from the firehose × balance/avgCost with
-  // this daily fallback). NOTE: totals/per-portfolio totalValue still come from
-  // computeDerived, which keeps its own overlay (out of scope here, and test 390 asserts
-  // the live total) — so totals stay live while allocation is the daily fallback.
+  // retrofit-70 (C2/C3/M20): allocation is valued off the live map (`liveMap.get(sym) ??
+  // currentPrice`) — the SAME price derive.ts uses for totalValue — so Σ(allocation.value)
+  // reconciles with the headline totalValue and the donut % matches every other surface.
+  // (retrofit-28 had dropped this overlay so allocation returned the stale daily currentPrice
+  // while totals stayed live, which made the slices not sum to the total and the net-worth
+  // flicker across loads.) The client firehose still refines between 60s cache windows.
   const allocValueBySymbol = new Map<string, number>();
   const balanceBySymbol = new Map<string, number>();
   // retrofit-28 aggregate cost accumulators (per symbol, cost-tracked = avgCost != null):
@@ -327,7 +336,7 @@ async function buildOverview(
       if (balance <= 0) continue;
       assetCount += 1;
       const symbol = a.token.symbol;
-      const price = Number(a.token.currentPrice.toString());
+      const price = liveMap.get(symbol) ?? Number(a.token.currentPrice.toString());
       const value = balance * price;
       allocValueBySymbol.set(symbol, (allocValueBySymbol.get(symbol) ?? 0) + value);
       balanceBySymbol.set(symbol, (balanceBySymbol.get(symbol) ?? 0) + balance);

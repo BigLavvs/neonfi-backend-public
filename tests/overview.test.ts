@@ -741,6 +741,13 @@ it('390: totals.pnl24h* = current total − latest snapshot ≤24h old (matching
   expect(d.totals.pnl24hValue).toBe(20000);
   // pnl24h = 20000 / 80000 * 100 = 25.00 (the matching %)
   expect(d.totals.pnl24h).toBe(25);
+
+  // retrofit-70 (C2): allocation is valued off the SAME live price as the headline, so the
+  // donut slices sum to the total. Pre-retrofit-70 the BTC slice used the stale daily
+  // currentPrice (93000) while the total was live (100000) — they no longer diverge.
+  const allocBtc = d.allocation.find((a) => a.symbol === 'BTC')!;
+  expect(allocBtc.value).toBeCloseTo(100000, 2); // live price, not stale 93000
+  expect(d.allocation.reduce((s, a) => s + a.value, 0)).toBeCloseTo(d.totals.totalValue, 2);
 });
 
 // ---------------------------------------------------------------------------
