@@ -29,6 +29,32 @@ vi.mock('../src/modules/email/email.service.js', () => ({
   sendPlanDowngradeAppliedEmail: vi.fn().mockResolvedValue(undefined),
 }));
 
+// retrofit-59 §1/§2: a connected portfolio's balance no longer comes from recalc'ing the
+// webhook's transactions — recalc skips connected, and the webhook instead REFRESHES balances
+// from the provider summary after the feed write. Mock fetchWalletSummary so the balance the
+// webhook lands is deterministic; keep the rest of wallet-data real (partial mock).
+const { fetchWalletSummaryMock } = vi.hoisted(() => ({ fetchWalletSummaryMock: vi.fn() }));
+vi.mock('../src/modules/wallet-data/index.js', async (importOriginal) => ({
+  ...((await importOriginal()) as object),
+  fetchWalletSummary: fetchWalletSummaryMock,
+}));
+
+// Build a provider WalletSummary from a simple token list (contractAddress null → resolved by
+// symbol against the seeded catalog, no contract backfill).
+function summaryOf(tokens: Array<{ symbol: string; balance: number; isNative?: boolean }>): unknown {
+  return {
+    nativeSymbol: 'ETH',
+    nativeBalance: tokens.find((t) => t.isNative)?.balance ?? 0,
+    totalUsd: null,
+    tokenCount: tokens.length,
+    tokens: tokens.map((t) => ({
+      symbol: t.symbol, name: t.symbol, contractAddress: null, balance: t.balance,
+      decimals: 18, usdPrice: 1, usdValue: t.balance, isNative: !!t.isNative,
+    })),
+    provider: 'moralis',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -111,6 +137,10 @@ beforeEach(async () => {
   // Cleanup DB state from prior tests
   await truncateAllUserData();
   await clearMoralisRedisKeys();
+  // Default: provider reports no balances → the post-webhook refresh zeros connected assets.
+  // Balance-asserting tests override this with summaryOf(...).
+  fetchWalletSummaryMock.mockReset();
+  fetchWalletSummaryMock.mockResolvedValue(null);
 
   // Seed a connected portfolio on Ethereum for tests that need it
   const authProvider = await prisma.authProvider.findUniqueOrThrow({ where: { name: 'email' } });
@@ -232,7 +262,9 @@ it('273: native transfer IN for unknown chain → 200 with skipped count; no DB 
   expect(count).toBe(0);
 });
 
-it('274: native transfer IN (to=walletAddr, known portfolio, known token) → 200, Asset.balance increases, direction=buy', async () => {
+it('274: native transfer IN → 200, tx in feed (direction=buy), balance refreshed from provider (retrofit-59)', async () => {
+  // retrofit-59: balance now comes from the provider summary refresh, not recalc — provider says 2 ETH.
+  fetchWalletSummaryMock.mockResolvedValue(summaryOf([{ symbol: 'ETH', balance: 2, isNative: true }]));
   const payload = makePayload(
     {
       txs: [{ hash: '0xhash274', from: OTHER_ADDRESS, to: WALLET_ADDRESS, value: '2000000000000000000' }],
@@ -245,7 +277,7 @@ it('274: native transfer IN (to=walletAddr, known portfolio, known token) → 20
   expect(json.data.processed).toBe(1);
   expect(json.data.skipped).toBe(0);
 
-  // Verify Transaction was inserted with direction='buy'
+  // Verify Transaction was inserted with direction='buy' (the activity feed is unchanged).
   const tx = await prisma.transaction.findFirst({
     where: { portfolioId, transactionHash: '0xhash274' },
     include: { direction: true },
@@ -253,7 +285,7 @@ it('274: native transfer IN (to=walletAddr, known portfolio, known token) → 20
   expect(tx).not.toBeNull();
   expect(tx!.direction.name).toBe('buy');
 
-  // Verify Asset.balance = 2 ETH
+  // Asset.balance reflects the PROVIDER summary (2 ETH), refreshed after the feed write.
   const asset = await prisma.asset.findUnique({
     where: { portfolioId_tokenId: { portfolioId, tokenId: ethTokenId } },
   });
@@ -261,9 +293,11 @@ it('274: native transfer IN (to=walletAddr, known portfolio, known token) → 20
   expect(Number(asset!.balance.toString())).toBeCloseTo(2, 8);
 });
 
-it('275: native transfer OUT (from=walletAddr) → 200, direction=sell, balance decreases', async () => {
-  // Seed initial ETH balance via a prior buy webhook — recalcAssetBalance derives
-  // balance from transactions, not from the asset.balance column directly.
+it('275: native transfer OUT → 200, direction=sell, balance reflects the provider (retrofit-59)', async () => {
+  // retrofit-59: after the OUT transfer the wallet holds 4 ETH on-chain — the provider summary
+  // (not a recalc of the windowed txns) is the balance source.
+  fetchWalletSummaryMock.mockResolvedValue(summaryOf([{ symbol: 'ETH', balance: 4, isNative: true }]));
+  // A prior IN transfer just to put a row in the feed (its recalc is a no-op for connected now).
   const setupPayload = makePayload(
     {
       txs: [{ hash: '0xhash275-setup', from: OTHER_ADDRESS, to: WALLET_ADDRESS, value: '5000000000000000000' }],
@@ -289,7 +323,7 @@ it('275: native transfer OUT (from=walletAddr) → 200, direction=sell, balance 
   });
   expect(tx!.direction.name).toBe('sell');
 
-  // Balance was 5, sold 1 → 4
+  // Balance = the provider's current on-chain balance (4 ETH).
   const asset = await prisma.asset.findUnique({
     where: { portfolioId_tokenId: { portfolioId, tokenId: ethTokenId } },
   });
@@ -323,12 +357,15 @@ it('276: ERC-20 transfer for unknown token symbol → 200 with skipped count; no
   expect(count).toBe(0);
 });
 
-it('277: ERC-20 transfer for known token, Asset does not exist yet → Asset auto-created, balance recalcd', async () => {
+it('277: ERC-20 transfer for known token, Asset does not exist yet → Asset created, balance from provider', async () => {
   // Confirm no USDC asset exists
   const existingAsset = await prisma.asset.findUnique({
     where: { portfolioId_tokenId: { portfolioId, tokenId: usdcTokenId } },
   });
   expect(existingAsset).toBeNull();
+
+  // retrofit-59: provider reports 5 USDC → that's the balance the refresh lands.
+  fetchWalletSummaryMock.mockResolvedValue(summaryOf([{ symbol: 'USDC', balance: 5 }]));
 
   const payload = makePayload(
     {
@@ -439,6 +476,11 @@ it('279: wallet address does not match any portfolio → 200 with all zero count
 });
 
 it('280: multiple transfers in single payload (native + erc20) → 200, counts reflect all, idempotency key set once', async () => {
+  // retrofit-59: balances come from the provider summary refresh (ETH 1, USDC 3).
+  fetchWalletSummaryMock.mockResolvedValue(summaryOf([
+    { symbol: 'ETH', balance: 1, isNative: true },
+    { symbol: 'USDC', balance: 3 },
+  ]));
   const payload = makePayload(
     {
       txs: [

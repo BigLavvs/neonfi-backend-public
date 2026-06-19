@@ -26,6 +26,7 @@ import { config } from '../../lib/config.js';
 import { ok, err } from '../../lib/envelope.js';
 import { verifyMoralisSignature } from '../../lib/moralis-signature.js';
 import { createTransactionFromWebhook } from '../transactions/transactions.service.js';
+import { refreshConnectedBalancesFromProvider } from '../wallet-data/sync.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 
 // js-sha3 is CommonJS with dynamically-built exports — default-import then destructure
@@ -216,6 +217,9 @@ async function processNativeTx(
   chainId: number,
   moralisChainId: string,
   blockTimestamp: string,
+  // retrofit-59 §2: collects every connected portfolio touched, so the handler can refresh its
+  // balances from the provider summary AFTER the feed writes (recalc no longer sets them).
+  affected: Map<number, PortfolioWithRelations>,
 ): Promise<{ processed: number; skipped: number }> {
   const fromAddr = (nativeTx.from ?? nativeTx.fromAddress ?? '').toLowerCase();
   const toAddr = (nativeTx.to ?? nativeTx.toAddress ?? '').toLowerCase();
@@ -245,6 +249,7 @@ async function processNativeTx(
   for (const { addr, direction } of candidates) {
     const portfolio = await findConnectedPortfolio(addr, chainId);
     if (!portfolio) continue; // graceful no-op — wallet we don't track
+    affected.set(portfolio.id, portfolio); // retrofit-59 §2: refresh its balances after the feed write
 
     const amount = convertWeiToEther(nativeTx.value ?? '0');
 
@@ -284,6 +289,7 @@ async function processErc20Transfer(
   transfer: MoralisErc20Transfer,
   chainId: number,
   blockTimestamp: string,
+  affected: Map<number, PortfolioWithRelations>, // retrofit-59 §2: connected portfolios to refresh
 ): Promise<TransferResult> {
   const fromAddr = (transfer.from ?? '').toLowerCase();
   const toAddr = (transfer.to ?? '').toLowerCase();
@@ -317,6 +323,7 @@ async function processErc20Transfer(
   for (const { addr, direction } of candidates) {
     const portfolio = await findConnectedPortfolio(addr, chainId);
     if (!portfolio) continue;
+    affected.set(portfolio.id, portfolio); // retrofit-59 §2: refresh its balances after the feed write
 
     const amount = convertTokenAmount(transfer.value ?? '0', transfer.tokenDecimals ?? '18');
 
@@ -487,6 +494,11 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
 
   let processed = 0;
   let skipped = 0;
+  // retrofit-59 §2: connected portfolios whose fungible balance a transfer touched. After the
+  // feed writes, their balances are refreshed from the provider summary (recalc no longer sets
+  // them for connected — §1). NFT-only transfers never touch a fungible balance, so the NFT path
+  // doesn't populate this.
+  const affected = new Map<number, PortfolioWithRelations>();
 
   // NOTE: there is NO per-transfer try/catch here. Business skips are RETURNED by
   // the processors (counted below); transient/unexpected errors are RE-THROWN and
@@ -497,14 +509,14 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
   try {
     // Process native transfers
     for (const nativeTx of txs) {
-      const counts = await processNativeTx(nativeTx, chain.id, moralisChainId, blockTimestamp);
+      const counts = await processNativeTx(nativeTx, chain.id, moralisChainId, blockTimestamp, affected);
       processed += counts.processed;
       skipped += counts.skipped;
     }
 
     // Process ERC-20 transfers
     for (const erc20 of erc20Transfers) {
-      const result = await processErc20Transfer(erc20, chain.id, blockTimestamp);
+      const result = await processErc20Transfer(erc20, chain.id, blockTimestamp, affected);
       if (result === 'processed') processed++;
       else if (result === 'skipped') skipped++;
       // 'no-op' → wallet not tracked, don't count
@@ -526,6 +538,15 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
   // 6. Set idempotency key ONLY after the whole payload processed without a transient
   //    error (genuine business skips above are deterministic, so acking them is safe).
   await redis.set(`moralis_event:${eventId}`, '1', 'EX', REDIS_TTL_30_DAYS);
+
+  // 7. retrofit-59 §2: refresh each touched connected portfolio's balances from the provider
+  //    (the live counterpart of resync's balances-only set). Best-effort PER portfolio — the
+  //    helper swallows its own errors, so a provider failure never affects the 200/dedupe above;
+  //    the balance just stays as-is until the next sync. Done AFTER the dedupe key so a refresh
+  //    failure can't trigger a Moralis retry of the (already-acked) feed write.
+  for (const portfolio of affected.values()) {
+    await refreshConnectedBalancesFromProvider(portfolio);
+  }
 
   return c.json(ok({ received: true, processed, skipped }), 200);
 }

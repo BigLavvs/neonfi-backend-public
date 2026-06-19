@@ -39,6 +39,18 @@ export async function recalcAssetBalance(
   portfolioId: number,
   tokenId: number,
 ): Promise<void> {
+  // retrofit-59: a CONNECTED portfolio's balance is the provider summary (retrofit-58 Part 1),
+  // NOT the windowed transaction set. recalc must NOT overwrite it — otherwise every webhook /
+  // load-more / import re-derives the wrong windowed sum and reverts the fix. Leave
+  // balance/netDeposit/cost exactly as setConnectedBalancesFromSummary set them. Manual
+  // portfolios recompute below exactly as before. (Imported transfers still write Transaction
+  // rows — the activity feed — they just no longer drive the balance.)
+  const portfolio = await tx.portfolio.findUnique({
+    where: { id: portfolioId },
+    select: { type: { select: { name: true } } },
+  });
+  if (portfolio?.type?.name === 'connected') return;
+
   const token = await tx.token.findUnique({ where: { id: tokenId } });
   if (!token) return;
 

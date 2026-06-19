@@ -399,7 +399,7 @@ async function backfillConnectedSnapshots(
 // activity feed; they simply no longer drive the balance. Idempotent (a resync re-sets the same
 // values). Returns the number of held tokens set (the resync "reconciled" count). Per-token
 // best-effort — one failed upsert logs and continues.
-async function setConnectedBalancesFromSummary(
+export async function setConnectedBalancesFromSummary(
   portfolioId: number,
   held: HeldToken[],
 ): Promise<number> {
@@ -443,6 +443,34 @@ async function setConnectedBalancesFromSummary(
   return held.length;
 }
 
+// retrofit-59 §2: re-derive a connected portfolio's balances from the provider summary — a
+// "balances-only mini-resync" the webhook calls AFTER appending an on-chain transfer to the
+// feed. Live updates then reflect the REAL on-chain balance instead of recalc's windowed sum
+// (which retrofit-59 §1 now skips for connected). Best-effort: any provider failure is logged
+// and swallowed so the webhook's feed write stands and the balance refresh just defers to the
+// next sync/resync. No-op for non-connected / address-less portfolios.
+//
+// PERF NOTE (per the plan): this fetches the FULL provider summary per balance-affecting
+// webhook. Webhooks are infrequent, so that's fine for now; if it ever gets heavy, narrow it to
+// the affected token's current balance. Not pre-optimized.
+export async function refreshConnectedBalancesFromProvider(
+  portfolio: PortfolioWithRelations,
+): Promise<void> {
+  if (portfolio.type.name !== 'connected' || !portfolio.walletAddress || !portfolio.chain) return;
+  try {
+    const summary = await fetchWalletSummary(portfolio.walletAddress, { slug: portfolio.chain.slug });
+    const held = await resolveHeldTokens(summary);
+    await setConnectedBalancesFromSummary(portfolio.id, held);
+    await invalidatePnlCache(portfolio.id);
+  } catch (e) {
+    console.error(
+      '[wallet-sync] webhook balance refresh failed',
+      { portfolioId: portfolio.id },
+      (e as Error).message,
+    );
+  }
+}
+
 interface HeldToken {
   tokenId: number;
   symbol: string;
@@ -454,7 +482,7 @@ interface HeldToken {
 // price/contract/logo) and return the held list. Done BEFORE importing transfers so a transfer
 // for an auto-listed token resolves to a row that already carries the right price. Per-token
 // best-effort — a token that can't be resolved (e.g. an over-long symbol) is logged & skipped.
-async function resolveHeldTokens(
+export async function resolveHeldTokens(
   summary: Awaited<ReturnType<typeof fetchWalletSummary>>,
 ): Promise<HeldToken[]> {
   const held: HeldToken[] = [];
