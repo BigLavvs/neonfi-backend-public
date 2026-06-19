@@ -30,7 +30,7 @@ const clampTo =
     Math.min(hi, Math.max(lo, n));
 
 const OverviewQuerySchema = z.object({
-  days: z.coerce.number().int().catch(90).transform(clampTo(1, 365)),
+  days: z.coerce.number().int().catch(90).transform(clampTo(1, 1095)), // retrofit-61: allow ~3yr (ALL)
   txLimit: z.coerce.number().int().catch(10).transform(clampTo(1, 50)),
 });
 
