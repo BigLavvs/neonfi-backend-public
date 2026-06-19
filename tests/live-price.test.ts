@@ -236,16 +236,14 @@ it('382: asset list price + value overlay the live tick (BTC price 100000, value
 // ---------------------------------------------------------------------------
 // 383 — GET /overview: totals stay live, allocation uses the stored daily price
 // ---------------------------------------------------------------------------
-// retrofit-28 deliberately removed the per-request live-price overlay from the overview
-// allocation/holdings path — the CLIENT now owns the live allocation overlay (it recomputes
-// from the firehose × balance, with the stored/daily currentPrice as the fallback). So:
-//   - totals.totalValue stays LIVE: it comes from computeDerived, which keeps its own
-//     overlay (1×100000 + 2×4000 = 108000).
-//   - allocation[].value is the stored/daily currentPrice (seed: BTC 93000, ETH 3200), NOT
-//     the live tick (1×93000 = 93000; 2×3200 = 6400).
-// retrofit-62: this assertion was the stale side (it asserted the old, pre-28 live allocation
-// overlay). The retrofit-28 design stands — do NOT re-introduce the server-side overlay.
-it('383: overview totals stay live (computeDerived); allocation uses the stored daily price', async () => {
+// retrofit-70 (C2/C3/M20) reversed retrofit-28: the overview allocation is now valued off the
+// SAME live `price:<SYM>` map that computeDerived uses for totalValue, so the donut slices sum
+// to the headline (they no longer diverge / flicker across loads). So with live ticks BTC=100000,
+// ETH=4000:
+//   - totals.totalValue = 1×100000 + 2×4000 = 108000 (live).
+//   - allocation[].value = the SAME live price: BTC 1×100000 = 100000, ETH 2×4000 = 8000.
+//   - Σ(allocation.value) == totals.totalValue.
+it('383: overview allocation is valued off the live price and sums to the live total (retrofit-70)', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await createManualPortfolio(userId);
@@ -266,12 +264,13 @@ it('383: overview totals stay live (computeDerived); allocation uses the stored 
 
   // Totals overlay the live tick (computeDerived): 1*100000 + 2*4000 = 108000.
   expect(json.data.totals.totalValue).toBeCloseTo(108000, 2);
-  // Allocation is the stored/daily fallback (BTC 93000, ETH 3200) — the client adds the live
-  // overlay on top.
+  // Allocation is valued off the SAME live map now — slices sum to the headline.
   const btcAlloc = json.data.allocation.find((a) => a.symbol === 'BTC')!;
   const ethAlloc = json.data.allocation.find((a) => a.symbol === 'ETH')!;
-  expect(btcAlloc.value).toBeCloseTo(93000, 2);
-  expect(ethAlloc.value).toBeCloseTo(6400, 2);
+  expect(btcAlloc.value).toBeCloseTo(100000, 2);
+  expect(ethAlloc.value).toBeCloseTo(8000, 2);
+  const allocSum = json.data.allocation.reduce((s, a) => s + a.value, 0);
+  expect(allocSum).toBeCloseTo(json.data.totals.totalValue, 2);
 });
 
 // ---------------------------------------------------------------------------
