@@ -137,6 +137,78 @@ describe('MoralisWalletProvider — Solana', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Moralis — NFT holdings (retrofit-52: normalizeMetadata + media_items)
+// ---------------------------------------------------------------------------
+
+describe('MoralisWalletProvider — getNftHoldings', () => {
+  const provider = new MoralisWalletProvider('mk', 'https://deep-index.test/api/v2.2', 'https://solana.test');
+
+  it('requests normalizeMetadata + media_items and maps media→normalized→collection precedence', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: [
+          // CDN media present → high-res URL wins over the raw metadata image.
+          {
+            token_address: '0xAAA',
+            token_id: '1',
+            name: 'Coll A',
+            contract_type: 'ERC721',
+            collection_logo: 'http://logo/a',
+            normalized_metadata: { name: 'Alpha', image: 'ipfs://shouldNotWin', description: 'first' },
+            media: {
+              original_media_url: 'http://cdn/orig',
+              media_collection: { low: { url: 'http://cdn/low' }, medium: { url: 'http://cdn/med' }, high: { url: 'http://cdn/high' } },
+            },
+          },
+          // No media → falls back to normalized image, ipfs:// rewritten to a gateway URL.
+          {
+            token_address: '0xBBB',
+            token_id: '2',
+            name: 'Coll B',
+            contract_type: 'ERC1155',
+            collection_logo: 'http://logo/b',
+            normalized_metadata: { name: 'Beta', image: 'ipfs://bafyHash/img.png', description: null },
+          },
+          // No media, no normalized image → falls back to collection_logo.
+          { token_address: '0xCCC', token_id: '3', name: 'Coll C', collection_logo: 'http://logo/c' },
+          // Missing token_id → skipped.
+          { token_address: '0xDDD', token_id: '', name: 'Coll D' },
+        ],
+      }),
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const out = await provider.getNftHoldings('0xWALLET', 'eth');
+    expect(out).not.toBeNull();
+    expect(out!).toHaveLength(3);
+
+    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(String(url)).toBe('https://deep-index.test/api/v2.2/wallets/0xWALLET/nfts?chain=0x1&normalizeMetadata=true&media_items=true');
+    expect((init.headers as Record<string, string>)['X-API-Key']).toBe('mk');
+
+    expect(out![0]).toEqual({
+      contractAddress: '0xaaa', // lowercased
+      tokenId: '1',
+      name: 'Alpha',
+      description: 'first',
+      collectionName: 'Coll A',
+      logoUrl: 'http://cdn/high', // CDN media wins over the ipfs metadata image
+      tokenStandard: 'ERC721',
+    });
+    expect(out![1]!.logoUrl).toBe('https://ipfs.io/ipfs/bafyHash/img.png'); // ipfs:// rewritten
+    expect(out![1]!.description).toBeNull();
+    expect(out![2]!.logoUrl).toBe('http://logo/c'); // collection_logo last resort
+  });
+
+  it('non-ok HTTP → null (never throws); solana unsupported → null', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) }) as Response));
+    expect(await provider.getNftHoldings('0xWALLET', 'eth')).toBeNull();
+    expect(await provider.getNftHoldings('SoLaddr', 'solana')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GoldRush / Covalent
 // ---------------------------------------------------------------------------
 

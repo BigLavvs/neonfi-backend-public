@@ -102,6 +102,16 @@ interface MoralisNftHolding {
   contract_type?: string | null;
   collection_logo?: string | null;
   normalized_metadata?: { name?: string | null; image?: string | null; description?: string | null } | null;
+  // Moralis-cached media (only present when media_items=true). The CDN URLs here are far
+  // more reliable than the raw IPFS/HTTP image in normalized_metadata (which often 404s).
+  media?: {
+    original_media_url?: string | null;
+    media_collection?: {
+      low?: { url?: string | null } | null;
+      medium?: { url?: string | null } | null;
+      high?: { url?: string | null } | null;
+    } | null;
+  } | null;
 }
 interface MoralisNftHoldingsResponse {
   result?: MoralisNftHolding[];
@@ -111,6 +121,14 @@ function toNum(v: number | string | null | undefined): number | null {
   if (v == null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+// Raw `ipfs://` URLs won't load in an <img>; rewrite to a public gateway. Already-HTTP
+// URLs pass through unchanged.
+function toHttpImage(u: string | null | undefined): string | null {
+  if (!u) return null;
+  if (u.startsWith('ipfs://')) return `https://ipfs.io/ipfs/${u.slice(7).replace(/^ipfs\//, '')}`;
+  return u;
 }
 
 export class MoralisWalletProvider implements WalletDataProvider {
@@ -245,6 +263,10 @@ export class MoralisWalletProvider implements WalletDataProvider {
     const wallet = address.toLowerCase();
     try {
       const params = new URLSearchParams({ chain: hex, order: 'DESC', limit: String(limit) });
+      // nft_metadata=true lets the decoded NFT transfers carry normalized_metadata (so the
+      // history path's description can populate). Cheap; the displayed NFTs still come from
+      // getNftHoldings, not transfers.
+      params.set('nft_metadata', 'true');
       if (opts.cursor) params.set('cursor', opts.cursor);
       const url = `${this.deepIndexBase}/wallets/${address}/history?${params.toString()}`;
       const res = await fetch(url, { headers: this.headers() });
@@ -352,7 +374,10 @@ export class MoralisWalletProvider implements WalletDataProvider {
     const hex = CHAIN_ID.get(chainSlug);
     if (!hex) return null;
     try {
-      const url = `${this.deepIndexBase}/wallets/${address}/nfts?chain=${hex}`;
+      // normalizeMetadata=true → Moralis returns normalized_metadata (name/image/description);
+      // media_items=true → adds the Moralis-cached `media` CDN object. Without these the image
+      // and description fields are always absent. (No exclude_spam — we never drop wallet NFTs.)
+      const url = `${this.deepIndexBase}/wallets/${address}/nfts?chain=${hex}&normalizeMetadata=true&media_items=true`;
       const res = await fetch(url, { headers: this.headers() });
       if (!res.ok) return null;
       const json = (await res.json()) as MoralisNftHoldingsResponse;
@@ -362,13 +387,20 @@ export class MoralisWalletProvider implements WalletDataProvider {
         const contractAddress = (it.token_address ?? '').toLowerCase();
         const tokenId = it.token_id ?? '';
         if (!contractAddress || !tokenId) continue;
+        // Prefer the Moralis CDN media (best→worst resolution) over the raw metadata image.
+        const media = it.media;
+        const mediaUrl =
+          media?.media_collection?.high?.url ??
+          media?.media_collection?.medium?.url ??
+          media?.original_media_url ??
+          null;
         holdings.push({
           contractAddress,
           tokenId,
           name: it.normalized_metadata?.name ?? it.name ?? null,
           description: it.normalized_metadata?.description ?? null,
           collectionName: it.name ?? null,
-          logoUrl: it.normalized_metadata?.image ?? it.collection_logo ?? null,
+          logoUrl: mediaUrl ?? toHttpImage(it.normalized_metadata?.image) ?? it.collection_logo ?? null,
           tokenStandard: it.contract_type ?? null,
         });
       }
