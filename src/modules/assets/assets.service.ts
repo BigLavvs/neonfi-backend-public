@@ -10,7 +10,6 @@ import {
   findAssetById,
   findAssetByPortfolioToken,
   updateAssetRow,
-  deleteAssetRow,
 } from './assets.repository.js';
 import { toAssetDTO, computeTotalValue, type AssetWithToken, type AssetDTO } from './assets.dto.js';
 import type { CreateAssetBody, UpdateAssetBody } from './assets.schemas.js';
@@ -258,5 +257,15 @@ export async function removeAsset(
     throw new AssetError(404, 'ASSET_NOT_FOUND', 'Asset not found');
   }
 
-  await deleteAssetRow(assetId);
+  // retrofit-69 (R39): an opening lot's cost basis now lives in Portfolio.netDeposit, so
+  // deleting the asset must subtract that contribution — recompute the portfolio total once
+  // the row is gone (create adds, delete subtracts, edit applies the delta).
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.asset.delete({ where: { id: assetId } });
+      await recalcPortfolioNetDeposit(tx, portfolio.id);
+    },
+    { timeout: 15000 },
+  );
+  await invalidatePnlCache(portfolio.id);
 }

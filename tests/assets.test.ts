@@ -6,6 +6,7 @@
 import { it, beforeAll, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { redis } from '../src/lib/redis.js';
 import { cookieValue, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -623,7 +624,7 @@ it('339: POST opening avg-cost → asset created with avgCost/costBasis; NO tran
   expect(a.avgCost).toBe(100);
   expect(a.costBasis).toBe(200); // 2 × 100
   expect(a.costTracked).toBe(true);
-  expect(a.netDeposit).toBe(0); // opening is not a deposit (no transaction)
+  expect(a.netDeposit).toBe(200); // retrofit-69 (R39): opening cost basis now counts in netDeposit
   // unrealized = 2 × (93000 − 100) = 185800
   expect(a.unrealizedPnlValue).toBeCloseTo(2 * (93000 - 100));
   expect(a.realizedPnlValue).toBe(0);
@@ -672,6 +673,34 @@ it('341: POST opening as free user on a rank>10 token (MATIC) → 403 PLAN_LIMIT
   // Rank gate runs before any write — no asset, no transaction
   expect(await prisma.asset.count()).toBe(0);
   expect(await prisma.transaction.count()).toBe(0);
+});
+
+// retrofit-69 (R39): an opening lot's cost basis now flows into netDeposit so the legacy
+// all-time PnL (totalValue − netDeposit) is honest. A stablecoin opening priced at its current
+// value nets ~0 PnL instead of the old fake profit (whole value vs netDeposit 0).
+it('r69: stablecoin opening priced at current value → netDeposit counts the opening, all-time PnL ≈ 0', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const portfolioId = await seedPortfolio(userId, 'manual');
+  await redis.del('price:USDT'); // hermetic on the seeded $1 currentPrice
+
+  // Open 100 USDT at avg cost $1 (cost == current value).
+  const res = await assetPost(
+    portfolioId,
+    { tokenId: usdtId, balance: '100', cost: { mode: 'avg', avgCost: '1' } },
+    cookies,
+  );
+  expect(res.status).toBe(201);
+
+  const a = (await res.json() as { data: { asset: Record<string, number> } }).data.asset;
+  expect(a.netDeposit).toBe(100); // opening cost basis (100 × 1) now counted (was 0 pre-retrofit-69)
+  expect(a.value).toBeCloseTo(100, 2);
+  expect(a.pnlAllTimeValue).toBeCloseTo(0, 2); // 100 − 100, not a fake +100
+  expect(a.pnlAllTime).toBeCloseTo(0, 2);
+
+  // Portfolio.netDeposit mirrors the asset's opening basis (create adds).
+  const p = await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } });
+  expect(Number(p.netDeposit.toString())).toBeCloseTo(100, 2);
 });
 
 it('392: POST opening historical with a snapshot on/before the date → costBasis = balance × nearest snapshot price (retrofit-27 §5)', async () => {

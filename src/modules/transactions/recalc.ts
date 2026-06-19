@@ -22,10 +22,13 @@ type TxClient = PrismaTransactionClient;
 // Cost-UNKNOWN units (null opening cost / never bought with a price) are excluded from
 // avg cost AND unrealized PnL; an all-unknown asset → avgCost=null → PnL N/A.
 //
-// netDeposit (Augment decision, retrofit-27): STILL maintained here as
-// Σ(buy usdValue) − Σ(sell usdValue) so the legacy netDeposit-based pnlAllTime* and the
-// analytics summary keep working. The opening lot is NOT a transaction and does not move
-// netDeposit (matches the pre-retrofit-27 definition exactly).
+// netDeposit (Augment decision, retrofit-27; opening basis added by retrofit-69): maintained
+// here as openingCostBasis + Σ(buy usdValue) − Σ(sell usdValue) so the legacy netDeposit-based
+// pnlAllTime* and the analytics summary keep working. retrofit-69 (R39) folds the opening lot's
+// cost basis into netDeposit so `pnlAllTimeValue = totalValue − netDeposit` is honest for manual
+// portfolios — a stablecoin opening (cost ≈ value) nets ~0 PnL instead of fake profit. A
+// cost-UNKNOWN opening (openingCostBasis null, mode='none') contributes 0 — it is excluded from
+// the cost-tracked basis, not booked as free profit.
 //
 // TRANSFERS (retrofit-10): a cross-portfolio transfer is a paired `sell`+`buy` carrying a
 // transferGroupId. Its legs DO move balance + netDeposit (so the existing tests/basis-carry
@@ -92,7 +95,9 @@ export async function recalcAssetBalance(
   let costKnownQty = openingCostBasis !== null ? openingBalance : 0;
   let totalCost = openingCostBasis ?? 0;
   let realized = 0;
-  let netDeposit = 0;
+  // retrofit-69 (R39): seed netDeposit with the opening lot's cost basis (null/mode='none' → 0),
+  // then layer buys (+usd) and sells (−usd) on top.
+  let netDeposit = openingCostBasis ?? 0;
 
   for (const e of events) {
     if (e.dir === 'buy') {
