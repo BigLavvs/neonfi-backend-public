@@ -40,11 +40,20 @@ import {
 import type { CreateTransactionBody } from '../transactions/transactions.schemas.js';
 import { findPortfolioById } from '../portfolios/portfolios.repository.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
-import { fetchWalletSummary, fetchTransferPage, fetchNftHoldings } from './index.js';
+import {
+  fetchWalletSummary,
+  fetchTransferPage,
+  fetchNftHoldings,
+  fetchTransactionCount,
+  fetchValueHistory,
+} from './index.js';
 import type { WalletNftHolding, WalletTransfer } from './types.js';
 
 // How many transfers to pull per page (initial sync + each "load more").
 const PAGE_LIMIT = 100;
+// retrofit-56: how many days of daily value history to backfill into BalanceSnapshot on
+// (re)sync. Covalent portfolio_v2 caps at ~365 daily points on the free tier.
+const VALUE_HISTORY_DAYS = 365;
 // Below this the residual is float noise / dust — don't seed a reconciling lot for it.
 const RESIDUAL_EPSILON = 1e-8;
 
@@ -332,6 +341,52 @@ async function importNftHoldings(
   }
 }
 
+// retrofit-56: resolve the wallet's REAL on-chain tx total (GoldRush transactions_summary).
+// Connected portfolios import only a window of transactions, so the DB row count
+// under-reports; this fixed real total is what the overview count consumes. Best-effort:
+// null on any failure → the caller leaves externalTxCount unchanged (falls back to the page
+// total, then the DB row count). Never throws.
+async function resolveExternalTxCount(
+  address: string,
+  chain: { slug: string },
+): Promise<number | null> {
+  try {
+    return await fetchTransactionCount(address, chain);
+  } catch (e) {
+    console.error('[wallet-sync] tx-count fetch failed', (e as Error).message);
+    return null;
+  }
+}
+
+// retrofit-56: backfill daily portfolio value into BalanceSnapshot from the provider's value
+// history (GoldRush portfolio_v2). CREATE-ONLY (createMany skipDuplicates on the composite PK
+// portfolioId_snapshotDate) — it NEVER overwrites the daily snapshot job's rows or today's
+// live value, only fills dates with no snapshot yet (e.g. the pre-connection history). Wholly
+// idempotent: a second (re)sync writes nothing new. Best-effort; a provider failure must not
+// break the rest of the sync.
+async function backfillConnectedSnapshots(
+  portfolio: PortfolioWithRelations,
+  address: string,
+  chain: { slug: string },
+): Promise<void> {
+  try {
+    const vh = await fetchValueHistory(address, chain, VALUE_HISTORY_DAYS);
+    if (!vh || vh.length === 0) return;
+    await prisma.balanceSnapshot.createMany({
+      data: vh.map(({ date, value }) => ({
+        portfolioId: portfolio.id,
+        userId: portfolio.userId,
+        // @db.Date column — pin to midnight UTC so the date is stored exactly.
+        snapshotDate: new Date(`${date}T00:00:00.000Z`),
+        value: toDecimalString(value),
+      })),
+      skipDuplicates: true,
+    });
+  } catch (e) {
+    console.error('[wallet-sync] connected snapshot backfill failed', (e as Error).message);
+  }
+}
+
 // Reconcile each held token's balance to the on-chain truth: residual = providerBalance −
 // (balance built from the imported transfers). When the residual is meaningful, seed ONE
 // opening lot for it (the "starting balance"), dated just before the earliest import so the
@@ -449,10 +504,20 @@ export async function syncConnectedHoldings(
   // Pass 4: reconcile the residual opening lots, dated just before the earliest import.
   if (held.length > 0) await reconcileOpeningLots(portfolioId, held, openingDateFor(transfers));
 
-  // Pass 5: persist the cursor + provider total for the "load more" endpoint (#5/#8).
+  // Pass 5 (retrofit-56): the REAL on-chain tx count (the fixed total the overview consumes)
+  // + a daily value-history backfill into BalanceSnapshot (the connected portion of the chart).
+  // Both best-effort; a provider failure leaves the rest of the sync intact.
+  const realTxCount = await resolveExternalTxCount(address, chain);
+  await backfillConnectedSnapshots(portfolio, address, chain);
+
+  // Pass 6: persist the cursor + the fixed real total for the "load more" endpoint (#5/#8).
+  // externalTxCount prefers the real on-chain total, then the page total, else null.
   await prisma.portfolio.update({
     where: { id: portfolioId },
-    data: { syncCursor: page?.nextCursor ?? null, externalTxCount: page?.totalCount ?? null },
+    data: {
+      syncCursor: page?.nextCursor ?? null,
+      externalTxCount: realTxCount ?? page?.totalCount ?? null,
+    },
   });
 
   // Flush the derived PnL/analytics caches once after the whole sync.
@@ -512,11 +577,18 @@ export async function resyncConnectedHoldings(
     }
   }
 
+  // retrofit-56: refresh the REAL on-chain tx count + backfill any still-missing daily
+  // snapshots (create-only, so already-recorded dates and today's live value stay untouched).
+  const realTxCount = await resolveExternalTxCount(address, chain);
+  await backfillConnectedSnapshots(portfolio, address, chain);
+
   // Refresh the provider total (keeps the overview count fresh); leave syncCursor alone.
-  if (page?.totalCount != null) {
+  // Prefer the real on-chain total, then the page total.
+  const externalTxCount = realTxCount ?? page?.totalCount ?? null;
+  if (externalTxCount != null) {
     await prisma.portfolio.update({
       where: { id: portfolioId },
-      data: { externalTxCount: page.totalCount },
+      data: { externalTxCount },
     });
   }
 

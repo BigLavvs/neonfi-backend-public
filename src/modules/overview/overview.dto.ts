@@ -59,7 +59,13 @@ export interface OverviewDTO {
       realizedPnl: number;
     }>;
   }>;
-  valueHistory: Array<{ date: string; value: number }>; // 'YYYY-MM-DD', aggregate, asc
+  valueHistory: Array<{ date: string; value: number }>; // 'YYYY-MM-DD', aggregate (all portfolios), asc
+  // retrofit-56: the CONNECTED-only slice of the recorded snapshot series (same forward-fill,
+  // same `days` window). The frontend reconstructs the MANUAL portion from per-portfolio
+  // holdings × transactions and adds this — connected wallets use recorded value history
+  // instead of the (wrong-for-windowed-imports) frontend reconstruction. `[]` when the user
+  // has no connected portfolios (or none have snapshots yet).
+  connectedValueHistory: Array<{ date: string; value: number }>; // 'YYYY-MM-DD', connected-only, asc
   allocation: Array<{ symbol: string; value: number; percentage: number }>; // desc by value
   // retrofit-28: aggregate per-symbol position summed across portfolios. `balance` is the
   // summed raw quantity; `costBasis`/`realizedPnl` are summed across portfolios; `avgCost`

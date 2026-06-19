@@ -77,6 +77,7 @@ interface OverviewData {
     }>;
   }>;
   valueHistory: Array<{ date: string; value: number }>;
+  connectedValueHistory: Array<{ date: string; value: number }>; // retrofit-56
   allocation: Array<{ symbol: string; value: number; percentage: number }>;
   // retrofit-28: aggregate holdings carry cost fields too.
   holdings: Array<{
@@ -157,6 +158,22 @@ async function createManualPortfolio(
       name,
       typeId: type.id,
       ...(netDeposit !== undefined ? { netDeposit: netDeposit.toString() } : {}),
+    },
+  });
+  return p.id;
+}
+
+// retrofit-56: a connected portfolio (needs a chain FK + walletAddress for type='connected').
+async function createConnectedPortfolio(userId: number, name = 'C'): Promise<number> {
+  const type = await prisma.portfolioType.findUniqueOrThrow({ where: { name: 'connected' } });
+  const chain = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const p = await prisma.portfolio.create({
+    data: {
+      userId,
+      name,
+      typeId: type.id,
+      chainId: chain.id,
+      walletAddress: `0x${'a'.repeat(40)}`,
     },
   });
   return p.id;
@@ -410,6 +427,48 @@ it('374: ?days=2 keeps only the last two snapshot dates (forward-fill preserved)
     { date: '2026-06-11', value: 150 },
     { date: '2026-06-12', value: 170 },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-56 — connectedValueHistory is the connected-only slice of the snapshot series
+// ---------------------------------------------------------------------------
+
+it('r56: connectedValueHistory contains only connected portfolios; valueHistory still spans all', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const manual = await createManualPortfolio(userId, 'Manual');
+  const connected = await createConnectedPortfolio(userId, 'Connected');
+  // Manual on 06-10 (100); connected on 06-10 (30) and 06-11 (40).
+  await seedSnapshot(manual, userId, '2026-06-10', 100);
+  await seedSnapshot(connected, userId, '2026-06-10', 30);
+  await seedSnapshot(connected, userId, '2026-06-11', 40);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // Aggregate (all): 06-10 = 100 + 30 = 130; 06-11 = manual fwd-fill 100 + connected 40 = 140.
+  expect(d.valueHistory).toEqual([
+    { date: '2026-06-10', value: 130 },
+    { date: '2026-06-11', value: 140 },
+  ]);
+  // Connected-only: 06-10 = 30; 06-11 = 40. The manual portfolio contributes nothing here.
+  expect(d.connectedValueHistory).toEqual([
+    { date: '2026-06-10', value: 30 },
+    { date: '2026-06-11', value: 40 },
+  ]);
+});
+
+it('r56: connectedValueHistory is [] when the user has only manual portfolios', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const manual = await createManualPortfolio(userId, 'Manual');
+  await seedSnapshot(manual, userId, '2026-06-10', 100);
+
+  const res = await overviewGet(cookies);
+  const d = await getData(res);
+  expect(d.valueHistory).toEqual([{ date: '2026-06-10', value: 100 }]);
+  expect(d.connectedValueHistory).toEqual([]);
 });
 
 // ---------------------------------------------------------------------------

@@ -245,6 +245,67 @@ describe('GoldRushWalletProvider', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer cqt_key');
   });
 
+  // retrofit-56: real on-chain tx count from transactions_summary (probe-confirmed shape).
+  it('getTransactionCount reads data.items[0].total_count (transactions_summary, Bearer auth)', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ data: { items: [{ total_count: 420, latest_transaction: {} }] } }),
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await provider.getTransactionCount('0xabc', 'eth')).toBe(420);
+    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(String(url)).toContain('/v1/eth-mainnet/address/0xabc/transactions_summary/');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer cqt_key');
+  });
+
+  it('getTransactionCount → null on non-ok (e.g. 402 credit limit), missing total, or unmapped chain', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 402, json: async () => ({}) }) as Response));
+    expect(await provider.getTransactionCount('0xabc', 'eth')).toBeNull();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: { items: [{}] } }) }) as Response));
+    expect(await provider.getTransactionCount('0xabc', 'eth')).toBeNull();
+    expect(await provider.getTransactionCount('0xabc', 'polygon-zkevm')).toBeNull();
+  });
+
+  // retrofit-56: daily value history from portfolio_v2 — sum close.quote across tokens per day.
+  it('getValueHistory sums close.quote across tokens per day, ascending; skips null quotes', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          items: [
+            // Covalent returns holdings newest-first; we re-sort ascending.
+            { contract_ticker_symbol: 'ETH', holdings: [
+              { timestamp: '2026-06-19T08:00:00Z', close: { quote: 10 } },
+              { timestamp: '2026-06-18T08:00:00Z', close: { quote: 8 } },
+            ] },
+            { contract_ticker_symbol: 'USDC', holdings: [
+              { timestamp: '2026-06-19T08:00:00Z', close: { quote: 5 } },
+              { timestamp: '2026-06-18T08:00:00Z', close: { quote: null } }, // null → skipped
+            ] },
+          ],
+        },
+      }),
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const vh = await provider.getValueHistory('0xabc', 'eth', 365);
+    expect(vh).toEqual([
+      { date: '2026-06-18', value: 8 }, // 8 + (null skipped)
+      { date: '2026-06-19', value: 15 }, // 10 + 5
+    ]);
+    const [url] = fetchMock.mock.calls[0]! as [string];
+    expect(String(url)).toContain('/v1/eth-mainnet/address/0xabc/portfolio_v2/');
+    expect(String(url)).toContain('days=365');
+  });
+
+  it('getValueHistory → null on non-ok or empty items', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 402, json: async () => ({}) }) as Response));
+    expect(await provider.getValueHistory('0xabc', 'eth', 365)).toBeNull();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: { items: [] } }) }) as Response));
+    expect(await provider.getValueHistory('0xabc', 'eth', 365)).toBeNull();
+  });
+
   it('supportsChain false for unmapped chain (polygon-zkevm omitted)', () => {
     expect(provider.supportsChain('eth')).toBe(true);
     expect(provider.supportsChain('polygon-zkevm')).toBe(false);

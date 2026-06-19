@@ -91,4 +91,14 @@ export interface WalletDataProvider {
     opts: { cursor?: string | null; limit?: number },
   ): Promise<TransferPage | null>;
   getNftHoldings?(address: string, chainSlug: string): Promise<WalletNftHolding[] | null>;
+  // retrofit-56: optional connected-portfolio value/count sources (GoldRush/Covalent
+  // implements both; other providers skip → null). getTransactionCount is the wallet's
+  // REAL on-chain tx total (the fixed count the overview consumes). getValueHistory is the
+  // daily portfolio USD value, ASC by date, for backfilling BalanceSnapshot.
+  getTransactionCount?(address: string, chainSlug: string): Promise<number | null>;
+  getValueHistory?(
+    address: string,
+    chainSlug: string,
+    days: number,
+  ): Promise<Array<{ date: string; value: number }> | null>;
 }

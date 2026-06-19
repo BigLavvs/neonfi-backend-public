@@ -99,6 +99,7 @@ function emptyOverview(): OverviewAggregate {
     },
     portfolios: [],
     valueHistory: [],
+    connectedValueHistory: [],
     allocation: [],
     holdings: [],
     recentTransactions: [],
@@ -399,6 +400,15 @@ async function buildOverview(
 
   // ---- value history (aggregate chart, forward-filled) ----
   const valueHistory = buildValueHistory(snapshotsList, days);
+  // retrofit-56: a connected-only slice of the SAME recorded snapshot series. The frontend
+  // reconstructs the MANUAL portion from per-portfolio holdings × transactions (unchanged)
+  // and adds this recorded connected portion — connected wallets no longer go through the
+  // (wrong-for-windowed-imports) frontend reconstruction. `snapshotsList` is parallel to
+  // `portfolios`, so filter by the matching portfolio's type.
+  const connectedSnapshotsList = snapshotsList.filter(
+    (_, i) => portfolios[i]!.type.name === 'connected',
+  );
+  const connectedValueHistory = buildValueHistory(connectedSnapshotsList, days);
 
   return {
     totals: {
@@ -416,6 +426,7 @@ async function buildOverview(
     },
     portfolios: portfoliosDTO,
     valueHistory,
+    connectedValueHistory,
     allocation,
     holdings,
     recentTransactions,

@@ -101,3 +101,35 @@ export async function fetchNftHoldings(
   }
   return null;
 }
+
+// retrofit-56: the wallet's REAL on-chain tx total (GoldRush implements it; Moralis history
+// rarely returns a reliable total). First non-null wins; null = no provider can supply it →
+// the caller leaves externalTxCount unset and the overview falls back to the DB row count.
+export async function fetchTransactionCount(
+  address: string,
+  chain: { slug: string },
+  providers: WalletDataProvider[] = PROVIDERS,
+): Promise<number | null> {
+  for (const p of providers) {
+    if (!p.isConfigured() || !p.supportsChain(chain.slug) || !p.getTransactionCount) continue;
+    const n = await p.getTransactionCount(address, chain.slug);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+// retrofit-56: daily portfolio USD value (ASC by date) for BalanceSnapshot backfill. First
+// non-null wins; null = no provider can supply it → the caller skips the backfill.
+export async function fetchValueHistory(
+  address: string,
+  chain: { slug: string },
+  days: number,
+  providers: WalletDataProvider[] = PROVIDERS,
+): Promise<Array<{ date: string; value: number }> | null> {
+  for (const p of providers) {
+    if (!p.isConfigured() || !p.supportsChain(chain.slug) || !p.getValueHistory) continue;
+    const vh = await p.getValueHistory(address, chain.slug, days);
+    if (vh) return vh;
+  }
+  return null;
+}
