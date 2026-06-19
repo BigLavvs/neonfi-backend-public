@@ -116,6 +116,19 @@ export async function countTransactionsByPortfolioForUser(
   return new Map(grouped.map((g) => [g.portfolioId, g._count._all]));
 }
 
+// retrofit-66: the earliest transaction timestamp for a portfolio (null when it has none).
+// The Overview combines this with portfolio.createdAt to expose each portfolio's inception
+// date, so the frontend can clamp the manual value-history reconstruction (a backdated logged
+// transaction legitimately starts the line earlier than createdAt).
+export async function findEarliestTransactionDate(portfolioId: number): Promise<Date | null> {
+  const row = await prisma.transaction.findFirst({
+    where: { portfolioId },
+    orderBy: { timestamp: 'asc' },
+    select: { timestamp: true },
+  });
+  return row?.timestamp ?? null;
+}
+
 interface CreateTransactionData {
   portfolioId: number;
   typeId: number;

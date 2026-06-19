@@ -31,7 +31,9 @@ const router = new Hono<AuthEnv>();
 
 function portfolioErr(e: PortfolioError, status: number) {
   if (e.meta) {
-    return { error: { code: e.code, message: e.message }, meta: e.meta };
+    // retrofit-65: nest the meta under error.details too (kept the top-level `meta` for
+    // backward compat) so the frontend can read error.details.retryAfter off the 429.
+    return { error: { code: e.code, message: e.message, details: e.meta }, meta: e.meta };
   }
   return err(e.code, e.message);
 }
@@ -177,7 +179,8 @@ router.post('/:id/resync', requireAuth, async (c) => {
     return c.json(ok(result), 200);
   } catch (e) {
     if (e instanceof PortfolioError) {
-      return c.json(portfolioErr(e, e.statusCode), e.statusCode as 400 | 403);
+      // retrofit-65: resync can now also 429 (RESYNC_RATE_LIMITED) on the cooldown.
+      return c.json(portfolioErr(e, e.statusCode), e.statusCode as 400 | 403 | 429);
     }
     throw e;
   }

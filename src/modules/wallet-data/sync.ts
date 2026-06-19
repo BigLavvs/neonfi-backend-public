@@ -408,7 +408,10 @@ async function sampleMoralisValueHistory(
       if (!tk.ok) continue;
       const rows = ((await tk.json()) as { result?: Array<{ usd_value?: number | null }> }).result ?? [];
       const value = rows.reduce((s, r) => s + (r.usd_value != null ? Number(r.usd_value) : 0), 0);
-      out.push({ date: iso.slice(0, 10), value });
+      // retrofit-67: skip $0 samples (the wallet held nothing yet at that block) so we never
+      // persist leading pre-funding zeros. The leading-zero trim in buildConnectedValueHistory
+      // is the real fix; this just keeps the sampled tail clean at the source.
+      if (value > 0) out.push({ date: iso.slice(0, 10), value });
     } catch (e) {
       console.error('[wallet-sync] moralis value-history sample failed', { iso }, (e as Error).message);
     }
@@ -455,10 +458,17 @@ async function buildConnectedValueHistory(
   for (const p of series) byDate.set(p.date, p.value);
   byDate.set(today, currentValue);
 
-  return [...byDate.entries()]
+  // retrofit-67: trim the LEADING run of $0 points — the period before the wallet was first
+  // funded. Charting them dates the line back to the window start (the flat June-2025 tail).
+  // Interior zeros are kept (a wallet drained mid-history is real); if every point is 0 (a
+  // genuinely empty wallet) return [] — the caller already writes nothing in that case.
+  const sorted = [...byDate.entries()]
     .filter(([d]) => d <= today)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([date, value]) => ({ date, value }));
+  const firstNonZero = sorted.findIndex((p) => p.value > 0);
+  if (firstNonZero === -1) return [];
+  return firstNonZero === 0 ? sorted : sorted.slice(firstNonZero);
 }
 
 // retrofit-56/60: backfill daily portfolio value into BalanceSnapshot. The historical points come

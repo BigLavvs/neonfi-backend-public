@@ -35,6 +35,11 @@ export interface OverviewDTO {
     type: 'connected' | 'manual';
     chainId: number | null;
     chainName: string | null; // from portfolio.chain.name (null for manual)
+    // retrofit-66: ISO inception date = min(createdAt, earliest logged-tx timestamp). The
+    // frontend clamps the MANUAL value-history reconstruction to it so a freshly-added manual
+    // portfolio's chart doesn't extend back before the portfolio actually existed. Connected
+    // portfolios carry it too but the frontend only uses it for the manual reconstruction.
+    inceptionDate: string;
     assetCount: number; // # assets with balance > 0
     totalValue: number;
     pnl24h: number;

@@ -61,6 +61,7 @@ interface OverviewData {
     type: string;
     chainId: number | null;
     chainName: string | null;
+    inceptionDate: string; // retrofit-66
     assetCount: number;
     totalValue: number;
     pnl24h: number;
@@ -597,6 +598,65 @@ it("377: a second user's overview excludes the first user's portfolios/data", as
 it('378: no session cookie → 401', async () => {
   const res = await overviewGet();
   expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-66 — per-portfolio inceptionDate = min(createdAt, earliest tx timestamp)
+// ---------------------------------------------------------------------------
+
+it('r66: fresh manual portfolio inceptionDate == createdAt; a backdated tx moves it earlier', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const fresh = await createManualPortfolio(userId, 'Fresh');
+  const backdated = await createManualPortfolio(userId, 'Backdated');
+  // A logged transaction backdated to 2024 → inception starts at that tx, not createdAt.
+  await seedNativeTx(backdated, '2024-03-15T00:00:00.000Z');
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const freshRow = d.portfolios.find((p) => p.name === 'Fresh')!;
+  const backdatedRow = d.portfolios.find((p) => p.name === 'Backdated')!;
+
+  // Fresh (no txns): inceptionDate == the portfolio's createdAt (today).
+  const freshDb = await prisma.portfolio.findUniqueOrThrow({ where: { id: fresh } });
+  expect(freshRow.inceptionDate).toBe(freshDb.createdAt.toISOString());
+  // Backdated: the 2024 tx predates createdAt → inception is that tx's timestamp.
+  expect(backdatedRow.inceptionDate).toBe('2024-03-15T00:00:00.000Z');
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-67 — leading-$0 snapshots are trimmed from the value-history series
+// ---------------------------------------------------------------------------
+
+it('r67: leading $0 points trimmed from valueHistory/connectedValueHistory; interior zeros kept', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const connected = await createConnectedPortfolio(userId, 'Connected');
+  // Pre-funding leading zeros, then real value, an interior $0 day (drained), then value again.
+  await seedSnapshot(connected, userId, '2026-06-06', 0);
+  await seedSnapshot(connected, userId, '2026-06-07', 0);
+  await seedSnapshot(connected, userId, '2026-06-08', 100);
+  await seedSnapshot(connected, userId, '2026-06-09', 0); // interior zero — preserved
+  await seedSnapshot(connected, userId, '2026-06-10', 120);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // The two leading $0 days are dropped; the interior 06-09 $0 stays; series starts at funding.
+  expect(d.connectedValueHistory).toEqual([
+    { date: '2026-06-08', value: 100 },
+    { date: '2026-06-09', value: 0 },
+    { date: '2026-06-10', value: 120 },
+  ]);
+  // Aggregate valueHistory (only this connected portfolio here) trims identically.
+  expect(d.valueHistory).toEqual([
+    { date: '2026-06-08', value: 100 },
+    { date: '2026-06-09', value: 0 },
+    { date: '2026-06-10', value: 120 },
+  ]);
 });
 
 // ---------------------------------------------------------------------------

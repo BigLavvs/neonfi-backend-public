@@ -75,6 +75,13 @@ async function registerAndLogin(): Promise<{ cookie: string; userId: number }> {
   return { cookie, userId: user.id };
 }
 
+// retrofit-65: flip the registered user's subscription to Pro so the 5-min (not 24h) cooldown
+// applies. registerAndLogin seeds a free sub; userId is unique on subscription.
+async function setUserPro(userId: number): Promise<void> {
+  const proPlan = await prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } });
+  await prisma.subscription.update({ where: { userId }, data: { planId: proPlan.id } });
+}
+
 async function portPost(path: string, body: Record<string, unknown>, cookie: string): Promise<Response> {
   return app.request(`${PORT_BASE}${path}`, {
     method: 'POST',
@@ -107,6 +114,10 @@ beforeEach(async () => {
   // overview count test (416) can't get a stale per-user hit (userIds repeat after truncate).
   const overviewKeys = await redis.keys('overview:*');
   if (overviewKeys.length > 0) await redis.del(overviewKeys);
+  // retrofit-65: resync cooldown keys (`resync_cooldown:<portfolioId>`) survive truncate and
+  // portfolio IDs repeat across tests — flush so a prior test's cooldown can't 429 a later one.
+  const cooldownKeys = await redis.keys('resync_cooldown:*');
+  if (cooldownKeys.length > 0) await redis.del(cooldownKeys);
   previewWalletMock.mockReset();
   fetchWalletSummaryMock.mockReset();
   fetchTransferPageMock.mockReset();
@@ -632,6 +643,11 @@ it('417: resync re-imports a deleted transfer, keeps balance on-chain, and is a 
   expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(2);
   expect(await balanceOf()).toBeCloseTo(5, 6);
 
+  // retrofit-65: this free user just armed the 24h cooldown — clear it so this idempotency
+  // check (not a rate-limit check) can run the second resync. The cooldown itself is covered
+  // by the dedicated r65 tests below.
+  await redis.del(`resync_cooldown:${portfolioId}`);
+
   // Running it again is a no-op: nothing imported, no duplicate rows, balance unchanged.
   const r2 = await resyncPost(portfolioId, cookie);
   expect((await r2.json()).data).toEqual({ importedTransfers: 0, reconciled: 1 });
@@ -664,4 +680,62 @@ it('419: resync another user\'s portfolio → 403 FORBIDDEN', async () => {
   const res = await resyncPost(portfolioId, cookieB);
   expect(res.status).toBe(403);
   expect((await res.json()).error.code).toBe('FORBIDDEN');
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-65 — resync rate-limit (free: once/day, pro: 5-min cooldown) + retryAfter
+// ---------------------------------------------------------------------------
+
+it('r65-free: free user 2nd resync within 24h → 429 RESYNC_RATE_LIMITED (retryAfter ~86400, no 2nd sync)', async () => {
+  const { cookie } = await registerAndLogin(); // free sub
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  // Provider mocks default to null/no-op → resync still succeeds (importedTransfers 0).
+  const created = await portPost('', { name: 'Free Resync', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(created.status).toBe(201);
+  const portfolioId = (await created.json()).data.portfolio.id as number;
+
+  const first = await resyncPost(portfolioId, cookie);
+  expect(first.status).toBe(200);
+
+  // The cooldown is armed — capture the provider call count so we can prove no 2nd sync runs.
+  const callsBefore = fetchWalletSummaryMock.mock.calls.length;
+  const second = await resyncPost(portfolioId, cookie);
+  expect(second.status).toBe(429);
+  const body = await second.json();
+  expect(body.error.code).toBe('RESYNC_RATE_LIMITED');
+  expect(body.error.message).toMatch(/one resync per day/i);
+  // retryAfter rides along under error.details (controller nests meta there).
+  const retryAfter = body.error.details.retryAfter as number;
+  expect(retryAfter).toBeGreaterThan(86000);
+  expect(retryAfter).toBeLessThanOrEqual(86400);
+  // No provider call happened on the rate-limited request — the resync never ran.
+  expect(fetchWalletSummaryMock.mock.calls.length).toBe(callsBefore);
+});
+
+it('r65-pro: pro user 2nd resync same portfolio → 429 (retryAfter ~300, 5-min msg); a different portfolio still 200', async () => {
+  const { cookie, userId } = await registerAndLogin();
+  await setUserPro(userId); // 5-min cooldown applies
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+
+  const p1res = await portPost('', { name: 'Pro Wallet One', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(p1res.status).toBe(201);
+  const p1 = (await p1res.json()).data.portfolio.id as number;
+  const p2res = await portPost('', { name: 'Pro Wallet Two', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(p2res.status).toBe(201);
+  const p2 = (await p2res.json()).data.portfolio.id as number;
+
+  expect((await resyncPost(p1, cookie)).status).toBe(200);
+
+  // Immediate 2nd on the SAME portfolio → 429 with the 5-minute message + short retryAfter.
+  const second = await resyncPost(p1, cookie);
+  expect(second.status).toBe(429);
+  const body = await second.json();
+  expect(body.error.code).toBe('RESYNC_RATE_LIMITED');
+  expect(body.error.message).toMatch(/every 5 minutes/i);
+  const retryAfter = body.error.details.retryAfter as number;
+  expect(retryAfter).toBeGreaterThan(0);
+  expect(retryAfter).toBeLessThanOrEqual(300);
+
+  // A DIFFERENT portfolio is independent (per-portfolio key) → still 200.
+  expect((await resyncPost(p2, cookie)).status).toBe(200);
 });

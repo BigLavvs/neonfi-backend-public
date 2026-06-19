@@ -22,6 +22,7 @@ import {
   listRecentTransactionsForUser,
   countTransactionsForUser,
   countTransactionsByPortfolioForUser,
+  findEarliestTransactionDate,
   type ListTransactionsFilter,
 } from './transactions.repository.js';
 import {
@@ -832,6 +833,14 @@ export function countUserTransactions(userId: number): Promise<number> {
 // blends these with each connected portfolio's provider-reported externalTxCount.
 export function countUserTransactionsByPortfolio(userId: number): Promise<Map<number, number>> {
   return countTransactionsByPortfolioForUser(userId);
+}
+
+// retrofit-66: the earliest transaction timestamp for a portfolio (null when none). The
+// Overview pairs it with portfolio.createdAt to derive each portfolio's inceptionDate. Thin
+// wrapper over the repository, keeping the Overview module reading transactions only through
+// this service surface (module isolation).
+export function earliestUserTransactionDate(portfolioId: number): Promise<Date | null> {
+  return findEarliestTransactionDate(portfolioId);
 }
 
 // ---------------------------------------------------------------------------

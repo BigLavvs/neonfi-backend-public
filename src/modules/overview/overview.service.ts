@@ -28,6 +28,7 @@ import {
 import {
   listRecentUserTransactions,
   countUserTransactionsByPortfolio,
+  earliestUserTransactionDate,
 } from '../transactions/transactions.service.js';
 import type { OverviewDTO } from './overview.dto.js';
 
@@ -221,6 +222,7 @@ async function buildOverview(
     recentTransactions,
     dbTxCountByPortfolio,
     snaps24hAgo,
+    earliestTxDates,
   ] = await Promise.all([
     Promise.all(portfolios.map((p) => computeDerived(p.id))),
     Promise.all(portfolios.map((p) => findAllAssetsByPortfolioId(p.id))),
@@ -235,6 +237,8 @@ async function buildOverview(
     // i.e. the last daily close) — the same source/read the Stage-14 analytics summary
     // uses (findSnapshotNearDaysAgo), so the 24h baseline stays module-isolated.
     Promise.all(portfolios.map((p) => findSnapshotNearDaysAgo(p.id, 1))),
+    // retrofit-66: earliest logged-tx timestamp per portfolio → inceptionDate (below).
+    Promise.all(portfolios.map((p) => earliestUserTransactionDate(p.id))),
   ]);
 
   // retrofit-49 (#8): Σ over the user's portfolios of the connected-wallet on-chain total
@@ -309,6 +313,12 @@ async function buildOverview(
   const portfoliosDTO = portfolios.map((p, i) => {
     const d = derivedList[i]!;
     const assets = assetsList[i]!;
+    // retrofit-66: inceptionDate = min(createdAt, earliest logged-tx timestamp). A backdated
+    // transaction legitimately starts the line earlier; otherwise it's createdAt. The frontend
+    // uses it to clamp the MANUAL value-history reconstruction so a brand-new manual portfolio's
+    // chart can't pre-date the portfolio. (Connected charts use recorded snapshots and ignore it.)
+    const earliestTx = earliestTxDates[i] ?? null;
+    const inception = earliestTx !== null && earliestTx < p.createdAt ? earliestTx : p.createdAt;
     let assetCount = 0;
     // retrofit-28: raw per-portfolio holdings (balance > 0 only), for client recompute.
     const holdings: OverviewDTO['portfolios'][number]['holdings'] = [];
@@ -348,6 +358,7 @@ async function buildOverview(
       type: p.type.name as 'connected' | 'manual',
       chainId: p.chainId ?? null,
       chainName: p.chain?.name ?? null,
+      inceptionDate: inception.toISOString(), // retrofit-66
       assetCount,
       totalValue: round(d.totalValue),
       pnl24h: round(d.pnl24h),
@@ -458,7 +469,7 @@ function buildValueHistory(
   // YYYY-MM-DD sorts lexicographically == chronologically. Keep only the last `days`.
   const keptDates = [...allDates].sort().slice(-days);
 
-  return keptDates.map((date) => {
+  const points = keptDates.map((date) => {
     let sum = 0;
     for (const s of series) {
       // Most recent value on/before `date`. Series is ASC, so the last point with
@@ -472,4 +483,12 @@ function buildValueHistory(
     }
     return { date, value: round(sum) };
   });
+
+  // retrofit-67: trim the leading run of $0 points so already-persisted pre-funding zero
+  // snapshots stop charting as a flat tail (no fresh resync needed). On the aggregate series
+  // leading zeros only occur before ANY selected portfolio held value, so this is correct
+  // there too; interior zeros are preserved; an all-zero series returns [].
+  const firstNonZero = points.findIndex((p) => p.value > 0);
+  if (firstNonZero === -1) return [];
+  return firstNonZero === 0 ? points : points.slice(firstNonZero);
 }

@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js';
+import { redis } from '../../lib/redis.js';
 import { config } from '../../lib/config.js';
 import { createStream, deleteStream } from '../../lib/moralis-streams-client.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
@@ -261,6 +262,14 @@ export async function updatePortfolio(
 // retrofit-50: idempotent resync of a connected portfolio's on-chain state. Ownership-gated
 // like the other portfolio mutations; manual portfolios are rejected (NOT_CONNECTED). Delegates
 // the work to wallet-data/sync.resyncConnectedHoldings and returns its counts.
+//
+// retrofit-65: per-portfolio resync cooldown so neither plan can hammer the external providers.
+// Free → one resync per 24h (free users have a single portfolio, so this is one/day overall);
+// Pro → a short 5-minute anti-abuse cooldown per wallet (effectively unlimited for normal use).
+// The 429 carries a plan-specific message + retryAfter (seconds) so the frontend can show the
+// reason and auto-unlock when a short cooldown elapses.
+const RESYNC_COOLDOWN_S: Record<'free' | 'pro', number> = { free: 86400, pro: 300 };
+
 export async function resyncPortfolio(
   userId: number,
   id: number,
@@ -269,10 +278,42 @@ export async function resyncPortfolio(
   if (!portfolio || portfolio.userId !== userId) {
     throw new PortfolioError(403, 'FORBIDDEN', 'Forbidden');
   }
+  // Ownership + connected checks come FIRST — a manual portfolio must still 400 NOT_CONNECTED
+  // before any cooldown logic kicks in.
   if (portfolio.type.name !== 'connected') {
     throw new PortfolioError(400, 'NOT_CONNECTED', 'Resync is only for connected wallet portfolios');
   }
-  return resyncConnectedHoldings(portfolio.id, portfolio.walletAddress, portfolio.chain);
+
+  // retrofit-65: cooldown gate. Per-portfolio key so a Pro user with several wallets gets
+  // independent cooldowns; free users have one portfolio so it's equivalent to per-user.
+  const plan = await getEffectivePlan(userId);
+  const key = `resync_cooldown:${id}`;
+  // Fail-open: a Redis error on the TTL read must NEVER block a legitimate resync.
+  let ttl = 0;
+  try {
+    ttl = await redis.ttl(key);
+  } catch (e) {
+    console.error('[resync] cooldown ttl read failed (fail-open):', (e as Error).message);
+  }
+  if (ttl > 0) {
+    const message =
+      plan === 'free'
+        ? 'Free plan allows one resync per day. Upgrade to Pro for unlimited resyncs.'
+        : 'You can resync each wallet every 5 minutes — try again shortly.';
+    throw new PortfolioError(429, 'RESYNC_RATE_LIMITED', message, { retryAfter: ttl });
+  }
+
+  const result = await resyncConnectedHoldings(portfolio.id, portfolio.walletAddress, portfolio.chain);
+
+  // Arm the cooldown only AFTER a successful resync. A SET failure is non-fatal — the resync
+  // already ran; worst case the next request simply isn't rate-limited.
+  try {
+    await redis.set(key, '1', 'EX', RESYNC_COOLDOWN_S[plan]);
+  } catch (e) {
+    console.error('[resync] cooldown set failed (non-fatal):', (e as Error).message);
+  }
+
+  return result;
 }
 
 export async function deletePortfolioById(userId: number, id: number): Promise<void> {
