@@ -184,7 +184,7 @@ describe('MoralisWalletProvider — getNftHoldings', () => {
     expect(out!).toHaveLength(3);
 
     const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
-    expect(String(url)).toBe('https://deep-index.test/api/v2.2/wallets/0xWALLET/nfts?chain=0x1&normalizeMetadata=true&media_items=true');
+    expect(String(url)).toBe('https://deep-index.test/api/v2.2/0xWALLET/nft?chain=0x1&format=decimal&normalizeMetadata=true&media_items=true');
     expect((init.headers as Record<string, string>)['X-API-Key']).toBe('mk');
 
     expect(out![0]).toEqual({

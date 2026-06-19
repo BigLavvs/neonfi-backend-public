@@ -377,7 +377,12 @@ export class MoralisWalletProvider implements WalletDataProvider {
       // normalizeMetadata=true → Moralis returns normalized_metadata (name/image/description);
       // media_items=true → adds the Moralis-cached `media` CDN object. Without these the image
       // and description fields are always absent. (No exclude_spam — we never drop wallet NFTs.)
-      const url = `${this.deepIndexBase}/wallets/${address}/nfts?chain=${hex}&normalizeMetadata=true&media_items=true`;
+      // PATH (retrofit-54): Moralis v2.2 NFTs-by-wallet is `/{address}/nft` (singular, NO `/wallets/`
+      // prefix). The `/wallets/{address}/nfts` path 404s ("Cannot GET") — tokens+history use the
+      // `/wallets/` namespace but NFTs do not. format=decimal pins token_id to decimal so this
+      // holdings upsert matches the decimal tokenIds the transfer-history import already wrote
+      // (the Nft @@unique is on tokenId — a hex id would insert a duplicate row).
+      const url = `${this.deepIndexBase}/${address}/nft?chain=${hex}&format=decimal&normalizeMetadata=true&media_items=true`;
       const res = await fetch(url, { headers: this.headers() });
       if (!res.ok) return null;
       const json = (await res.json()) as MoralisNftHoldingsResponse;
