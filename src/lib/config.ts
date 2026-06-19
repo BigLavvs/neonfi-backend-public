@@ -60,6 +60,11 @@ const schema = z
     GOLDRUSH_API_KEY: z.string().optional(),   // Covalent / GoldRush (covalenthq.com); key prefix cqt_
     ALCHEMY_API_KEY: z.string().optional(),
     ANKR_API_KEY: z.string().optional(),
+    // retrofit-60: one-call multi-year value-history providers (also optional fallbacks).
+    // Zerion auth = HTTP Basic with the key as username (empty password); Mobula auth =
+    // raw key in the Authorization header. A missing key skips that provider in the chain.
+    ZERION_API_KEY: z.string().optional(),
+    MOBULA_API_KEY: z.string().optional(),
     // Moralis Web3 Data API base (distinct from the streams base in moralis-streams-client.ts).
     MORALIS_DEEP_INDEX_BASE: z.string().min(1).default('https://deep-index.moralis.io/api/v2.2'),
     MORALIS_SOLANA_BASE: z.string().min(1).default('https://solana-gateway.moralis.io'),

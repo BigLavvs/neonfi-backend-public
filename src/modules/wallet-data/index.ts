@@ -17,23 +17,33 @@ import type {
   WalletSummary,
 } from './types.js';
 import { MoralisWalletProvider } from './providers/moralis.js';
+import { ZerionWalletProvider } from './providers/zerion.js';
+import { MobulaWalletProvider } from './providers/mobula.js';
 import { GoldRushWalletProvider } from './providers/goldrush.js';
 import { AlchemyWalletProvider } from './providers/alchemy.js';
 import { AnkrWalletProvider } from './providers/ankr.js';
 
-export type PreviewStatus = 'found' | 'empty' | 'invalid';
+// retrofit-60 Part E: 'found_no_history' = balances exist but NO provider can supply value history
+// (brand-new wallet, unsupported chain, or none indexed it). The frontend handles it like the
+// empty-wallet "add anyway?" prompt — "we found it, but the chart will build from today."
+export type PreviewStatus = 'found' | 'found_no_history' | 'empty' | 'invalid';
 export interface WalletPreview {
   status: PreviewStatus;
   summary?: WalletSummary;
 }
 
 // Priority order. A provider with no key reports isConfigured() === false and is skipped.
+// retrofit-60: Zerion + Mobula are value-history-only (their getSummary returns 'error', so the
+// summary chain skips straight past them to GoldRush/Alchemy/Ankr). They sit ahead of GoldRush so
+// the getValueHistory loop prefers their ONE-CALL multi-year curve over GoldRush's ~1yr.
 export const PROVIDERS: WalletDataProvider[] = [
   new MoralisWalletProvider(
     config.MORALIS_API_KEY,
     config.MORALIS_DEEP_INDEX_BASE,
     config.MORALIS_SOLANA_BASE,
   ),
+  new ZerionWalletProvider(config.ZERION_API_KEY),
+  new MobulaWalletProvider(config.MOBULA_API_KEY),
   new GoldRushWalletProvider(config.GOLDRUSH_API_KEY),
   new AlchemyWalletProvider(config.ALCHEMY_API_KEY),
   new AnkrWalletProvider(config.ANKR_API_KEY),
@@ -50,11 +60,30 @@ export async function previewWallet(
   for (const p of providers) {
     if (!p.isConfigured() || !p.supportsChain(chain.slug)) continue;
     const r = await p.getSummary(addr, chain.slug);
-    if (r.status === 'ok' && r.summary) return { status: 'found', summary: r.summary };
+    if (r.status === 'ok' && r.summary) {
+      // retrofit-60 Part E: a found wallet gets a LIGHT history check — one-call providers only
+      // (Zerion → Mobula → GoldRush via fetchValueHistory; Moralis sampling is too heavy for a
+      // preview and is deferred to the full sync). At most one extra call. No series → warn the
+      // user up front with 'found_no_history'.
+      const hasHistory = await hasConnectedValueHistory(addr, chain, providers);
+      return { status: hasHistory ? 'found' : 'found_no_history', summary: r.summary };
+    }
     // 'empty'/'error' → fall through to the next provider.
   }
   // Well-formed address but no holdings anywhere (or nobody could verify) → 'empty'.
   return { status: 'empty' };
+}
+
+// retrofit-60 Part E: does ANY one-call provider have value history for this wallet? Reuses the
+// getValueHistory chain (Zerion/Mobula/GoldRush) — Moralis has no getValueHistory method, so the
+// heavy to_block sampler never runs here. A modest window is enough to detect "any history exists".
+async function hasConnectedValueHistory(
+  address: string,
+  chain: { slug: string },
+  providers: WalletDataProvider[],
+): Promise<boolean> {
+  const vh = await fetchValueHistory(address, chain, 365, providers);
+  return Array.isArray(vh) && vh.length > 0;
 }
 
 // Used by the initial sync — returns the winning summary (or null).

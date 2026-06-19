@@ -403,7 +403,15 @@ describe('AnkrWalletProvider', () => {
 
 function fakeProvider(
   name: string,
-  opts: { configured?: boolean; supports?: boolean; result?: ProviderResult },
+  // retrofit-60: `history` makes the fake also satisfy the Part-E light value-history check
+  // (previewWallet now consults getValueHistory after a found summary). Omit it → no history →
+  // previewWallet returns 'found_no_history'.
+  opts: {
+    configured?: boolean;
+    supports?: boolean;
+    result?: ProviderResult;
+    history?: Array<{ date: string; value: number }>;
+  },
 ): WalletDataProvider & { getSummary: ReturnType<typeof vi.fn> } {
   const getSummary = vi.fn(async () => opts.result ?? { status: 'error' });
   return {
@@ -411,8 +419,11 @@ function fakeProvider(
     isConfigured: () => opts.configured ?? true,
     supportsChain: () => opts.supports ?? true,
     getSummary,
+    ...(opts.history !== undefined ? { getValueHistory: vi.fn(async () => opts.history) } : {}),
   };
 }
+
+const SOME_HISTORY = [{ date: '2026-01-01', value: 100 }];
 
 const okResult = (provider: string): ProviderResult => ({
   status: 'ok',
@@ -440,7 +451,7 @@ describe('previewWallet orchestrator', () => {
   it('skips unconfigured + unsupported providers; first ok wins', async () => {
     const noKey = fakeProvider('moralis', { configured: false, result: okResult('moralis') });
     const unsupported = fakeProvider('goldrush', { supports: false, result: okResult('goldrush') });
-    const winner = fakeProvider('alchemy', { result: okResult('alchemy') });
+    const winner = fakeProvider('alchemy', { result: okResult('alchemy'), history: SOME_HISTORY });
     const after = fakeProvider('ankr', { result: okResult('ankr') });
 
     const out = await previewWallet(VALID, ethChain, [noKey, unsupported, winner, after]);
@@ -454,13 +465,21 @@ describe('previewWallet orchestrator', () => {
   it('falls through error → empty → ok in priority order', async () => {
     const errored = fakeProvider('moralis', { result: { status: 'error' } });
     const emptied = fakeProvider('goldrush', { result: { status: 'empty' } });
-    const winner = fakeProvider('alchemy', { result: okResult('alchemy') });
+    const winner = fakeProvider('alchemy', { result: okResult('alchemy'), history: SOME_HISTORY });
 
     const out = await previewWallet(VALID, ethChain, [errored, emptied, winner]);
     expect(out.status).toBe('found');
     expect(out.summary!.provider).toBe('alchemy');
     expect(errored.getSummary).toHaveBeenCalledOnce();
     expect(emptied.getSummary).toHaveBeenCalledOnce();
+  });
+
+  // retrofit-60 Part E: a found summary but NO provider has value history → 'found_no_history'.
+  it('found summary with no value-history provider → found_no_history (summary still returned)', async () => {
+    const winner = fakeProvider('moralis', { result: okResult('moralis') }); // no history
+    const out = await previewWallet(VALID, ethChain, [winner]);
+    expect(out.status).toBe('found_no_history');
+    expect(out.summary!.provider).toBe('moralis');
   });
 
   it('all empty/error → empty (well-formed address, add-anyway)', async () => {

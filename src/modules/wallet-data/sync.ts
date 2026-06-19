@@ -32,6 +32,7 @@
 
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { config } from '../../lib/config.js';
 import { toDecimalString } from '../../lib/decimal.js';
 import {
   invalidatePnlCache,
@@ -53,9 +54,12 @@ import type { WalletNftHolding, WalletTransfer } from './types.js';
 
 // How many transfers to pull per page (initial sync + each "load more").
 const PAGE_LIMIT = 100;
-// retrofit-56: how many days of daily value history to backfill into BalanceSnapshot on
-// (re)sync. Covalent portfolio_v2 caps at ~365 daily points on the free tier.
-const VALUE_HISTORY_DAYS = 365;
+// retrofit-60: how many days of daily value history to backfill into BalanceSnapshot on (re)sync.
+// Up to ~3 years now that the one-call providers (Zerion/Mobula) reach multi-year in ONE call.
+const VALUE_HISTORY_DAYS = 1095;
+// retrofit-60: hard ceiling of Moralis `to_block` sample-points per wallet (the deep-tail / only-
+// source fallback). Bounds the worst case — Moralis carrying the whole history — at ~50 calls.
+const MAX_MORALIS_VALUE_SAMPLES = 50;
 
 // Decimal(20,8) column scale for PRICES (kept at full 8-dp, unlike trimmed amounts).
 function dec8(n: number): string {
@@ -358,30 +362,165 @@ async function resolveExternalTxCount(
   }
 }
 
-// retrofit-56: backfill daily portfolio value into BalanceSnapshot from the provider's value
-// history (GoldRush portfolio_v2). CREATE-ONLY (createMany skipDuplicates on the composite PK
-// portfolioId_snapshotDate) — it NEVER overwrites the daily snapshot job's rows or today's
-// live value, only fills dates with no snapshot yet (e.g. the pre-connection history). Wholly
-// idempotent: a second (re)sync writes nothing new. Best-effort; a provider failure must not
-// break the rest of the sync.
+// retrofit-60: the corrected CURRENT value = Σ(Asset.balance × Token.currentPrice), read fresh
+// from the DB (the balances setConnectedBalancesFromSummary just wrote — cache-immune). This is
+// the value the chart's right edge is stitched to, so it equals the headline (no drift).
+async function currentConnectedValue(portfolioId: number): Promise<number> {
+  const assets = await prisma.asset.findMany({ where: { portfolioId }, include: { token: true } });
+  let total = 0;
+  for (const a of assets) total += Number(a.balance.toString()) * Number(a.token.currentPrice.toString());
+  return total;
+}
+
+// retrofit-60: bounded Moralis `to_block` value-history sampler — the deep-tail / only-source
+// FALLBACK used when no priced one-call provider (Zerion/Mobula/GoldRush) serves the wallet, or to
+// extend an older gap a one-call series doesn't reach. Samples ≤ `maxSamples` evenly-spaced dates
+// in [fromMs, toMs): dateToBlock → tokens?to_block → Σ usd_value. Bounded so even "Moralis carries
+// the whole history" is ~50 calls, one-time.
+//
+// CAVEAT (r60 probe): Moralis to_block USD is ~CURRENT-priced, NOT historical — so this fallback's
+// older values are APPROXIMATE (historical balance × ~today's price). A true historical-price
+// source is the held retrofit-58 Part 5b work; until then the EXACT path is the one-call providers
+// above, and this only runs when they all fail. Best-effort: each failed sample is skipped.
+async function sampleMoralisValueHistory(
+  address: string,
+  chainSlug: string,
+  chainHex: string,
+  fromMs: number,
+  toMs: number,
+  maxSamples: number,
+): Promise<Array<{ date: string; value: number }>> {
+  if (!config.MORALIS_API_KEY || toMs <= fromMs || maxSamples <= 0) return [];
+  const headers = { 'X-API-Key': config.MORALIS_API_KEY };
+  const base = config.MORALIS_DEEP_INDEX_BASE;
+  const out: Array<{ date: string; value: number }> = [];
+  const span = toMs - fromMs;
+  const n = Math.min(maxSamples, Math.max(1, Math.floor(span / (86400 * 1000)))); // ≤ 1/day, ≤ cap
+  for (let i = 0; i < n; i++) {
+    const ts = fromMs + Math.floor((span * i) / n);
+    const iso = new Date(ts).toISOString();
+    try {
+      const d2b = await fetch(`${base}/dateToBlock?chain=${chainSlug}&date=${encodeURIComponent(iso)}`, { headers });
+      if (!d2b.ok) continue;
+      const block = ((await d2b.json()) as { block?: number }).block;
+      if (!block) continue;
+      const tk = await fetch(`${base}/wallets/${address}/tokens?chain=${chainHex}&to_block=${block}`, { headers });
+      if (!tk.ok) continue;
+      const rows = ((await tk.json()) as { result?: Array<{ usd_value?: number | null }> }).result ?? [];
+      const value = rows.reduce((s, r) => s + (r.usd_value != null ? Number(r.usd_value) : 0), 0);
+      out.push({ date: iso.slice(0, 10), value });
+    } catch (e) {
+      console.error('[wallet-sync] moralis value-history sample failed', { iso }, (e as Error).message);
+    }
+  }
+  return out;
+}
+
+// retrofit-60: compose the connected value-history series for the target window. Prefers the
+// deepest ONE-CALL priced provider (Zerion → Mobula → GoldRush, via fetchValueHistory); if that
+// series doesn't reach the window start, fills the older gap with the bounded Moralis sampler and
+// stitches; finally pins TODAY's point to the corrected current balance so the chart's right edge
+// equals the headline. Empty result → caller writes nothing (the chart builds forward via the
+// daily snapshot job — the "found_no_history" outcome).
+async function buildConnectedValueHistory(
+  portfolio: PortfolioWithRelations,
+  address: string,
+  chain: { slug: string },
+  days: number,
+): Promise<Array<{ date: string; value: number }>> {
+  const currentValue = await currentConnectedValue(portfolio.id);
+
+  // 1. Deepest priced one-call series.
+  let series = (await fetchValueHistory(address, chain, days)) ?? [];
+
+  // 2. Tail-fill the older gap (>1 week before the priced series' earliest point) with the
+  //    bounded Moralis sampler. When the priced series is empty, this covers the whole window.
+  const windowStartMs = Date.now() - days * 86400 * 1000;
+  const earliestMs = series.length > 0 ? Date.parse(`${series[0]!.date}T00:00:00.000Z`) : Date.now();
+  if (earliestMs > windowStartMs + 7 * 86400 * 1000) {
+    const tail = await sampleMoralisValueHistory(
+      address,
+      chain.slug,
+      portfolio.chain?.moralisId ?? '0x1',
+      windowStartMs,
+      earliestMs,
+      MAX_MORALIS_VALUE_SAMPLES,
+    );
+    series = [...tail, ...series];
+  }
+
+  // 3. Stitch today's point to the corrected current balance (right edge = headline).
+  const today = new Date().toISOString().slice(0, 10);
+  const byDate = new Map<string, number>();
+  for (const p of series) byDate.set(p.date, p.value);
+  byDate.set(today, currentValue);
+
+  return [...byDate.entries()]
+    .filter(([d]) => d <= today)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([date, value]) => ({ date, value }));
+}
+
+// retrofit-56/60: backfill daily portfolio value into BalanceSnapshot. The historical points come
+// from buildConnectedValueHistory (one-call provider + bounded Moralis tail). Historical dates are
+// CREATE-ONLY (createMany skipDuplicates on the composite PK) so a re-sync writes nothing new and
+// the daily job's rows are never clobbered; TODAY is UPSERTED to the corrected current balance so
+// the chart's right edge always equals the headline (retrofit-60 stitch). Best-effort.
+//
+// retrofit-60 C2: the multi-year backfill is ONE-TIME (initial sync, fullHistory=true). Resync
+// passes fullHistory=false → it only tops up TODAY's point (the corrected current balance), never
+// re-pulling the whole multi-year series or resetting what the user already loaded.
 async function backfillConnectedSnapshots(
   portfolio: PortfolioWithRelations,
   address: string,
   chain: { slug: string },
+  opts: { fullHistory?: boolean } = {},
 ): Promise<void> {
+  const fullHistory = opts.fullHistory ?? true;
   try {
-    const vh = await fetchValueHistory(address, chain, VALUE_HISTORY_DAYS);
-    if (!vh || vh.length === 0) return;
-    await prisma.balanceSnapshot.createMany({
-      data: vh.map(({ date, value }) => ({
-        portfolioId: portfolio.id,
-        userId: portfolio.userId,
-        // @db.Date column — pin to midnight UTC so the date is stored exactly.
-        snapshotDate: new Date(`${date}T00:00:00.000Z`),
-        value: toDecimalString(value),
-      })),
-      skipDuplicates: true,
-    });
+    const dayMs = (d: string) => new Date(`${d}T00:00:00.000Z`);
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Resync (incremental): only refresh today's right edge — no multi-year re-pull.
+    if (!fullHistory) {
+      const value = await currentConnectedValue(portfolio.id);
+      await prisma.balanceSnapshot.upsert({
+        where: { portfolioId_snapshotDate: { portfolioId: portfolio.id, snapshotDate: dayMs(today) } },
+        create: { portfolioId: portfolio.id, userId: portfolio.userId, snapshotDate: dayMs(today), value: toDecimalString(value) },
+        update: { value: toDecimalString(value) },
+      });
+      return;
+    }
+
+    const series = await buildConnectedValueHistory(portfolio, address, chain, VALUE_HISTORY_DAYS);
+    if (series.length === 0) return;
+
+    const historical = series.filter((p) => p.date < today);
+    if (historical.length > 0) {
+      await prisma.balanceSnapshot.createMany({
+        data: historical.map(({ date, value }) => ({
+          portfolioId: portfolio.id,
+          userId: portfolio.userId,
+          snapshotDate: dayMs(date),
+          value: toDecimalString(value),
+        })),
+        skipDuplicates: true,
+      });
+    }
+
+    const todayPoint = series.find((p) => p.date === today);
+    if (todayPoint) {
+      await prisma.balanceSnapshot.upsert({
+        where: { portfolioId_snapshotDate: { portfolioId: portfolio.id, snapshotDate: dayMs(today) } },
+        create: {
+          portfolioId: portfolio.id,
+          userId: portfolio.userId,
+          snapshotDate: dayMs(today),
+          value: toDecimalString(todayPoint.value),
+        },
+        update: { value: toDecimalString(todayPoint.value) },
+      });
+    }
   } catch (e) {
     console.error('[wallet-sync] connected snapshot backfill failed', (e as Error).message);
   }
@@ -593,10 +732,11 @@ export async function resyncConnectedHoldings(
   // retrofit-58: re-set balances straight from the provider summary (idempotent, never drifts).
   const reconciled = await setConnectedBalancesFromSummary(portfolioId, held);
 
-  // retrofit-56: refresh the REAL on-chain tx count + backfill any still-missing daily
-  // snapshots (create-only, so already-recorded dates and today's live value stay untouched).
+  // retrofit-56: refresh the REAL on-chain tx count. retrofit-60 C2: resync is INCREMENTAL —
+  // only top up today's snapshot (the corrected current balance), never re-pull the multi-year
+  // series or reset what the user already loaded.
   const realTxCount = await resolveExternalTxCount(address, chain);
-  await backfillConnectedSnapshots(portfolio, address, chain);
+  await backfillConnectedSnapshots(portfolio, address, chain, { fullHistory: false });
 
   // Refresh the provider total (keeps the overview count fresh); leave syncCursor alone.
   // Prefer the real on-chain total, then the page total.
