@@ -4,7 +4,14 @@
 // Raw balances are integer strings scaled by contract_decimals. Network/HTTP/parse
 // failure → { status: 'error' }.
 
-import type { ProviderResult, WalletDataProvider, WalletToken } from '../types.js';
+import type {
+  ProviderResult,
+  TransferPage,
+  WalletDataProvider,
+  WalletNftHolding,
+  WalletToken,
+  WalletTransfer,
+} from '../types.js';
 import { buildSummary, NATIVE_SYMBOLS } from '../build-summary.js';
 
 // slug → Covalent chain name. polygon-zkevm intentionally omitted (uncertain mapping).
@@ -161,6 +168,234 @@ export class GoldRushWalletProvider implements WalletDataProvider {
       return null;
     }
   }
+
+  // retrofit-63: real transfer history (fallback behind Moralis). transactions_v3 returns
+  // decoded txs newest-first; each carries the native value + raw `log_events`. We surface
+  // three kinds of WalletTransfer per tx: the native value move, ERC-20 Transfer logs, and
+  // NFT (ERC-721 Transfer / ERC-1155 TransferSingle) logs — but ONLY legs where the wallet is
+  // a party (log_events also include transfers between OTHER addresses in the same tx, e.g. a
+  // DEX routing through pools). Pagination is GoldRush's `data.links.prev` URL (older txs),
+  // which we pass straight back as the opaque cursor. Solana / unmapped chain / non-2xx /
+  // parse error → null so the orchestrator falls through (Moralis stays primary).
+  async getTransferHistory(
+    address: string,
+    chainSlug: string,
+    opts: { cursor?: string | null; limit?: number },
+  ): Promise<TransferPage | null> {
+    const cov = COV_CHAIN[chainSlug];
+    if (!cov || chainSlug === 'solana') return null;
+    const wallet = address.toLowerCase();
+    try {
+      // First page: the default transactions_v3 endpoint (newest-first). Continuation:
+      // opts.cursor is the full `links.prev` URL GoldRush handed back (the next-older page).
+      const url =
+        opts.cursor && /^https?:\/\//.test(opts.cursor)
+          ? opts.cursor
+          : `https://api.covalenthq.com/v1/${cov}/address/${address}/transactions_v3/` +
+            `?quote-currency=USD&page-size=100`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${this.apiKey!}`, accept: 'application/json' },
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as CovTxResponse;
+      const items = Array.isArray(json.data?.items) ? json.data!.items! : [];
+
+      const transfers: WalletTransfer[] = [];
+      const nativeSym = (NATIVE_SYMBOLS[chainSlug] ?? '').toUpperCase();
+      for (const it of items) {
+        const ts = it.block_signed_at ?? new Date(0).toISOString();
+        const hash = it.tx_hash ?? null;
+        const txFrom = (it.from_address ?? '').toLowerCase();
+        const txTo = (it.to_address ?? '').toLowerCase();
+        // Attach the tx-level gas (native units) to the FIRST emitted leg only, so summing the
+        // per-row gas back up equals the real fee (a multi-leg tx paid gas once).
+        let gasAttached = false;
+        const gas = humanBalance(it.fees_paid, 18);
+        const takeGas = (): number | null => {
+          if (gasAttached) return null;
+          gasAttached = true;
+          return gas > 0 ? gas : null;
+        };
+
+        // Native value moved by the tx itself (skip pure contract calls where value == 0).
+        const nativeAmount = humanBalance(it.value, it.gas_metadata?.contract_decimals ?? 18);
+        if (nativeAmount > 0 && (txFrom === wallet || txTo === wallet)) {
+          transfers.push({
+            type: 'native',
+            direction: txTo === wallet ? 'in' : 'out',
+            hash,
+            from: it.from_address ?? null,
+            to: it.to_address ?? null,
+            symbol: (it.gas_metadata?.contract_ticker_symbol ?? nativeSym).toUpperCase() || null,
+            name: it.gas_metadata?.contract_ticker_symbol ?? null,
+            contractAddress: null,
+            amount: nativeAmount,
+            usdValue: it.value_quote ?? null,
+            gasFee: takeGas(),
+            timestamp: ts,
+            logoUrl: null,
+            nftTokenId: null,
+            collectionName: null,
+            description: null,
+          });
+        }
+
+        for (const le of it.log_events ?? []) {
+          const dec = le.decoded;
+          if (!dec || !dec.name) continue;
+          const params = dec.params ?? [];
+          const pVal = (name: string): string | null => {
+            const v = params.find((p) => p.name === name)?.value;
+            return v == null ? null : String(v);
+          };
+
+          if (dec.name === 'Transfer') {
+            // ERC-20 (3rd param `value`) vs ERC-721 (3rd param `tokenId`). `supports_erc` is
+            // unreliable here (it lists erc20 for ENS ERC-721s), so classify by param shape.
+            const third = params[2];
+            const logFrom = (pVal('from') ?? '').toLowerCase();
+            const logTo = (pVal('to') ?? '').toLowerCase();
+            if (logFrom !== wallet && logTo !== wallet) continue; // not the wallet's transfer
+            const direction = logTo === wallet ? 'in' : 'out';
+            if (third?.name === 'value') {
+              const sym = (le.sender_contract_ticker_symbol ?? '').toUpperCase();
+              if (!sym) continue;
+              transfers.push({
+                type: 'erc20',
+                direction,
+                hash,
+                from: pVal('from'),
+                to: pVal('to'),
+                symbol: sym,
+                name: le.sender_name ?? sym,
+                contractAddress: le.sender_address ?? null,
+                amount: humanBalance(pVal('value'), le.sender_contract_decimals ?? 0),
+                usdValue: null, // transactions_v3 doesn't price individual log events
+                gasFee: takeGas(),
+                timestamp: ts,
+                logoUrl: le.sender_logo_url ?? null,
+                nftTokenId: null,
+                collectionName: null,
+                description: null,
+              });
+            } else if (third?.name === 'tokenId') {
+              const tokenId = pVal('tokenId');
+              if (!tokenId) continue;
+              transfers.push(
+                this.nftLeg(le, hash, direction, pVal('from'), pVal('to'), tokenId, 1, ts),
+              );
+            }
+          } else if (dec.name === 'TransferSingle') {
+            const logFrom = (pVal('_from') ?? '').toLowerCase();
+            const logTo = (pVal('_to') ?? '').toLowerCase();
+            if (logFrom !== wallet && logTo !== wallet) continue;
+            const tokenId = pVal('_id');
+            if (!tokenId) continue;
+            const amount = Number(pVal('_amount'));
+            transfers.push(
+              this.nftLeg(
+                le,
+                hash,
+                logTo === wallet ? 'in' : 'out',
+                pVal('_from'),
+                pVal('_to'),
+                tokenId,
+                Number.isFinite(amount) && amount > 0 ? amount : 1,
+                ts,
+              ),
+            );
+          }
+          // TransferBatch (ERC-1155 multi-id) intentionally skipped — rare, array-shaped, and
+          // these are overwhelmingly spam airdrops; the holdings list comes from balances_nft.
+        }
+      }
+
+      return { transfers, nextCursor: json.data?.links?.prev ?? null, totalCount: null };
+    } catch (e) {
+      console.error('[wallet-data] goldrush getTransferHistory failed', (e as Error).message);
+      return null;
+    }
+  }
+
+  private nftLeg(
+    le: CovLogEvent,
+    hash: string | null,
+    direction: 'in' | 'out',
+    from: string | null,
+    to: string | null,
+    tokenId: string,
+    amount: number,
+    ts: string,
+  ): WalletTransfer {
+    return {
+      type: 'nft',
+      direction,
+      hash,
+      from,
+      to,
+      symbol: null,
+      name: le.sender_name ?? le.sender_contract_ticker_symbol ?? null,
+      contractAddress: le.sender_address ?? null,
+      amount,
+      usdValue: null,
+      gasFee: null, // gas is attached to the tx's native/erc20 first leg, never the nft leg
+      timestamp: ts,
+      logoUrl: le.sender_logo_url ?? null,
+      nftTokenId: tokenId,
+      collectionName: le.sender_name ?? null,
+      description: null,
+    };
+  }
+
+  // retrofit-63: current NFT holdings (fallback behind Moralis). balances_nft groups by
+  // collection (data.items[]), each with a nft_data[] of held tokens. token_id is already
+  // DECIMAL (matches Moralis format=decimal + the decimal tokenIds the transfer import writes,
+  // so the Nft @@unique doesn't dupe). no-spam=true mirrors getSummary. Non-2xx / parse → null.
+  async getNftHoldings(address: string, chainSlug: string): Promise<WalletNftHolding[] | null> {
+    const cov = COV_CHAIN[chainSlug];
+    if (!cov || chainSlug === 'solana') return null;
+    try {
+      const url =
+        `https://api.covalenthq.com/v1/${cov}/address/${address}/balances_nft/` + `?no-spam=true`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${this.apiKey!}`, accept: 'application/json' },
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as { data?: { items?: CovNftItem[] } };
+      const items = Array.isArray(json.data?.items) ? json.data!.items! : [];
+      const holdings: WalletNftHolding[] = [];
+      for (const c of items) {
+        if (c.is_spam === true) continue;
+        const contract = (c.contract_address ?? '').toLowerCase();
+        if (!contract) continue;
+        const ercs = c.supports_erc ?? [];
+        const tokenStandard = ercs.includes('erc1155')
+          ? 'ERC1155'
+          : ercs.includes('erc721')
+            ? 'ERC721'
+            : null;
+        for (const t of c.nft_data ?? []) {
+          const tokenId = t.token_id ?? '';
+          if (!tokenId) continue;
+          if (t.token_balance != null && Number(t.token_balance) <= 0) continue;
+          const ed = t.external_data ?? {};
+          holdings.push({
+            contractAddress: contract,
+            tokenId,
+            name: ed.name ?? c.contract_name ?? null,
+            description: ed.description ?? null,
+            collectionName: c.contract_name ?? null,
+            logoUrl: ed.image_512 ?? ed.image ?? ed.image_preview ?? null,
+            tokenStandard,
+          });
+        }
+      }
+      return holdings;
+    } catch (e) {
+      console.error('[wallet-data] goldrush getNftHoldings failed', (e as Error).message);
+      return null;
+    }
+  }
 }
 
 // portfolio_v2 daily holding entry (probe-confirmed: open/high/low/close each carry a USD
@@ -168,6 +403,59 @@ export class GoldRushWalletProvider implements WalletDataProvider {
 interface CovalentHolding {
   timestamp?: string | null;
   close?: { quote?: number | null } | null;
+}
+
+// transactions_v3 (retrofit-63, probe-confirmed shapes) -----------------------
+interface CovDecodedParam {
+  name?: string | null;
+  type?: string | null;
+  value?: unknown;
+}
+interface CovLogEvent {
+  sender_address?: string | null;
+  sender_name?: string | null;
+  sender_contract_ticker_symbol?: string | null;
+  sender_contract_decimals?: number | null;
+  sender_logo_url?: string | null;
+  decoded?: { name?: string | null; params?: CovDecodedParam[] | null } | null;
+}
+interface CovTxItem {
+  block_signed_at?: string | null;
+  tx_hash?: string | null;
+  from_address?: string | null;
+  to_address?: string | null;
+  value?: string | null; // raw native (wei)
+  value_quote?: number | null; // historical USD of the native move
+  fees_paid?: string | null; // raw native gas (wei)
+  gas_metadata?: { contract_decimals?: number | null; contract_ticker_symbol?: string | null } | null;
+  log_events?: CovLogEvent[] | null;
+}
+interface CovTxResponse {
+  data?: {
+    links?: { prev?: string | null; next?: string | null } | null;
+    items?: CovTxItem[] | null;
+  } | null;
+}
+
+// balances_nft (retrofit-63) --------------------------------------------------
+interface CovNftExternalData {
+  name?: string | null;
+  description?: string | null;
+  image?: string | null;
+  image_512?: string | null;
+  image_preview?: string | null;
+}
+interface CovNftData {
+  token_id?: string | null;
+  token_balance?: string | null;
+  external_data?: CovNftExternalData | null;
+}
+interface CovNftItem {
+  contract_name?: string | null;
+  contract_address?: string | null;
+  supports_erc?: string[] | null;
+  is_spam?: boolean;
+  nft_data?: CovNftData[] | null;
 }
 
 // Covalent returns the raw integer balance as a string; divide by 10^decimals.

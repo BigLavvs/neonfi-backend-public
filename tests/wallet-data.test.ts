@@ -313,6 +313,188 @@ describe('GoldRushWalletProvider', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GoldRush / Covalent — transfer history + NFT holdings (retrofit-63)
+// ---------------------------------------------------------------------------
+
+describe('GoldRushWalletProvider — getTransferHistory (retrofit-63)', () => {
+  const provider = new GoldRushWalletProvider('cqt_key');
+  const WALLET = '0xcb1c1fde09f811b294172696404e88e658659905';
+
+  it('maps native + erc20 + erc721 legs, filters non-wallet logs, gas on first leg, cursor = links.prev', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          links: {
+            prev: 'https://api.covalenthq.com/v1/eth-mainnet/address/x/transactions_v3/page/3/',
+            next: null,
+          },
+          items: [
+            {
+              block_signed_at: '2026-06-16T08:10:23Z',
+              tx_hash: '0xhash1',
+              from_address: WALLET,
+              to_address: '0xrecipient',
+              value: '5000000000000000000', // 5 ETH (raw wei)
+              value_quote: 9000,
+              fees_paid: '1000000000000000', // 0.001 ETH gas
+              gas_metadata: { contract_decimals: 18, contract_ticker_symbol: 'ETH' },
+              log_events: [
+                {
+                  // ERC-20 (3rd param `value`) incoming to the wallet
+                  sender_address: '0xtoken',
+                  sender_name: 'HEX',
+                  sender_contract_ticker_symbol: 'HEX',
+                  sender_contract_decimals: 8,
+                  sender_logo_url: 'http://logo/hex',
+                  decoded: {
+                    name: 'Transfer',
+                    params: [
+                      { name: 'from', type: 'address', value: '0xother' },
+                      { name: 'to', type: 'address', value: WALLET },
+                      { name: 'value', type: 'uint256', value: '20000000000' }, // 200 HEX (8dp)
+                    ],
+                  },
+                },
+                {
+                  // ERC-721 (3rd param `tokenId`) out of the wallet
+                  sender_address: '0xnft',
+                  sender_name: 'CoolCats',
+                  sender_contract_ticker_symbol: null,
+                  sender_contract_decimals: 0,
+                  sender_logo_url: 'http://logo/nft',
+                  decoded: {
+                    name: 'Transfer',
+                    params: [
+                      { name: 'from', type: 'address', value: WALLET },
+                      { name: 'to', type: 'address', value: '0xbuyer' },
+                      { name: 'tokenId', type: 'uint256', value: '148' },
+                    ],
+                  },
+                },
+                {
+                  // a Transfer between two OTHER addresses (pool routing) → must be dropped
+                  sender_address: '0xpool',
+                  sender_contract_ticker_symbol: 'WETH',
+                  sender_contract_decimals: 18,
+                  decoded: {
+                    name: 'Transfer',
+                    params: [
+                      { name: 'from', type: 'address', value: '0xpoolA' },
+                      { name: 'to', type: 'address', value: '0xpoolB' },
+                      { name: 'value', type: 'uint256', value: '1000' },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const page = await provider.getTransferHistory(WALLET, 'eth', { limit: 100 });
+    expect(page).not.toBeNull();
+    expect(page!.nextCursor).toContain('/transactions_v3/page/3/');
+    expect(page!.totalCount).toBeNull();
+
+    const t = page!.transfers;
+    expect(t).toHaveLength(3); // native + erc20 + erc721 (pool-to-pool log dropped)
+
+    const native = t.find((x) => x.type === 'native')!;
+    expect(native.direction).toBe('out'); // from the wallet
+    expect(native.symbol).toBe('ETH');
+    expect(native.amount).toBeCloseTo(5, 9);
+    expect(native.usdValue).toBe(9000);
+    expect(native.gasFee).toBeCloseTo(0.001, 12); // gas attaches to the first leg only
+
+    const erc20 = t.find((x) => x.type === 'erc20')!;
+    expect(erc20.direction).toBe('in'); // to the wallet
+    expect(erc20.symbol).toBe('HEX');
+    expect(erc20.amount).toBe(200); // 20000000000 / 1e8
+    expect(erc20.contractAddress).toBe('0xtoken');
+    expect(erc20.usdValue).toBeNull();
+    expect(erc20.gasFee).toBeNull(); // already taken by the native leg
+
+    const nft = t.find((x) => x.type === 'nft')!;
+    expect(nft.direction).toBe('out');
+    expect(nft.nftTokenId).toBe('148');
+    expect(nft.contractAddress).toBe('0xnft');
+    expect(nft.gasFee).toBeNull();
+
+    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(String(url)).toContain(`/v1/eth-mainnet/address/${WALLET}/transactions_v3/`);
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer cqt_key');
+  });
+
+  it('follows the cursor URL verbatim; solana + non-ok → null', async () => {
+    const fetchMock = vi.fn(
+      async () => ({ ok: true, json: async () => ({ data: { links: {}, items: [] } }) }) as Response,
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const cursorUrl =
+      'https://api.covalenthq.com/v1/eth-mainnet/address/x/transactions_v3/page/3/';
+    await provider.getTransferHistory(WALLET, 'eth', { cursor: cursorUrl });
+    expect(String((fetchMock.mock.calls[0]! as [string])[0])).toBe(cursorUrl);
+
+    expect(await provider.getTransferHistory(WALLET, 'solana', {})).toBeNull();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 402, json: async () => ({}) }) as Response));
+    expect(await provider.getTransferHistory(WALLET, 'eth', {})).toBeNull();
+  });
+
+  it('getNftHoldings maps nft_data with decimal tokenId, skips spam + zero-balance, no-spam URL', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          items: [
+            {
+              contract_name: 'Azuki',
+              contract_address: '0xABC',
+              supports_erc: ['erc20', 'erc165', 'erc721'],
+              is_spam: false,
+              nft_data: [
+                {
+                  token_id: '148',
+                  token_balance: '1',
+                  external_data: {
+                    name: 'Azuki #148',
+                    description: 'desc',
+                    image: 'http://img/full',
+                    image_512: 'http://img/512',
+                  },
+                },
+                { token_id: '0', token_balance: '0' }, // zero balance → skipped
+              ],
+            },
+            // spam collection → skipped entirely
+            { contract_name: 'Spam', contract_address: '0xspam', is_spam: true, nft_data: [{ token_id: '1', token_balance: '1' }] },
+          ],
+        },
+      }),
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const out = await provider.getNftHoldings(WALLET, 'eth');
+    expect(out).not.toBeNull();
+    expect(out!).toHaveLength(1);
+    expect(out![0]).toEqual({
+      contractAddress: '0xabc',
+      tokenId: '148',
+      name: 'Azuki #148',
+      description: 'desc',
+      collectionName: 'Azuki',
+      logoUrl: 'http://img/512', // image_512 wins
+      tokenStandard: 'ERC721',
+    });
+    const [url] = fetchMock.mock.calls[0]! as [string];
+    expect(String(url)).toContain('/balances_nft/');
+    expect(String(url)).toContain('no-spam=true');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Alchemy (Portfolio Data API)
 // ---------------------------------------------------------------------------
 
@@ -348,6 +530,118 @@ describe('AlchemyWalletProvider', () => {
     expect(String(url)).toContain('/data/v1/al_key/assets/tokens/by-address');
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual({ addresses: [{ address: '0xabc', networks: ['eth-mainnet'] }] });
+  });
+});
+
+describe('AlchemyWalletProvider — getTransferHistory + getNftHoldings (retrofit-63)', () => {
+  const provider = new AlchemyWalletProvider('al_key');
+  const WALLET = '0xcb1c1fde09f811b294172696404e88e658659905';
+
+  it('queries from+to, merges/dedupes, maps native/erc20/erc721 (hex→decimal tokenId), packs both pageKeys', async () => {
+    const fromResult = {
+      result: {
+        pageKey: 'PK_FROM',
+        transfers: [
+          { uniqueId: 'u1', blockNum: '0x20', hash: '0xh1', from: WALLET, to: '0xrecipient', value: 0.5, asset: 'ETH', category: 'external', rawContract: { address: null, decimal: '0x12' }, metadata: { blockTimestamp: '2026-06-16T08:10:23.000Z' } },
+          { uniqueId: 'u2', blockNum: '0x20', hash: '0xh1', from: WALLET, to: '0x0', value: null, asset: null, category: 'erc721', tokenId: '0x94', rawContract: { address: '0xNFT' }, metadata: { blockTimestamp: '2026-06-16T08:10:23.000Z' } },
+          { uniqueId: 'uShared', blockNum: '0x10', hash: '0xh0', from: WALLET, to: WALLET, value: 1, asset: 'USDC', category: 'erc20', rawContract: { address: '0xusdc' }, metadata: { blockTimestamp: '2026-06-15T00:00:00.000Z' } },
+        ],
+      },
+    };
+    const toResult = {
+      result: {
+        pageKey: null,
+        transfers: [
+          { uniqueId: 'u3', blockNum: '0x30', hash: '0xh3', from: '0xsender', to: WALLET, value: 250, asset: 'DAI', category: 'erc20', rawContract: { address: '0xdai' }, metadata: { blockTimestamp: '2026-06-17T00:00:00.000Z' } },
+          { uniqueId: 'uShared', blockNum: '0x10', hash: '0xh0', from: WALLET, to: WALLET, value: 1, asset: 'USDC', category: 'erc20', rawContract: { address: '0xusdc' }, metadata: { blockTimestamp: '2026-06-15T00:00:00.000Z' } },
+        ],
+      },
+    };
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const p = JSON.parse(String(init!.body)).params[0];
+      const isFrom = 'fromAddress' in p;
+      return { ok: true, json: async () => (isFrom ? fromResult : toResult) } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const page = await provider.getTransferHistory(WALLET, 'eth', { limit: 100 });
+    expect(page).not.toBeNull();
+    expect(page!.transfers).toHaveLength(4); // 3 from + 2 to − 1 shared dupe
+
+    const eth = page!.transfers.find((x) => x.symbol === 'ETH')!;
+    expect(eth.type).toBe('native');
+    expect(eth.direction).toBe('out');
+    expect(eth.amount).toBe(0.5);
+    expect(eth.contractAddress).toBeNull();
+    expect(eth.gasFee).toBeNull();
+    expect(eth.usdValue).toBeNull();
+
+    const nft = page!.transfers.find((x) => x.type === 'nft')!;
+    expect(nft.nftTokenId).toBe('148'); // 0x94 → 148 (hex→decimal)
+    expect(nft.contractAddress).toBe('0xnft');
+
+    const dai = page!.transfers.find((x) => x.symbol === 'DAI')!;
+    expect(dai.direction).toBe('in');
+    expect(dai.amount).toBe(250);
+
+    expect(JSON.parse(page!.nextCursor!)).toEqual({ f: 'PK_FROM', t: null });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String((fetchMock.mock.calls[0]! as [string])[0])).toBe('https://eth-mainnet.g.alchemy.com/v2/al_key');
+  });
+
+  it('continuation only re-queries directions that still have a pageKey; solana → null', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const p = JSON.parse(String(init!.body)).params[0];
+      expect('fromAddress' in p).toBe(true); // only the FROM direction should be queried
+      return { ok: true, json: async () => ({ result: { pageKey: null, transfers: [] } }) } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const page = await provider.getTransferHistory(WALLET, 'eth', {
+      cursor: JSON.stringify({ f: 'PK', t: null }),
+    });
+    expect(page!.nextCursor).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1); // TO had no key → not queried
+
+    expect(await provider.getTransferHistory(WALLET, 'solana', {})).toBeNull();
+  });
+
+  it('getNftHoldings maps ownedNfts (decimal tokenId, cached-image precedence)', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        ownedNfts: [
+          {
+            contract: { address: '0xABC', name: 'Azuki', tokenType: 'ERC721' },
+            tokenId: '148',
+            tokenType: 'ERC721',
+            name: 'Azuki #148',
+            description: 'd',
+            image: { cachedUrl: 'http://cdn/cached', pngUrl: 'http://cdn/png', originalUrl: 'http://orig' },
+            collection: { name: 'AzukiColl' },
+          },
+          { contract: { address: '' }, tokenId: '1' }, // no contract → skipped
+        ],
+      }),
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const out = await provider.getNftHoldings(WALLET, 'eth');
+    expect(out).not.toBeNull();
+    expect(out!).toHaveLength(1);
+    expect(out![0]).toEqual({
+      contractAddress: '0xabc',
+      tokenId: '148',
+      name: 'Azuki #148',
+      description: 'd',
+      collectionName: 'Azuki',
+      logoUrl: 'http://cdn/cached', // cachedUrl wins
+      tokenStandard: 'ERC721',
+    });
+    const [url] = fetchMock.mock.calls[0]! as [string];
+    expect(String(url)).toContain('/nft/v3/al_key/getNFTsForOwner');
+    expect(String(url)).toContain(`owner=${WALLET}`);
   });
 });
 
