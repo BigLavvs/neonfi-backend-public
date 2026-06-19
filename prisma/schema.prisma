@@ -491,7 +491,7 @@ model Nft {
   tokenId         String    @db.VarChar(255)
   contractAddress String    @db.VarChar(255)
   collectionName  String?   @db.VarChar(255)
-  logoUrl         String?   @db.VarChar(2048)
+  logoUrl         String?   @db.Text // was VarChar(2048); on-chain data: URI SVGs (e.g. Uniswap V3 LP positions) overflow 2048 (retrofit-55)
   chain           String    @db.VarChar(50)
   // NOTE (schema delta beyond docx — Idowu owns the docx edit, Stage 12): architecture
   // rep specifies 7 marketplace fields that the schema docx omits. Same defect pattern
