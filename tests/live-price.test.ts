@@ -234,10 +234,18 @@ it('382: asset list price + value overlay the live tick (BTC price 100000, value
 });
 
 // ---------------------------------------------------------------------------
-// 383 — GET /overview totals + allocation reflect the live tick
+// 383 — GET /overview: totals stay live, allocation uses the stored daily price
 // ---------------------------------------------------------------------------
-
-it('383: overview totals + allocation overlay live price (totalValue 108000; BTC alloc 100000)', async () => {
+// retrofit-28 deliberately removed the per-request live-price overlay from the overview
+// allocation/holdings path — the CLIENT now owns the live allocation overlay (it recomputes
+// from the firehose × balance, with the stored/daily currentPrice as the fallback). So:
+//   - totals.totalValue stays LIVE: it comes from computeDerived, which keeps its own
+//     overlay (1×100000 + 2×4000 = 108000).
+//   - allocation[].value is the stored/daily currentPrice (seed: BTC 93000, ETH 3200), NOT
+//     the live tick (1×93000 = 93000; 2×3200 = 6400).
+// retrofit-62: this assertion was the stale side (it asserted the old, pre-28 live allocation
+// overlay). The retrofit-28 design stands — do NOT re-introduce the server-side overlay.
+it('383: overview totals stay live (computeDerived); allocation uses the stored daily price', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await createManualPortfolio(userId);
@@ -256,11 +264,14 @@ it('383: overview totals + allocation overlay live price (totalValue 108000; BTC
     };
   };
 
+  // Totals overlay the live tick (computeDerived): 1*100000 + 2*4000 = 108000.
   expect(json.data.totals.totalValue).toBeCloseTo(108000, 2);
+  // Allocation is the stored/daily fallback (BTC 93000, ETH 3200) — the client adds the live
+  // overlay on top.
   const btcAlloc = json.data.allocation.find((a) => a.symbol === 'BTC')!;
   const ethAlloc = json.data.allocation.find((a) => a.symbol === 'ETH')!;
-  expect(btcAlloc.value).toBeCloseTo(100000, 2);
-  expect(ethAlloc.value).toBeCloseTo(8000, 2);
+  expect(btcAlloc.value).toBeCloseTo(93000, 2);
+  expect(ethAlloc.value).toBeCloseTo(6400, 2);
 });
 
 // ---------------------------------------------------------------------------
