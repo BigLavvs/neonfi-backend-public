@@ -386,6 +386,27 @@ async function currentConnectedValue(portfolioId: number): Promise<number> {
 // older values are APPROXIMATE (historical balance × ~today's price). A true historical-price
 // source is the held retrofit-58 Part 5b work; until then the EXACT path is the one-call providers
 // above, and this only runs when they all fail. Best-effort: each failed sample is skipped.
+// retrofit-72 (H11): one historical token-balance row from Moralis `tokens?to_block`.
+export interface HistoricalTokenRow {
+  usd_value?: number | string | null;
+  possible_spam?: boolean;
+}
+
+// Sum a historical token list at one block, EXCLUDING provider-flagged spam and unpriced/
+// non-finite/non-positive rows — so a scam token claiming a bogus usd_value can't inflate the
+// sampled value. Mirrors the possible_spam filter the current-balance path already applies
+// (providers/moralis.ts), which the to_block sampler had been missing.
+export function sumHistoricalTokenValue(rows: HistoricalTokenRow[]): number {
+  let total = 0;
+  for (const r of rows) {
+    if (r.possible_spam === true) continue;
+    const v = r.usd_value != null ? Number(r.usd_value) : null;
+    if (v == null || !Number.isFinite(v) || v <= 0) continue;
+    total += v;
+  }
+  return total;
+}
+
 async function sampleMoralisValueHistory(
   address: string,
   chainSlug: string,
@@ -410,8 +431,12 @@ async function sampleMoralisValueHistory(
       if (!block) continue;
       const tk = await fetch(`${base}/wallets/${address}/tokens?chain=${chainHex}&to_block=${block}`, { headers });
       if (!tk.ok) continue;
-      const rows = ((await tk.json()) as { result?: Array<{ usd_value?: number | null }> }).result ?? [];
-      const value = rows.reduce((s, r) => s + (r.usd_value != null ? Number(r.usd_value) : 0), 0);
+      const rows =
+        ((await tk.json()) as { result?: HistoricalTokenRow[] }).result ?? [];
+      // retrofit-72 (H11): de-spam before summing — Moralis historical token lists carry
+      // airdrop/scam tokens with bogus usd_value, which over-valued the wallet (snapshots read
+      // $169–$2,934 for a wallet really worth ~$12). Drop provider-flagged spam + unpriced rows.
+      const value = sumHistoricalTokenValue(rows);
       // retrofit-67: skip $0 samples (the wallet held nothing yet at that block) so we never
       // persist leading pre-funding zeros. The leading-zero trim in buildConnectedValueHistory
       // is the real fix; this just keeps the sampled tail clean at the source.

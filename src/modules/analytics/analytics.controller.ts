@@ -58,7 +58,8 @@ router.use('/:portfolioId/*', async (c, next) => {
 
 router.get('/:portfolioId/summary', async (c) => {
   const portfolio = c.get('portfolio');
-  const data = await getSummary(portfolio.id);
+  // retrofit-72 (H9/R37): connected portfolios report null deposits/withdrawals (no reliable ledger).
+  const data = await getSummary(portfolio.id, portfolio.type.name === 'connected');
   return c.json(ok(data), 200);
 });
 

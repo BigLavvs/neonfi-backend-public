@@ -289,6 +289,55 @@ it('328: GET /summary with netDeposit=0 → allTimePnlPct=0, allTimePnlValue equ
   expect(d.allTimePnlValue).toBeCloseTo(93000, 2); // equals current totalValue
 });
 
+it('r72-connected: GET /summary on a connected portfolio → totalDeposits/totalWithdrawals null (no reliable ledger)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSub(userId);
+
+  // Connected portfolio with imported transfers (which would otherwise sum to misleading totals).
+  const type = await prisma.portfolioType.findUniqueOrThrow({ where: { name: 'connected' } });
+  const p = await prisma.portfolio.create({
+    data: { userId, name: 'Connected', typeId: type.id, walletAddress: '0xabc' },
+  });
+  await seedAsset(p.id, btcId, 1.0);
+  await seedNativeTx(p.id, 'buy', 100);
+  await seedNativeTx(p.id, 'sell', 500); // one-directional import → $100 in vs $500 out
+
+  const res = await aGet(p.id, '/summary', cookies);
+  expect(res.status).toBe(200);
+  const d = ((await res.json()) as { data: Record<string, number | null> }).data;
+
+  // retrofit-72 (H9/R37): connected → "—" deposits/withdrawals, never $100 vs $500.
+  expect(d.totalDeposits).toBeNull();
+  expect(d.totalWithdrawals).toBeNull();
+  // The all-time numbers are still present (snapshot-derived for connected).
+  expect(typeof d.allTimePnlValue).toBe('number');
+});
+
+it('r72-tolerance: a snapshot far older than the window is NOT used as that window\'s baseline', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSub(userId);
+  const portfolioId = await createManualPortfolio(userId, 'P');
+  await seedAsset(portfolioId, btcId, 1.0); // totalValue = 93000
+  await redis.del('price:BTC');
+
+  // A 12-day-old snapshot is the nearest at-or-before the 7d cutoff (today-7), but it's 5 days
+  // older than the target → rejected by the H5 tolerance → pnl7d = 0 ("—"). A snapshot exactly
+  // 30 days old is within the looser 30d tolerance → pnl30d is real.
+  await seedSnapshot(portfolioId, userId, ymdDaysAgo(12), 60000);
+  await seedSnapshot(portfolioId, userId, ymdDaysAgo(30), 70000);
+
+  const res = await aGet(portfolioId, '/summary', cookies);
+  expect(res.status).toBe(200);
+  const d = ((await res.json()) as { data: Record<string, number> }).data;
+
+  expect(d.pnl7d).toBe(0); // 12-day-old baseline rejected for the 7d window
+  expect(d.pnl7dValue).toBe(0);
+  expect(d.pnl30dValue).toBeCloseTo(23000, 2); // 93000 − 70000 (30d snapshot accepted)
+  expect(d.pnl30d).toBe(32.86);
+});
+
 // ---------------------------------------------------------------------------
 // 329-330 — GET /performance
 // ---------------------------------------------------------------------------

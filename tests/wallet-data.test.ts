@@ -12,6 +12,7 @@ import { GoldRushWalletProvider } from '../src/modules/wallet-data/providers/gol
 import { AlchemyWalletProvider } from '../src/modules/wallet-data/providers/alchemy.js';
 import { AnkrWalletProvider } from '../src/modules/wallet-data/providers/ankr.js';
 import { previewWallet, fetchWalletSummary } from '../src/modules/wallet-data/index.js';
+import { sumHistoricalTokenValue } from '../src/modules/wallet-data/sync.js';
 import type {
   ProviderResult,
   WalletDataProvider,
@@ -30,6 +31,34 @@ function stubFetch(handler: (url: string, init?: RequestInit) => unknown): void 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-72 (H11) — historical value sampler de-spams before summing
+// ---------------------------------------------------------------------------
+
+describe('sumHistoricalTokenValue', () => {
+  it('drops provider-flagged spam and unpriced/non-finite/non-positive rows; sums the rest', () => {
+    const rows = [
+      { usd_value: 10, possible_spam: false }, // real
+      { usd_value: 2.5 }, // real (no spam flag)
+      { usd_value: 999999, possible_spam: true }, // scam token with bogus value → dropped
+      { usd_value: null }, // unpriced → dropped
+      { usd_value: 0 }, // zero → dropped
+      { usd_value: '7.5' }, // string price → counted
+      { usd_value: 'not-a-number' }, // non-finite → dropped
+    ];
+    expect(sumHistoricalTokenValue(rows)).toBeCloseTo(20, 8); // 10 + 2.5 + 7.5
+  });
+
+  it('an all-spam list sums to 0 (no phantom value)', () => {
+    expect(
+      sumHistoricalTokenValue([
+        { usd_value: 169, possible_spam: true },
+        { usd_value: 2934, possible_spam: true },
+      ]),
+    ).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

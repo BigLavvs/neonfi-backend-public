@@ -34,15 +34,26 @@ export async function listPortfolioSnapshots(
  * The snapshot column is `@db.Date` so PostgreSQL stores midnight-UTC. We construct
  * the cutoff at UTC midnight too (matching snapshot.job.ts's todayUtcDate) — never
  * local-time `setDate` arithmetic, which drifts across timezone boundaries.
+ *
+ * retrofit-72 (H5): the at-or-before snapshot must also be reasonably CLOSE to the target,
+ * or a 4-day-old point gets used as the "24h ago" baseline and a stale delta is mislabeled
+ * "24H". `toleranceDays` bounds how much older than the target the baseline may be; if the
+ * nearest snapshot is older than that, return null so the caller shows "—" for the window.
+ * Default scales with the window (tight ~1 day for 24h, looser for 7d/30d).
  */
 export async function findSnapshotNearDaysAgo(
   portfolioId: number,
   daysAgo: number,
+  toleranceDays: number = Math.max(1, daysAgo * 0.25),
 ): Promise<{ value: Prisma.Decimal } | null> {
   const todayYmd = new Date().toISOString().slice(0, 10);
   const today = new Date(`${todayYmd}T00:00:00.000Z`);
   const cutoff = new Date(today.getTime() - daysAgo * 24 * 60 * 60 * 1000);
-  return findSnapshotAtOrBefore(portfolioId, cutoff);
+  const snap = await findSnapshotAtOrBefore(portfolioId, cutoff);
+  if (!snap) return null;
+  const lowerBound = new Date(cutoff.getTime() - toleranceDays * 24 * 60 * 60 * 1000);
+  if (snap.snapshotDate < lowerBound) return null; // too old to represent this window
+  return { value: snap.value };
 }
 
 // Re-export the repository helpers as service-layer calls so other modules read snapshot

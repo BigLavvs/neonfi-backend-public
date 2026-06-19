@@ -29,11 +29,13 @@ export async function countSnapshotsByPortfolioId(portfolioId: number): Promise<
 export async function findSnapshotAtOrBefore(
   portfolioId: number,
   cutoffDate: Date,
-): Promise<{ value: Prisma.Decimal } | null> {
+): Promise<{ value: Prisma.Decimal; snapshotDate: Date } | null> {
+  // retrofit-72 (H5): snapshotDate is returned too so findSnapshotNearDaysAgo can reject a
+  // baseline that's much older than the target window (a stale delta mislabeled "24H").
   return prisma.balanceSnapshot.findFirst({
     where: { portfolioId, snapshotDate: { lte: cutoffDate } },
     orderBy: { snapshotDate: 'desc' },
-    select: { value: true },
+    select: { value: true, snapshotDate: true },
   });
 }
 

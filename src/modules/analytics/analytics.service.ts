@@ -74,13 +74,17 @@ function computePnlPeriod(today: number, pastValue: number | null): [number, num
   return [pct, delta];
 }
 
-async function buildSummary(portfolioId: number): Promise<SummaryDTO> {
+async function buildSummary(portfolioId: number, isConnected: boolean): Promise<SummaryDTO> {
   // all-time numbers + current totalValue come from derive.ts (already cached at
   // portfolio_pnl:<id>); no need to duplicate that cost-basis logic here.
   const derived = await computeDerived(portfolioId);
 
-  const [{ totalDeposits, totalWithdrawals }, snap7d, snap30d] = await Promise.all([
-    getDepositWithdrawalTotals(portfolioId),
+  // retrofit-72 (H9/R37): a connected wallet's imported transfers are a windowed, effectively
+  // one-directional ledger — summing them into deposits/withdrawals is misleading ($0.41 in vs
+  // $516 out is impossible), so skip the read entirely and report null. Manual portfolios keep
+  // the real cost-basis ledger.
+  const [totals, snap7d, snap30d] = await Promise.all([
+    isConnected ? Promise.resolve(null) : getDepositWithdrawalTotals(portfolioId),
     findSnapshotNearDaysAgo(portfolioId, 7),
     findSnapshotNearDaysAgo(portfolioId, 30),
   ]);
@@ -99,8 +103,8 @@ async function buildSummary(portfolioId: number): Promise<SummaryDTO> {
     portfolioId,
     allTimePnlPct: round(derived.pnlAllTime),
     allTimePnlValue: round(derived.pnlAllTimeValue),
-    totalDeposits: round(totalDeposits),
-    totalWithdrawals: round(totalWithdrawals),
+    totalDeposits: totals ? round(totals.totalDeposits) : null,
+    totalWithdrawals: totals ? round(totals.totalWithdrawals) : null,
     pnl7d: round(pnl7d),
     pnl7dValue: round(pnl7dValue),
     pnl30d: round(pnl30d),
@@ -152,8 +156,8 @@ async function buildHoldings(portfolio: PortfolioWithRelations): Promise<Holding
 // Public, cache-wrapped entry points (called by the controller)
 // ---------------------------------------------------------------------------
 
-export function getSummary(portfolioId: number): Promise<SummaryDTO> {
-  return withCache(`analytics_summary:${portfolioId}`, () => buildSummary(portfolioId));
+export function getSummary(portfolioId: number, isConnected: boolean): Promise<SummaryDTO> {
+  return withCache(`analytics_summary:${portfolioId}`, () => buildSummary(portfolioId, isConnected));
 }
 
 export function getPerformance(portfolioId: number): Promise<PerformanceDTO> {

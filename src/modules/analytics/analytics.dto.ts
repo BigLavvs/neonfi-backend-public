@@ -17,8 +17,12 @@ export interface SummaryDTO {
   portfolioId: number;
   allTimePnlPct: number;
   allTimePnlValue: number;
-  totalDeposits: number;
-  totalWithdrawals: number;
+  // retrofit-72 (H9/R37): null for CONNECTED portfolios. The on-chain transfer import is
+  // windowed and effectively one-directional, so summing it into deposits/withdrawals produces
+  // impossible figures (e.g. $0.41 in vs $516 out). We have no reliable deposit/withdrawal ledger
+  // for a connected wallet, so the UI shows "—" rather than a number that implies a complete one.
+  totalDeposits: number | null;
+  totalWithdrawals: number | null;
   pnl7d: number;
   pnl7dValue: number;
   pnl30d: number;
