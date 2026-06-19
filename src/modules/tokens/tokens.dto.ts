@@ -16,6 +16,10 @@ export interface TokenListDTO {
   logoUrl: string | null;
   currentPrice: number;
   rank: number | null;
+  // retrofit-71 (C4): 'verified' = price confirmed against a canonical feed; 'unverified' = an
+  // auto-listed wallet token whose price couldn't be cross-checked (UI marks/excludes it);
+  // null = CMC catalog row (trusted by default).
+  priceConfidence: string | null;
 }
 
 export interface TokenDetailDTO extends TokenListDTO {
@@ -38,6 +42,14 @@ export interface TokenHistoryDTO {
   points: TokenPricePointDTO[];
   ath: number;
   atl: number;
+  // retrofit-71 (C5): ath/atl are the high/low SINCE TRACKING BEGAN, not a true all-time
+  // extreme — 'tracked' tells the UI to label them "High/Low (tracked)"/"1Y High/Low" rather
+  // than "All-Time". ('all-time' is reserved for when a real provider ATH/ATL is stored.)
+  athAtlBasis: 'tracked' | 'all-time';
+  // retrofit-71 (C6): true when the real daily series is too short to chart as history (e.g. a
+  // freshly auto-listed token with ~2 points). The UI shows "limited history" instead of drawing
+  // a fabricated multi-point line labelled "1M"/"1Y".
+  limitedHistory: boolean;
 }
 
 // retrofit-15: `livePrice` overlays the fresh `price:<SYMBOL>` tick over the seeded
@@ -51,6 +63,7 @@ export function toTokenListDTO(token: Token, livePrice?: number): TokenListDTO {
     logoUrl: token.logoUrl,
     currentPrice: livePrice ?? Number(token.currentPrice.toString()),
     rank: token.rank,
+    priceConfidence: token.priceConfidence,
   };
 }
 
@@ -62,6 +75,7 @@ export function toTokenDetailDTO(token: Token, livePrice?: number): TokenDetailD
     logoUrl: token.logoUrl,
     currentPrice: livePrice ?? Number(token.currentPrice.toString()),
     rank: token.rank,
+    priceConfidence: token.priceConfidence,
     marketCap: token.marketCap !== null ? Number(token.marketCap.toString()) : null,
     updatedAt: token.updatedAt,
   };

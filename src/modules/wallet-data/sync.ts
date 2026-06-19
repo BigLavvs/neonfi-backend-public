@@ -147,6 +147,10 @@ async function resolveOrCreateToken(t: TokenResolveInput) {
         logoUrl: t.logoUrl ?? null,
         autoListed: true,
         contractAddress: contract,
+        // retrofit-71 (C4): an auto-listed wallet token's provider price is unverified until the
+        // connected-reprice job cross-checks it against a canonical feed. Flag it now (no HTTP on
+        // the connect path) so the UI can mark/exclude it rather than presenting it as fact.
+        priceConfidence: 'unverified',
       },
     });
   } catch (e) {

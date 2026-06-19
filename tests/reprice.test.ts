@@ -8,6 +8,10 @@
 import { it, beforeEach, afterAll, expect, vi } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
 import { repriceConnectedTokens } from '../src/modules/wallet-data/reprice.js';
+import {
+  _setCanonicalPriceSource,
+  _resetCanonicalPriceSource,
+} from '../src/modules/tokens/canonical-price.js';
 import { truncateAllUserData } from './helpers.js';
 
 // reprice.ts imports fetchWalletSummary from './index.js' — mock that module.
@@ -30,11 +34,16 @@ beforeEach(async () => {
   await truncateAllUserData();
   await prisma.token.deleteMany({ where: { symbol: { in: SYMBOLS } } });
   fetchWalletSummaryMock.mockReset();
+  // retrofit-71 (C4): reprice now cross-checks against a canonical feed. Default the source to
+  // "no canonical listing" so tests stay hermetic (no real CoinGecko HTTP); individual tests
+  // override it. With no canonical, reconcile keeps the provider price and flags 'unverified'.
+  _setCanonicalPriceSource({ byContract: async () => null });
 });
 
 afterAll(async () => {
   await truncateAllUserData();
   await prisma.token.deleteMany({ where: { symbol: { in: SYMBOLS } } });
+  _resetCanonicalPriceSource();
 });
 
 let userCounter = 0;
@@ -92,8 +101,58 @@ it('411: refreshes only auto-listed tokens (by contract); CMC rows untouched', a
   // Auto-listed row updated (matched by contract); CMC row left frozen.
   const autoAfter = await prisma.token.findUniqueOrThrow({ where: { id: autoToken.id } });
   expect(Number(autoAfter.currentPrice)).toBe(12.5);
+  // retrofit-71: no canonical listing (stub returns null) → provider price kept, flagged unverified.
+  expect(autoAfter.priceConfidence).toBe('unverified');
   const cmcAfter = await prisma.token.findUniqueOrThrow({ where: { id: cmcToken.id } });
   expect(Number(cmcAfter.currentPrice)).toBe(2);
+  expect(cmcAfter.priceConfidence).toBeNull(); // CMC row untouched
+});
+
+it('r71-reprice: canonical feed overrides a provider price >25% off and flags verified; within tolerance keeps provider', async () => {
+  const userId = await makeUser();
+  const portfolioId = await makeConnectedPortfolio(userId, WALLET_A);
+
+  // SYM_AUTO: provider price 3.7× the canonical (the PEPU case) → canonical wins, verified.
+  // SYM_AUTO_B: provider within 25% of canonical → provider kept, verified.
+  const offToken = await prisma.token.create({
+    data: { symbol: SYM_AUTO, name: 'Off Price', currentPrice: '0', autoListed: true, contractAddress: CONTRACT_AUTO },
+  });
+  const okToken = await prisma.token.create({
+    data: { symbol: SYM_AUTO_B, name: 'Ok Price', currentPrice: '0', autoListed: true, contractAddress: CONTRACT_AUTO_B },
+  });
+  await prisma.asset.create({ data: { portfolioId, tokenId: offToken.id, balance: '1' } });
+  await prisma.asset.create({ data: { portfolioId, tokenId: okToken.id, balance: '1' } });
+
+  // Canonical prices keyed by contract.
+  _setCanonicalPriceSource({
+    byContract: async (_slug, contract) => {
+      if (contract.toLowerCase() === CONTRACT_AUTO) return 0.0000242; // real PEPU-ish
+      if (contract.toLowerCase() === CONTRACT_AUTO_B) return 100; // close to provider 95
+      return null;
+    },
+  });
+
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: 'ETH', nativeBalance: 0, totalUsd: 0, tokenCount: 2,
+    tokens: [
+      { symbol: SYM_AUTO, name: 'Off Price', contractAddress: CONTRACT_AUTO, balance: 1, decimals: 18, usdPrice: 0.00009, usdValue: 0, isNative: false },
+      { symbol: SYM_AUTO_B, name: 'Ok Price', contractAddress: CONTRACT_AUTO_B, balance: 1, decimals: 18, usdPrice: 95, usdValue: 95, isNative: false },
+    ],
+    provider: 'moralis',
+  });
+
+  const r = await repriceConnectedTokens();
+  expect(r.repriced).toBe(2);
+
+  // Off-by-3.7× provider price overridden by canonical; flagged verified.
+  const offAfter = await prisma.token.findUniqueOrThrow({ where: { id: offToken.id } });
+  expect(Number(offAfter.currentPrice)).toBeCloseTo(0.0000242, 10);
+  expect(offAfter.priceConfidence).toBe('verified');
+
+  // Within-tolerance provider price kept; still flagged verified (we had a canonical reference).
+  const okAfter = await prisma.token.findUniqueOrThrow({ where: { id: okToken.id } });
+  expect(Number(okAfter.currentPrice)).toBe(95);
+  expect(okAfter.priceConfidence).toBe('verified');
 });
 
 it('412: a wallet whose summary throws is logged + skipped; other wallets still reprice', async () => {

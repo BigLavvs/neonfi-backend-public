@@ -341,7 +341,7 @@ it('134: GET /tokens — search=ZZZNOMATCH → 200, empty tokens array, nextCurs
 // 135. GET /tokens/:id — valid token → 200, detail DTO shape
 // ---------------------------------------------------------------------------
 
-it('135: GET /tokens/:id — valid token → 200, detail DTO has id, name, symbol, logoUrl, currentPrice, rank, marketCap, updatedAt', async () => {
+it('135: GET /tokens/:id — valid token → 200, detail DTO has id, name, symbol, logoUrl, currentPrice, rank, priceConfidence, marketCap, updatedAt', async () => {
   const cookies = await registerAndLogin();
   const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
 
@@ -351,11 +351,13 @@ it('135: GET /tokens/:id — valid token → 200, detail DTO has id, name, symbo
   const json = await res.json() as { data: { token: Record<string, unknown> } };
   const token = json.data.token;
   const keys = Object.keys(token).sort();
-  expect(keys).toEqual(['currentPrice', 'id', 'logoUrl', 'marketCap', 'name', 'rank', 'symbol', 'updatedAt']);
+  // retrofit-71 (C4): priceConfidence added (null for a trusted CMC catalog row like BTC).
+  expect(keys).toEqual(['currentPrice', 'id', 'logoUrl', 'marketCap', 'name', 'priceConfidence', 'rank', 'symbol', 'updatedAt']);
   expect(token.id).toBe(btc.id);
   expect(token.name).toBe('Bitcoin');
   expect(token.symbol).toBe('BTC');
   expect(typeof token.currentPrice).toBe('number');
+  expect(token.priceConfidence).toBeNull(); // catalog token → trusted, no flag
   expect(token.marketCap).not.toBeNull();
   expect(typeof token.updatedAt).toBe('string');
 });
@@ -398,7 +400,13 @@ function utcDaysAgo(daysAgo: number): Date {
 const ymd = (d: Date): string => d.toISOString().slice(0, 10);
 
 interface HistoryResponse {
-  data: { points: Array<{ date: string; price: number }>; ath: number; atl: number };
+  data: {
+    points: Array<{ date: string; price: number }>;
+    ath: number;
+    atl: number;
+    athAtlBasis: 'tracked' | 'all-time';
+    limitedHistory: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +494,37 @@ it('140: GET /tokens/:id/history — no snapshots → one live now-point, ath = 
   expect(json.data.points[0]!.price).toBeCloseTo(70000);
   expect(json.data.ath).toBeCloseTo(70000);
   expect(json.data.atl).toBeCloseTo(70000);
+  // retrofit-71: ath/atl are tracked extremes (UI must not call them "All-Time"); a single
+  // live point is too short to chart as history.
+  expect(json.data.athAtlBasis).toBe('tracked');
+  expect(json.data.limitedHistory).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-71 (C6): a token with ≥7 real daily snapshots is NOT limited history.
+// ---------------------------------------------------------------------------
+
+it('r71-history: ≥7 real daily snapshots → limitedHistory false; <7 → true', async () => {
+  const cookies = await registerAndLogin();
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btc.id } });
+  await redis.del('price:BTC');
+
+  // 8 distinct daily snapshots within a 30d window → a real, chartable series.
+  await prisma.tokenPriceSnapshot.createMany({
+    data: Array.from({ length: 8 }, (_, i) => ({
+      tokenId: btc.id,
+      snapshotDate: utcDaysAgo(i + 1),
+      price: (100 + i).toString(),
+    })),
+  });
+
+  const res = await tokenGet(`/${btc.id}/history?days=30`, cookies);
+  const json = await res.json() as HistoryResponse;
+  expect(json.data.limitedHistory).toBe(false);
+  expect(json.data.athAtlBasis).toBe('tracked');
+
+  await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btc.id } });
 });
 
 // ---------------------------------------------------------------------------

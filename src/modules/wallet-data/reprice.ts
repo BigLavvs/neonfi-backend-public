@@ -11,6 +11,7 @@
 
 import { prisma } from '../../lib/prisma.js';
 import { fetchWalletSummary } from './index.js';
+import { reconcileTokenPrice } from '../tokens/canonical-price.js';
 
 const DELAY_MS = 250; // gentle pacing between wallets (provider rate limits)
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -48,7 +49,13 @@ export async function repriceConnectedTokens(): Promise<{ wallets: number; repri
       const summary = await fetchWalletSummary(address, { slug });
       if (!summary) continue;
       for (const t of summary.tokens) {
-        if (t.usdPrice == null) continue;
+        // retrofit-71 (C4): cross-check the provider price against a canonical feed (CoinGecko by
+        // contract). reconcileTokenPrice prefers canonical when the provider is >25% off (the PEPU
+        // 3.7× case), keeps the provider when confirmed, and flags 'unverified' when no canonical
+        // listing exists. Nothing to check AND no provider price → skip.
+        if (t.usdPrice == null && !t.contractAddress) continue;
+        const { price, priceConfidence } = await reconcileTokenPrice(slug, t.contractAddress, t.usdPrice);
+        if (price == null) continue; // no canonical and no provider price → leave the row as-is
         // Match auto-listed rows by CONTRACT when available (precise), else by symbol.
         const where = t.contractAddress
           ? {
@@ -56,7 +63,10 @@ export async function repriceConnectedTokens(): Promise<{ wallets: number; repri
               autoListed: true,
             }
           : { symbol: { equals: t.symbol, mode: 'insensitive' as const }, autoListed: true };
-        const res = await prisma.token.updateMany({ where, data: { currentPrice: dec8(t.usdPrice) } });
+        const res = await prisma.token.updateMany({
+          where,
+          data: { currentPrice: dec8(price), priceConfidence },
+        });
         repriced += res.count;
       }
     } catch (e) {

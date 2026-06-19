@@ -22,6 +22,11 @@ function roundPrice(n: number): number {
   return Math.round(n * 1e8) / 1e8;
 }
 
+// retrofit-71 (C6): below this many REAL daily snapshot rows the chart can't honestly be drawn as
+// "history" (a freshly auto-listed token has ~2), so the DTO flags `limitedHistory` and the UI
+// shows "limited history" instead of a fabricated line.
+const MIN_REAL_HISTORY_POINTS = 7;
+
 export class TokenError extends Error {
   constructor(
     public readonly statusCode: number,
@@ -111,5 +116,14 @@ export async function getTokenPriceHistory(id: number, days: number): Promise<To
   const ath = roundPrice(extremes.max != null ? Math.max(extremes.max, live) : live);
   const atl = roundPrice(extremes.min != null ? Math.min(extremes.min, live) : live);
 
-  return { points, ath, atl };
+  // retrofit-71 (C5): these are extremes SINCE TRACKING BEGAN, never a true provider ATH/ATL —
+  // tell the UI so it doesn't mislabel them "All-Time".
+  const athAtlBasis = 'tracked' as const;
+  // retrofit-71 (C6): flag a series too short to honestly chart as history (count the REAL daily
+  // snapshot rows, before the appended live "now" point) so the UI shows "limited history" rather
+  // than a fabricated 2-point line. Freshly auto-listed tokens accrue ≤2 points until the daily
+  // job has run for a while.
+  const limitedHistory = rows.length < MIN_REAL_HISTORY_POINTS;
+
+  return { points, ath, atl, athAtlBasis, limitedHistory };
 }

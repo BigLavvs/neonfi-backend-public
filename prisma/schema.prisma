@@ -258,6 +258,12 @@ model Token {
   // refreshes their price. CMC/catalog tokens stay false and are priced by token-sync + the
   // firehose.
   autoListed   Boolean  @default(false)
+  // retrofit-71 (C4): confidence in this row's price. 'verified' = confirmed against a canonical
+  // feed (CoinGecko by contract); 'unverified' = an auto-listed wallet token whose provider price
+  // could not be cross-checked (the UI marks/excludes it rather than presenting it as fact). null =
+  // CMC catalog rows (trusted by default). Set 'unverified' on auto-list; upgraded to 'verified'
+  // (and the price corrected) by the connected-reprice job when a canonical price is found.
+  priceConfidence String? @db.VarChar(20)
   assets       Asset[]
   // retrofit-21: daily price-history rows (powers the token-detail chart + ATH/ATL).
   priceSnapshots TokenPriceSnapshot[]
