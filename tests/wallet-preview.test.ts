@@ -51,7 +51,7 @@ const VALID_EVM = '0xAbCdEf1234567890AbCdEf1234567890AbCdEf12';
 const AUTO_SYMBOL = 'ZZAUTO47';
 // retrofit-48: catalog rows pre-seeded / auto-listed by the sync-resolution cases below.
 // Cleared each run (after truncate drops their asset FKs) so resolution starts clean.
-const SYNC_TEST_SYMBOLS = [AUTO_SYMBOL, 'ZZEXIST48', 'ZZWALLET48', 'ZZBACKFILL48', 'ZZCOLLIDE48'];
+const SYNC_TEST_SYMBOLS = [AUTO_SYMBOL, 'ZZEXIST48', 'ZZWALLET48', 'ZZBACKFILL48', 'ZZCOLLIDE48', 'WAYTOOLONGSYMBOLNAME1234567890'];
 
 async function authPost(path: string, body: Record<string, unknown>): Promise<Response> {
   return app.request(`${AUTH_BASE}${path}`, {
@@ -198,7 +198,7 @@ it('404: preview requires auth → 401 without a session', async () => {
 // Initial holdings sync on connected create
 // ---------------------------------------------------------------------------
 
-it('405: connected create seeds catalog + auto-listed holdings, opening positions, netDeposit', async () => {
+it('405: connected create sets balances DIRECTLY from the provider summary (no opening lots) — retrofit-58 Part 1', async () => {
   const { cookie } = await registerAndLogin();
   const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
   const catalogToken = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
@@ -229,15 +229,24 @@ it('405: connected create seeds catalog + auto-listed holdings, opening position
   expect(auto!.autoListed).toBe(true);
   expect(auto!.contractAddress).toBe('0xauto');
 
-  // An asset row + a native `buy` transaction exist for BOTH holdings.
-  const assets = await prisma.asset.findMany({ where: { portfolioId } });
+  // retrofit-58: an Asset row exists for BOTH holdings with the EXACT provider balance, and
+  // cost-basis fields are cleared (a windowed import can't trust them — connected PnL comes
+  // from snapshots). There is NO opening-lot transaction (none — there were no transfers).
+  const assets = await prisma.asset.findMany({ where: { portfolioId }, include: { token: true } });
   expect(assets).toHaveLength(2);
-  const txns = await prisma.transaction.findMany({ where: { portfolioId } });
-  expect(txns).toHaveLength(2);
+  const catAsset = assets.find((a) => a.token.symbol === catalogToken.symbol)!;
+  const autoAsset = assets.find((a) => a.token.symbol === AUTO_SYMBOL)!;
+  expect(Number(catAsset.balance)).toBeCloseTo(2, 8);
+  expect(Number(autoAsset.balance)).toBeCloseTo(10, 8);
+  expect(catAsset.avgCost).toBeNull();
+  expect(Number(catAsset.costBasis)).toBe(0);
 
-  // Opening positions valued ≈ provider summary → portfolio netDeposit ≈ Σ cost basis.
+  const txns = await prisma.transaction.findMany({ where: { portfolioId } });
+  expect(txns).toHaveLength(0); // no transfer history → no feed rows, and NO opening lots
+
+  // Connected cost basis is N/A, so netDeposit is not maintained from a windowed import.
   const portfolio = await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } });
-  expect(Number(portfolio.netDeposit)).toBeCloseTo(3050, 2);
+  expect(Number(portfolio.netDeposit)).toBe(0);
 
   // Existing stream registration is unchanged (still wired).
   expect(portfolio.moralisStreamId).toBe('mock-stream-preview');
@@ -254,10 +263,14 @@ it('406: connected create with an empty wallet → portfolio still created, no a
   expect(await prisma.asset.count({ where: { portfolioId } })).toBe(0);
 });
 
-it('407: a single bad-token seed does not abort the rest of the sync', async () => {
+it('407: an over-long token symbol now AUTO-LISTS instead of being skipped — retrofit-58 Part 4', async () => {
   const { cookie } = await registerAndLogin();
   const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
   const catalogToken = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
+
+  // A scam name well over the old 255-char bound (proves the name → TEXT widening).
+  const longName = 'Visit https://claim-your-airdrop.example.com/redeem?ref=0xdeadbeefcafebabe to claim. '.repeat(5);
+  expect(longName.length).toBeGreaterThan(255);
 
   fetchWalletSummaryMock.mockResolvedValue({
     nativeSymbol: catalogToken.symbol,
@@ -265,8 +278,9 @@ it('407: a single bad-token seed does not abort the rest of the sync', async () 
     totalUsd: 1500,
     tokenCount: 2,
     tokens: [
-      // A symbol longer than VarChar(20) → token.upsert throws → this one is skipped.
-      { symbol: 'WAYTOOLONGSYMBOLNAME1234567890', name: 'Too Long', contractAddress: '0xbad', balance: 5, decimals: 18, usdPrice: 1, usdValue: 5, isNative: false },
+      // 30-char symbol + >255-char name: pre-Part-4 these overflowed VarChar(20)/VarChar(255) so
+      // token.create threw and the token was silently skipped. Now they auto-list cleanly.
+      { symbol: 'WAYTOOLONGSYMBOLNAME1234567890', name: longName, contractAddress: '0xbad', balance: 5, decimals: 18, usdPrice: 1, usdValue: 5, isNative: false },
       { symbol: catalogToken.symbol, name: catalogToken.name, contractAddress: null, balance: 1, decimals: 18, usdPrice: 1500, usdValue: 1500, isNative: true },
     ],
     provider: 'moralis',
@@ -276,9 +290,13 @@ it('407: a single bad-token seed does not abort the rest of the sync', async () 
   expect(res.status).toBe(201);
   const portfolioId = (await res.json()).data.portfolio.id as number;
 
-  // The good catalog token still seeded despite the bad one failing.
+  // BOTH tokens now seed: the catalog token AND the previously-overflowing one (auto-listed).
   const assets = await prisma.asset.findMany({ where: { portfolioId } });
-  expect(assets).toHaveLength(1);
+  expect(assets).toHaveLength(2);
+  const longTok = await prisma.token.findUnique({ where: { symbol: 'WAYTOOLONGSYMBOLNAME1234567890' } });
+  expect(longTok).not.toBeNull();
+  expect(longTok!.autoListed).toBe(true);
+  expect(longTok!.name.length).toBeGreaterThan(255); // the long name persisted (TEXT column)
 });
 
 // ---------------------------------------------------------------------------
@@ -382,7 +400,7 @@ it('410: a same-ticker / different-contract collision maps to the existing row +
 // retrofit-49 — real transfer-history import + NFT + sync-more + overview count
 // ---------------------------------------------------------------------------
 
-it('413: connected create imports REAL transfers + reconciles a residual opening lot to the on-chain balance', async () => {
+it('413: connected create imports REAL transfers (feed) + sets balance DIRECTLY from the provider summary — retrofit-58', async () => {
   const { cookie } = await registerAndLogin();
   const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
   const catalog = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
@@ -406,13 +424,14 @@ it('413: connected create imports REAL transfers + reconciles a residual opening
   expect(res.status).toBe(201);
   const portfolioId = (await res.json()).data.portfolio.id as number;
 
-  // Two imported transfers + one reconciling opening lot = 3 transactions.
+  // retrofit-58: the two imported transfers are recorded as the activity FEED — no opening
+  // lot is seeded anymore, so there are exactly 2 transactions.
   const txns = await prisma.transaction.findMany({
     where: { portfolioId },
     include: { nativeDetail: true, direction: true, type: true },
     orderBy: { timestamp: 'asc' },
   });
-  expect(txns).toHaveLength(3);
+  expect(txns).toHaveLength(2);
 
   // The 'in' transfer kept its REAL hash / from / to / timestamp / gas / historical usdValue.
   const inTx = txns.find((t) => t.transactionHash === '0xaaa413')!;
@@ -429,12 +448,8 @@ it('413: connected create imports REAL transfers + reconciles a residual opening
   const outTx = txns.find((t) => t.transactionHash === '0xbbb413')!;
   expect(outTx.direction.name).toBe('sell');
 
-  // The opening lot is the third tx (no hash) dated BEFORE the earliest import.
-  const opening = txns.find((t) => t.transactionHash === null)!;
-  expect(opening.direction.name).toBe('buy');
-  expect(opening.timestamp.getTime()).toBeLessThan(new Date('2026-01-10T00:00:00.000Z').getTime());
-
-  // Reconciled balance == provider current balance (residual lot makes it exact).
+  // Balance == provider current balance (5) — set DIRECTLY from the summary, not reconstructed
+  // from the windowed transfer set (whose net here is only +1.62345679).
   const asset = await prisma.asset.findFirstOrThrow({ where: { portfolioId, tokenId: catalog.id } });
   expect(Number(asset.balance)).toBeCloseTo(5, 6);
 
@@ -536,7 +551,8 @@ it('416: overview transactionCount uses externalTxCount for connected, DB count 
   const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
   const catalog = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
 
-  // Connected: empty history page but a provider total of 137; sync still seeds ONE opening lot.
+  // Connected: empty history page but a provider total of 137. retrofit-58: balance is set
+  // from the summary (no opening lot), so the portfolio has ZERO DB transactions.
   fetchWalletSummaryMock.mockResolvedValue({
     nativeSymbol: catalog.symbol, nativeBalance: 2, totalUsd: 2000, tokenCount: 1,
     tokens: [{ symbol: catalog.symbol, name: catalog.name, contractAddress: null, balance: 2, decimals: 18, usdPrice: 1000, usdValue: 2000, isNative: true }],
@@ -547,8 +563,8 @@ it('416: overview transactionCount uses externalTxCount for connected, DB count 
   const conn = await portPost('', { name: 'Conn 416', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
   expect(conn.status).toBe(201);
   const connId = (await conn.json()).data.portfolio.id as number;
-  // The connected portfolio actually has 1 DB tx (the opening lot) — but externalTxCount wins.
-  expect(await prisma.transaction.count({ where: { portfolioId: connId } })).toBe(1);
+  // The connected portfolio has 0 DB txns (no opening lot, empty page) — externalTxCount wins.
+  expect(await prisma.transaction.count({ where: { portfolioId: connId } })).toBe(0);
   expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: connId } })).externalTxCount).toBe(137);
 
   // Manual: seed 3 bare transaction rows → DB count = 3 (no externalTxCount).
@@ -596,28 +612,30 @@ it('417: resync re-imports a deleted transfer, keeps balance on-chain, and is a 
   expect(created.status).toBe(201);
   const portfolioId = (await created.json()).data.portfolio.id as number;
 
-  // Initial sync: 2 transfers + 1 reconciling opening lot = 3 txns; balance == on-chain 5.
-  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(3);
+  // retrofit-58: initial sync imports 2 transfers as the feed (NO opening lot); balance is set
+  // straight from the provider summary == on-chain 5.
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(2);
   const balanceOf = async () =>
     Number((await prisma.asset.findFirstOrThrow({ where: { portfolioId, tokenId: catalog.id } })).balance);
   expect(await balanceOf()).toBeCloseTo(5, 6);
 
   // Simulate a transfer that a missed webhook dropped: delete the 'in' transaction.
   await prisma.transaction.deleteMany({ where: { portfolioId, transactionHash: '0xaaa417' } });
-  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(2);
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(1);
 
-  // Resync re-imports exactly the missing transfer (the other is deduped on hash).
+  // Resync re-imports exactly the missing transfer (the other is deduped on hash) and re-sets
+  // the balance from the summary (reconciled = the 1 held token set).
   const r1 = await resyncPost(portfolioId, cookie);
   expect(r1.status).toBe(200);
   expect((await r1.json()).data).toEqual({ importedTransfers: 1, reconciled: 1 });
   expect(await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xaaa417' } })).toBe(1);
-  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(3);
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(2);
   expect(await balanceOf()).toBeCloseTo(5, 6);
 
   // Running it again is a no-op: nothing imported, no duplicate rows, balance unchanged.
   const r2 = await resyncPost(portfolioId, cookie);
   expect((await r2.json()).data).toEqual({ importedTransfers: 0, reconciled: 1 });
-  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(3);
+  expect(await prisma.transaction.count({ where: { portfolioId } })).toBe(2);
   expect(await balanceOf()).toBeCloseTo(5, 6);
 });
 

@@ -233,8 +233,13 @@ model Chain {
 
 model Token {
   id           Int      @id @default(autoincrement())
-  name         String   @db.VarChar(255)
-  symbol       String   @unique @db.VarChar(20)
+  // retrofit-58 Part 4: widened from VarChar(255)/VarChar(20). Connected-wallet sync
+  // auto-lists arbitrary on-chain tokens, and scam/airdrop tokens stuff long URLs into their
+  // name/symbol — the old bounds threw "value too long for column" and the token was silently
+  // skipped (retrofit-57). name → Text (genuinely free text); symbol stays bounded but generous
+  // (still the unique catalog key + a Redis key, so not unbounded).
+  name         String   @db.Text
+  symbol       String   @unique @db.VarChar(255)
   logoUrl      String?  @db.VarChar(2048)
   currentPrice Decimal  @db.Decimal(20, 8)
   marketCap    Decimal? @db.Decimal(30, 2)
@@ -430,7 +435,7 @@ model NativeTransactionDetail {
   transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
   transactionId Int         @unique
   amount        Decimal     @db.Decimal(20, 8)
-  symbol        String      @db.VarChar(20)
+  symbol        String      @db.VarChar(255) // retrofit-58 Part 4: widened from 20 (arbitrary on-chain symbols)
   // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-2): USD
   // value of the transfer at write-time (amount × price). Implements Option (a)
   // for USD-at-transaction-time so manual/connected PnL stops being fictional.
@@ -451,10 +456,12 @@ model Erc20TransactionDetail {
   transaction          Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
   transactionId        Int         @unique
   amount               Decimal     @db.Decimal(20, 8)
-  symbol               String      @db.VarChar(20)
+  // retrofit-58 Part 4: widened from VarChar(20)/VarChar(255) — connected-wallet history import
+  // feeds raw on-chain symbols/names straight in, and scam tokens overflow the old bounds.
+  symbol               String      @db.VarChar(255)
   tokenContractAddress String      @db.VarChar(255)
-  tokenName            String      @db.VarChar(255)
-  tokenSymbol          String      @db.VarChar(20)
+  tokenName            String      @db.Text
+  tokenSymbol          String      @db.VarChar(255)
   // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-2): USD
   // value of the transfer at write-time (amount × price). Same "current price at
   // write-time" MVP simplification as NativeTransactionDetail.usdValue above; see

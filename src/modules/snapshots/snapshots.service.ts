@@ -45,8 +45,11 @@ export async function findSnapshotNearDaysAgo(
   return findSnapshotAtOrBefore(portfolioId, cutoff);
 }
 
-// Re-export the repository helper as a service-layer call so the analytics module
-// reads snapshot data only through the Snapshot module's service (architecture line
-// 1262-1263 module isolation). No date math needed here — the ASC timeseries is
-// returned as-is for the performance chart.
-export { findAllSnapshotsAscByPortfolio } from './snapshots.repository.js';
+// Re-export the repository helpers as service-layer calls so other modules read snapshot
+// data only through the Snapshot module's service (architecture line 1262-1263 module
+// isolation). No date math needed here — the ASC timeseries is returned as-is for the
+// performance chart; findEarliestSnapshotByPortfolio is the connected all-time baseline.
+export {
+  findAllSnapshotsAscByPortfolio,
+  findEarliestSnapshotByPortfolio,
+} from './snapshots.repository.js';

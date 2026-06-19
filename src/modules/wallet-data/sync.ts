@@ -6,14 +6,19 @@
 // that with the wallet's REAL transfers:
 //
 //   1. Import the first page (~100) of real transfers (native + ERC-20 + NFT) with their REAL
-//      block time, hash, from/to, gas, amount, and historical USD value (#3, #4).
+//      block time, hash, from/to, gas, amount, and historical USD value (#3, #4) — these are
+//      the activity FEED only; they no longer drive the balance.
 //   2. Import current NFT holdings (which may predate the transfer window) AND NFT transfer
 //      history (#2).
-//   3. Reconcile a RESIDUAL opening lot per held token = providerCurrentBalance − netImported,
-//      dated just before the earliest imported transfer, so the displayed balance still equals
-//      the on-chain balance exactly and value history can be rebuilt from start + transactions
-//      (#7, #9). When there is NO history (Solana / empty page) this reduces to the old
-//      behaviour: the residual = the full balance → one opening lot per holding.
+//   3. retrofit-58: set each Asset.balance DIRECTLY from the provider summary — the provider
+//      already returns the wallet's correct current balances, so we trust them outright instead
+//      of reconstructing from a windowed transfer set. Held tokens get their exact provider
+//      balance; any existing asset absent from the summary is zeroed (sold out). This replaces
+//      the retrofit-49 residual opening-lot reconcile, which left sold tokens NEGATIVE (never
+//      seeded) and over-imported held tokens INFLATED (residual never trimmed) — see
+//      retrofit-57. Cost-basis fields are cleared too: a windowed import can't yield a
+//      trustworthy avgCost/netDeposit for a connected wallet, so connected PnL is computed
+//      from recorded BalanceSnapshot deltas instead (retrofit-58 Part 2, derive.ts).
 //   4. Persist the provider pagination cursor + total tx count for the "load more" endpoint
 //      (#5, #8).
 //
@@ -29,12 +34,9 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { toDecimalString } from '../../lib/decimal.js';
 import {
-  seedAcquisitionInTx,
   invalidatePnlCache,
   createTransactionFromWebhook,
   createNftTransactionFromWebhook,
-  reconcileWalletOpeningLot,
-  WALLET_SYNC_OPENING_NOTE,
   TransactionError,
 } from '../transactions/transactions.service.js';
 import type { CreateTransactionBody } from '../transactions/transactions.schemas.js';
@@ -54,8 +56,6 @@ const PAGE_LIMIT = 100;
 // retrofit-56: how many days of daily value history to backfill into BalanceSnapshot on
 // (re)sync. Covalent portfolio_v2 caps at ~365 daily points on the free tier.
 const VALUE_HISTORY_DAYS = 365;
-// Below this the residual is float noise / dust — don't seed a reconciling lot for it.
-const RESIDUAL_EPSILON = 1e-8;
 
 // Decimal(20,8) column scale for PRICES (kept at full 8-dp, unlike trimmed amounts).
 function dec8(n: number): string {
@@ -387,50 +387,60 @@ async function backfillConnectedSnapshots(
   }
 }
 
-// Reconcile each held token's balance to the on-chain truth: residual = providerBalance −
-// (balance built from the imported transfers). When the residual is meaningful, seed ONE
-// opening lot for it (the "starting balance"), dated just before the earliest import so the
-// chart can rebuild value from start + transactions. With no transfers the residual is the
-// full balance, so this degrades to one opening lot per holding (the retrofit-47 behaviour).
-async function reconcileOpeningLots(
+// retrofit-58: set connected balances DIRECTLY from the provider summary — the authoritative
+// current state. Each held token's Asset.balance becomes the provider's EXACT balance; any
+// existing asset NOT in the summary is zeroed (the wallet sold out of it). This replaces the
+// residual opening-lot reconcile, killing both failure modes retrofit-57 traced:
+//   - NEGATIVE: a sold token (absent from the summary) is set to 0, never left negative.
+//   - INFLATED: an over-imported held token is set to the provider balance, not the windowed sum.
+// Cost-basis fields (avgCost/costBasis/realizedPnl/netDeposit) are cleared: a windowed transfer
+// import can't yield a trustworthy cost basis for a connected wallet, so connected PnL is derived
+// from recorded BalanceSnapshot deltas instead (Part 2). The imported transactions remain as the
+// activity feed; they simply no longer drive the balance. Idempotent (a resync re-sets the same
+// values). Returns the number of held tokens set (the resync "reconciled" count). Per-token
+// best-effort — one failed upsert logs and continues.
+async function setConnectedBalancesFromSummary(
   portfolioId: number,
-  held: Array<{ tokenId: number; symbol: string; balance: number; usdPrice: number | null }>,
-  openingAt: Date,
-): Promise<void> {
+  held: HeldToken[],
+): Promise<number> {
+  const heldTokenIds = new Set(held.map((h) => h.tokenId));
+
   for (const h of held) {
     try {
-      const asset = await prisma.asset.findUnique({
+      await prisma.asset.upsert({
         where: { portfolioId_tokenId: { portfolioId, tokenId: h.tokenId } },
-      });
-      const current = asset ? Number(asset.balance.toString()) : 0;
-      const residual = h.balance - current;
-      if (residual <= RESIDUAL_EPSILON) continue;
-
-      await prisma.$transaction(
-        async (tx) => {
-          await tx.asset.upsert({
-            where: { portfolioId_tokenId: { portfolioId, tokenId: h.tokenId } },
-            update: {},
-            create: { portfolioId, tokenId: h.tokenId },
-          });
-          await seedAcquisitionInTx(tx, {
-            portfolioId,
-            tokenId: h.tokenId,
-            symbol: h.symbol,
-            amount: toDecimalString(residual),
-            timestamp: openingAt.toISOString(),
-            // retrofit-50: tag the reconciling lot so a later resync UPDATES it in place
-            // (idempotent) instead of inserting a duplicate.
-            notes: WALLET_SYNC_OPENING_NOTE,
-            ...(h.usdPrice != null ? { priceAtTime: dec8(h.usdPrice) } : {}),
-          });
+        update: {
+          balance: toDecimalString(h.balance),
+          avgCost: null,
+          costBasis: '0',
+          realizedPnl: '0',
+          netDeposit: '0',
         },
-        { timeout: 15000 },
-      );
+        create: {
+          portfolioId,
+          tokenId: h.tokenId,
+          balance: toDecimalString(h.balance),
+        },
+      });
     } catch (e) {
-      console.error('[wallet-sync] opening-lot reconcile failed', { symbol: h.symbol }, (e as Error).message);
+      console.error('[wallet-sync] set-balance failed', { symbol: h.symbol }, (e as Error).message);
     }
   }
+
+  // Zero any existing asset the wallet no longer holds (absent from the provider summary).
+  const existing = await prisma.asset.findMany({
+    where: { portfolioId },
+    select: { tokenId: true },
+  });
+  const toZero = existing.filter((a) => !heldTokenIds.has(a.tokenId)).map((a) => a.tokenId);
+  if (toZero.length > 0) {
+    await prisma.asset.updateMany({
+      where: { portfolioId, tokenId: { in: toZero } },
+      data: { balance: '0', avgCost: null, costBasis: '0', realizedPnl: '0', netDeposit: '0' },
+    });
+  }
+
+  return held.length;
 }
 
 interface HeldToken {
@@ -465,16 +475,6 @@ async function resolveHeldTokens(
   return held;
 }
 
-// The opening lot is dated just before the earliest imported transfer (or now if none) so the
-// chart can rebuild value from the starting balance forward.
-function openingDateFor(transfers: WalletTransfer[]): Date {
-  const earliest = transfers.reduce<number | null>((min, tr) => {
-    const ts = Date.parse(tr.timestamp);
-    return Number.isFinite(ts) && (min === null || ts < min) ? ts : min;
-  }, null);
-  return earliest !== null ? new Date(earliest - 1000) : new Date();
-}
-
 export async function syncConnectedHoldings(
   portfolioId: number,
   address: string,
@@ -494,6 +494,7 @@ export async function syncConnectedHoldings(
   const held = await resolveHeldTokens(summary);
 
   // Pass 2: import the real transfer history (native + erc20 + nft transactions + Nft rows).
+  // These are the activity FEED — they no longer set the balance (Pass 4 does that).
   const transfers = page?.transfers ?? [];
   await importTransfers(portfolio, transfers);
 
@@ -501,8 +502,10 @@ export async function syncConnectedHoldings(
   const nftHoldings = await fetchNftHoldings(address, chain);
   if (nftHoldings && nftHoldings.length > 0) await importNftHoldings(portfolio, nftHoldings);
 
-  // Pass 4: reconcile the residual opening lots, dated just before the earliest import.
-  if (held.length > 0) await reconcileOpeningLots(portfolioId, held, openingDateFor(transfers));
+  // Pass 4 (retrofit-58): set balances DIRECTLY from the provider summary — the authoritative
+  // current state (no reconstruction). Runs AFTER import so it overrides any balance the
+  // imported transactions' recalc left behind.
+  await setConnectedBalancesFromSummary(portfolioId, held);
 
   // Pass 5 (retrofit-56): the REAL on-chain tx count (the fixed total the overview consumes)
   // + a daily value-history backfill into BalanceSnapshot (the connected portion of the chart).
@@ -525,15 +528,16 @@ export async function syncConnectedHoldings(
 }
 
 // retrofit-50: idempotent RESYNC for a connected portfolio (POST /portfolios/:id/resync).
-// Catches transfers a missed/late webhook never delivered and re-reconciles the balance to
-// on-chain. Reuses the retrofit-49 import path but every step is idempotent:
+// Catches transfers a missed/late webhook never delivered and re-sets the balance to on-chain
+// truth. Reuses the retrofit-49 import path but every step is idempotent:
 //   - Re-import the latest transfer page — dedupe on tx hash (the unique constraint makes
 //     already-recorded transfers no-ops; only genuinely missed ones insert).
 //   - Re-import current NFT holdings (upsert); the page's in/out NFT transfers also replay.
-//   - Re-reconcile each held token by UPDATING its tagged opening lot (never inserting a new
-//     one), so running resync twice in a row changes nothing.
-// Best-effort throughout; returns { importedTransfers, reconciled }. The "load more" cursor is
-// intentionally left untouched (resync re-reads the newest page; older pages stay deduped).
+//   - retrofit-58: re-set each balance straight from the provider summary (Part 1), so running
+//     resync twice in a row changes nothing AND the balance can never drift from on-chain.
+// Best-effort throughout; returns { importedTransfers, reconciled } (reconciled = held tokens
+// set from the summary). The "load more" cursor is intentionally left untouched (resync
+// re-reads the newest page; older pages stay deduped).
 export async function resyncConnectedHoldings(
   portfolioId: number,
   address: string | null,
@@ -558,24 +562,8 @@ export async function resyncConnectedHoldings(
   const nftHoldings = await fetchNftHoldings(address, chain);
   if (nftHoldings && nftHoldings.length > 0) await importNftHoldings(portfolio, nftHoldings);
 
-  // Re-reconcile by UPDATING the tagged opening lot per held token (idempotent).
-  const openingAt = openingDateFor(transfers).toISOString();
-  let reconciled = 0;
-  for (const h of held) {
-    try {
-      await reconcileWalletOpeningLot({
-        portfolio,
-        tokenId: h.tokenId,
-        symbol: h.symbol,
-        providerBalance: h.balance,
-        usdPrice: h.usdPrice,
-        openingAt,
-      });
-      reconciled += 1;
-    } catch (e) {
-      console.error('[wallet-sync] resync reconcile failed', { symbol: h.symbol }, (e as Error).message);
-    }
-  }
+  // retrofit-58: re-set balances straight from the provider summary (idempotent, never drifts).
+  const reconciled = await setConnectedBalancesFromSummary(portfolioId, held);
 
   // retrofit-56: refresh the REAL on-chain tx count + backfill any still-missing daily
   // snapshots (create-only, so already-recorded dates and today's live value stay untouched).

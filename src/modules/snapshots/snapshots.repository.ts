@@ -37,6 +37,20 @@ export async function findSnapshotAtOrBefore(
   });
 }
 
+// retrofit-58: the EARLIEST recorded snapshot (oldest date) — the baseline for a connected
+// portfolio's all-time PnL ("growth since tracking began", derive.ts). A windowed transfer
+// import gives connected wallets no trustworthy cost basis, so all-time is measured against
+// the first snapshot we ever recorded rather than netDeposit. Null when none exists yet.
+export async function findEarliestSnapshotByPortfolio(
+  portfolioId: number,
+): Promise<{ value: Prisma.Decimal } | null> {
+  return prisma.balanceSnapshot.findFirst({
+    where: { portfolioId },
+    orderBy: { snapshotDate: 'asc' },
+    select: { value: true },
+  });
+}
+
 // Stage 14 (§1.7): all snapshots ASC by date — for the performance chart. The
 // AreaChart consumes points left-to-right, so ascending order is the natural fit
 // (the paginated DESC list above serves a different, table-style consumer).

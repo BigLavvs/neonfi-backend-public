@@ -18,24 +18,29 @@ export interface CreateStreamOpts {
   description: string;
 }
 
+// retrofit-58 Part 3: the "Create Stream" verb is **PUT** /streams/evm, not POST — the old
+// POST returned 404 "Cannot POST /streams/evm", so moralisStreamId was always null and
+// connected wallets never received live webhook updates (same class as the retrofit-54 NFT
+// path bug). Probe-confirmed against the live API (retrofit-58): the body field is `chainIds`
+// (not `chains`), and the empty `abi`/`topic0`/`advancedOptions`/`getNativeBalances` arrays the
+// old body sent each trip 400 validation ("topic0 is required if abi is provided", etc.) —
+// drop them; a native-tx watch needs none. The only remaining gate is webhook reachability:
+// Moralis sends a test ping to webhookUrl and rejects unreachable URLs (prod API_BASE_URL is
+// real, so this only bites in local probing).
 export async function createStream(opts: CreateStreamOpts): Promise<{ id: string }> {
   const body = {
     webhookUrl: opts.webhookUrl,
     description: opts.description,
     tag: 'neonfi',
-    chains: [opts.chainId],
+    chainIds: [opts.chainId],
     includeNativeTxs: true,
     includeContractLogs: false,
-    abi: [],
-    advancedOptions: [],
-    topic0: [],
     allAddresses: false,
     includeInternalTxs: false,
-    getNativeBalances: [],
   };
 
   const res = await fetch(MORALIS_STREAMS_BASE, {
-    method: 'POST',
+    method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
       'X-API-Key': config.MORALIS_API_KEY,

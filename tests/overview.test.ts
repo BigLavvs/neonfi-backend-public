@@ -472,6 +472,48 @@ it('r56: connectedValueHistory is [] when the user has only manual portfolios', 
 });
 
 // ---------------------------------------------------------------------------
+// retrofit-58 Part 2 — connected PnL is SNAPSHOT-based (not windowed cost basis)
+// ---------------------------------------------------------------------------
+
+it('r58: connected portfolio PnL = snapshot deltas (all-time vs earliest, 24h vs ~1d ago); cost-basis ignored → no fake %', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const connId = await createConnectedPortfolio(userId, 'Conn');
+
+  // Seed BTC 1.0 WITH a cost basis (avgCost 50000) — this is exactly the windowed-import
+  // garbage Part 2 must IGNORE for connected. BTC seeded price 93000 → totalValue 93000.
+  await seedAssetWithCost(connId, btcId, 1.0, { avgCost: 50000, costBasis: 50000, realizedPnl: 999 });
+
+  const daysAgoYmd = (n: number) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  // Earliest recorded value (40d ago) = the all-time baseline; a ~1d-ago value = the 24h baseline.
+  await seedSnapshot(connId, userId, daysAgoYmd(40), 40000);
+  await seedSnapshot(connId, userId, daysAgoYmd(2), 80000);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const row = d.portfolios.find((p) => p.name === 'Conn')!;
+  expect(row.type).toBe('connected');
+  expect(row.totalValue).toBeCloseTo(93000, 2);
+  // All-time = current − EARLIEST snapshot (93000 − 40000), NOT cost-basis (which would be
+  // 93000 − 50000 = 43000). The honest "growth since tracking began".
+  expect(row.pnlAllTimeValue).toBeCloseTo(53000, 2);
+  expect(row.pnlAllTime).toBeCloseTo(132.5, 1); // 53000/40000*100 — sane, not +500%/+1314%
+  // 24h = current − the snapshot nearest ~1 day ago (93000 − 80000).
+  expect(row.pnl24hValue).toBeCloseTo(13000, 2);
+  // Cost-basis PnL is N/A for connected → 0 (the seeded avgCost/realizedPnl are ignored).
+  expect(row.unrealizedPnlValue).toBe(0);
+  expect(row.realizedPnlValue).toBe(0);
+  expect(row.allTimePnlValue).toBe(0);
+
+  // Totals propagate the same snapshot-based numbers (single connected portfolio).
+  expect(d.totals.unrealizedPnlValue).toBe(0);
+  expect(d.totals.pnlAllTimeValue).toBeCloseTo(53000, 2);
+  expect(d.totals.pnl24hValue).toBeCloseTo(13000, 2);
+});
+
+// ---------------------------------------------------------------------------
 // 375 — recent transactions + count (cross-portfolio)
 // ---------------------------------------------------------------------------
 
