@@ -132,6 +132,7 @@ async function seedNft(portfolioId: number, overrides: Record<string, unknown> =
       rarity: overrides.rarity as string ?? null,
       traits: overrides.traits ?? null,
       possibleSpam: (overrides.possibleSpam as boolean | undefined) ?? false,
+      spam: (overrides.spam as boolean | undefined) ?? false,
     },
   });
   return nft.id;
@@ -186,24 +187,50 @@ it('281: GET /portfolios/:id/nfts Pro connected → 200 with 3 NFTs newest-first
   }
 });
 
-it('r73-nft-spam: provider-flagged spam NFTs are filtered out of the holdings list; real ones carry possibleSpam:false', async () => {
+it('r73-nft-spam: spam NFTs are filtered out of the holdings list; real ones carry spam:false', async () => {
   const cookie = await registerAndLogin();
   const userId = await getUserId();
   await createProSubForUser(userId);
   const portfolioId = await createConnectedPortfolio(userId);
 
   await seedNft(portfolioId, { name: 'Real NFT', tokenId: 'r1', contractAddress: '0xreal' });
-  await seedNft(portfolioId, { name: 'Hefty Presents', tokenId: 's1', contractAddress: '0xspam', possibleSpam: true });
-  await seedNft(portfolioId, { name: 'Garbage Bags', tokenId: 's2', contractAddress: '0xspam2', possibleSpam: true });
+  // retrofit-84 (H13): the combined `spam` verdict (set at sync from provider flags ∪ heuristic)
+  // is the filter field — a provider-flagged airdrop carries possibleSpam + spam true.
+  await seedNft(portfolioId, { name: 'Hefty Presents', tokenId: 's1', contractAddress: '0xspam', possibleSpam: true, spam: true });
+  await seedNft(portfolioId, { name: 'Garbage Bags', tokenId: 's2', contractAddress: '0xspam2', possibleSpam: true, spam: true });
 
   const res = await nftGet(nftUrl(portfolioId), cookie);
   expect(res.status).toBe(200);
-  const body = await res.json() as { data: { nfts: Array<{ name: string; possibleSpam: boolean }> } };
+  const body = await res.json() as { data: { nfts: Array<{ name: string; spam: boolean }>; spamCount: number } };
 
-  // retrofit-73 (H13): only the real NFT shows; the two spam airdrops are hidden.
+  // retrofit-73/84 (H13): only the real NFT shows; the two spam airdrops are hidden; count reported.
   expect(body.data.nfts).toHaveLength(1);
   expect(body.data.nfts[0]!.name).toBe('Real NFT');
-  expect(body.data.nfts[0]!.possibleSpam).toBe(false);
+  expect(body.data.nfts[0]!.spam).toBe(false);
+  expect(body.data.spamCount).toBe(2);
+});
+
+it('r84-nft-spam-toggle: ?includeSpam=true reveals hidden spam NFTs; default hides them', async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const portfolioId = await createConnectedPortfolio(userId);
+
+  await seedNft(portfolioId, { name: 'Real NFT', tokenId: 'r1', contractAddress: '0xreal' });
+  await seedNft(portfolioId, { name: 'Garbage Bags', tokenId: 's1', contractAddress: '0xspam', possibleSpam: true, spam: true });
+
+  // Default — spam hidden, count surfaced for the "Show spam (N)" toggle.
+  const hidden = await nftGet(nftUrl(portfolioId), cookie);
+  const hb = await hidden.json() as { data: { nfts: Array<{ name: string }>; spamCount: number } };
+  expect(hb.data.nfts.map((n) => n.name)).toEqual(['Real NFT']);
+  expect(hb.data.spamCount).toBe(1);
+
+  // Toggle on — full set returned (the spam one carries spam:true so the UI can badge it).
+  const shown = await nftGet(`${nftUrl(portfolioId)}?includeSpam=true`, cookie);
+  const sb = await shown.json() as { data: { nfts: Array<{ name: string; spam: boolean }>; spamCount: number } };
+  expect(sb.data.nfts).toHaveLength(2);
+  expect(sb.data.nfts.find((n) => n.name === 'Garbage Bags')!.spam).toBe(true);
+  expect(sb.data.spamCount).toBe(1);
 });
 
 // ---------------------------------------------------------------------------

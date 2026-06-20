@@ -39,8 +39,11 @@ router.use('*', async (c, next) => {
 
 router.get('', async (c) => {
   const portfolio = c.get('portfolio');
-  const nfts = await listNfts(portfolio);
-  return c.json(ok({ nfts }), 200);
+  // retrofit-84 (H13): `?includeSpam=true` (the "Show spam" toggle) reveals the hidden spam NFTs;
+  // default hides them. spamCount always reports how many are hidden so the toggle can label itself.
+  const includeSpam = c.req.query('includeSpam') === 'true';
+  const { nfts, spamCount } = await listNfts(portfolio, { includeSpam });
+  return c.json(ok({ nfts, spamCount }), 200);
 });
 
 // ---------------------------------------------------------------------------

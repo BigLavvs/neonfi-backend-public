@@ -133,6 +133,29 @@ export async function fetchNftHoldings(
   return null;
 }
 
+// retrofit-84 (H13): cross-provider spam-contract DB. UNLIKE the first-non-null capabilities
+// above, this UNIONS every provider that can supply a spam-contract set (Alchemy getSpamContracts;
+// others may layer in later) so the strongest combined signal is used regardless of which provider
+// supplied the NFT holdings. Returns a set of LOWERCASED contract addresses (empty when no provider
+// supports it — never null, so the caller treats "no signal" uniformly).
+export async function fetchSpamContracts(
+  chain: { slug: string },
+  providers: WalletDataProvider[] = PROVIDERS,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const p of providers) {
+    if (!p.isConfigured() || !p.supportsChain(chain.slug) || !p.getSpamContracts) continue;
+    try {
+      const set = await p.getSpamContracts(chain.slug);
+      if (set) for (const addr of set) out.add(addr);
+    } catch (e) {
+      // A spam-DB hiccup must never break the NFT sync — fall through with whatever we have.
+      console.error('[wallet-data] fetchSpamContracts provider failed', p.name, (e as Error).message);
+    }
+  }
+  return out;
+}
+
 // retrofit-56: the wallet's REAL on-chain tx total (GoldRush implements it; Moralis history
 // rarely returns a reliable total). First non-null wins; null = no provider can supply it →
 // the caller leaves externalTxCount unset and the overview falls back to the DB row count.

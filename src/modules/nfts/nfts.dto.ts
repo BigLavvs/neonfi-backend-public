@@ -18,9 +18,12 @@ export interface NftDTO {
   lastSaleNote: string | null;
   rarity: string | null;
   traits: unknown | null;
-  // retrofit-73 (H13): provider-flagged airdrop/scam NFT. Spam is filtered out of the holdings
-  // list, but the flag is exposed so a detail view / future "show spam" toggle can badge it.
+  // retrofit-73 (H13): the RAW provider spam flag (Moralis possible_spam / Alchemy isSpam) on the
+  // source row. Kept for provenance; the list now filters on the combined `spam` verdict below.
   possibleSpam: boolean;
+  // retrofit-84 (H13): the COMBINED spam verdict (provider flags ∪ heuristic). Spam is hidden from
+  // the default holdings list; the flag is exposed so the "Show spam" toggle can badge revealed ones.
+  spam: boolean;
   createdAt: Date;
 }
 
@@ -44,6 +47,7 @@ export function toNftDTO(nft: Nft, owner: string | null): NftDTO {
     rarity: nft.rarity ?? null,
     traits: nft.traits ?? null,
     possibleSpam: nft.possibleSpam,
+    spam: nft.spam,
     createdAt: nft.createdAt,
   };
 }

@@ -47,10 +47,12 @@ import {
   fetchWalletSummary,
   fetchTransferPage,
   fetchNftHoldings,
+  fetchSpamContracts,
   fetchTransactionCount,
   fetchValueHistory,
   fetchWalletPnl,
 } from './index.js';
+import { classifyNftSpam } from './nft-spam.js';
 import type { WalletNftHolding, WalletPnl, WalletTransfer } from './types.js';
 
 // How many transfers to pull per page (initial sync + resync + each "load more").
@@ -319,8 +321,22 @@ async function importNftHoldings(
   holdings: WalletNftHolding[],
 ): Promise<void> {
   const chainSlug = portfolio.chain?.slug ?? '';
+  // retrofit-84 (H13): pull the cross-provider spam-contract DB ONCE (Alchemy getSpamContracts,
+  // unioned across providers). Best-effort — fetchSpamContracts never throws and returns an empty
+  // set when no provider supports it, so the combined verdict simply degrades to
+  // provider-flag-OR-heuristic.
+  const spamContracts = await fetchSpamContracts({ slug: chainSlug });
   for (const h of holdings) {
     try {
+      // retrofit-84 (H13): combine the provider holdings flag (h.possibleSpam) with the
+      // spam-contract DB hit and the conservative name/collection heuristic → the `spam` verdict
+      // the list + count filter on. possibleSpam stays the raw provider signal.
+      const spam = classifyNftSpam({
+        possibleSpam: h.possibleSpam,
+        spamContract: spamContracts.has(h.contractAddress.toLowerCase()),
+        name: h.name,
+        collectionName: h.collectionName,
+      });
       await prisma.nft.upsert({
         where: {
           portfolioId_contractAddress_tokenId: {
@@ -340,12 +356,14 @@ async function importNftHoldings(
           chain: chainSlug,
           tokenStandard: h.tokenStandard,
           possibleSpam: h.possibleSpam, // retrofit-73 (H13)
+          spam, // retrofit-84 (H13): combined verdict
         },
         update: {
           ...(h.logoUrl ? { logoUrl: h.logoUrl } : {}),
           ...(h.name ? { name: h.name } : {}),
           ...(h.description ? { description: h.description } : {}),
           possibleSpam: h.possibleSpam, // retrofit-73 (H13): refresh the flag on re-sync
+          spam, // retrofit-84 (H13): re-evaluate the combined verdict on re-sync
         },
       });
     } catch (e) {

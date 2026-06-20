@@ -227,6 +227,29 @@ export class AlchemyWalletProvider implements WalletDataProvider {
       return null;
     }
   }
+
+  // retrofit-84 (H13): Alchemy's spam-contract classification (the NFT API's getSpamContracts).
+  // Returns ALL contracts Alchemy has classified as spam on the network in one call; the
+  // orchestrator unions it across providers and ORs a contract hit into each NFT's spam verdict.
+  // This is the cross-provider signal that catches airdrop spam Moralis' possible_spam misses
+  // ("Garbage Bags" / "Hefty Presents"), independent of which provider supplied the holdings.
+  // EVM only. Non-2xx / parse → null (the caller falls through to the next provider / heuristic).
+  async getSpamContracts(chainSlug: string): Promise<Set<string> | null> {
+    if (chainSlug === 'solana') return null;
+    const network = ALCHEMY_NETWORK[chainSlug];
+    if (!network) return null;
+    try {
+      const url = `https://${network}.g.alchemy.com/nft/v3/${this.apiKey!}/getSpamContracts`;
+      const res = await fetch(url, { headers: { accept: 'application/json' } });
+      if (!res.ok) return null;
+      const json = (await res.json()) as { contractAddresses?: string[] };
+      const list = Array.isArray(json.contractAddresses) ? json.contractAddresses : [];
+      return new Set(list.map((a) => a.toLowerCase()));
+    } catch (e) {
+      console.error('[wallet-data] alchemy getSpamContracts failed', (e as Error).message);
+      return null;
+    }
+  }
 }
 
 function hexToHuman(hex: string | null | undefined, decimals: number | null): number {

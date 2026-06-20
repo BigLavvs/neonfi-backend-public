@@ -21,6 +21,7 @@
     "backfill:costbasis": "tsx src/scripts/backfill-costbasis.ts",
     "backfill:snapshots": "tsx src/scripts/backfill-snapshots.ts",
     "reclassify:snapshots": "tsx src/scripts/reclassify-connected-snapshots.ts",
+    "reclassify:nft-spam": "tsx src/scripts/reclassify-nft-spam.ts",
     "test": "vitest run"
   },
   "prisma": {

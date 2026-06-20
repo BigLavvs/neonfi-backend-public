@@ -24,7 +24,8 @@ vi.mock('../src/lib/redis.js', () => ({
   },
 }));
 
-import { previewWallet, fetchWalletSummary, fetchWalletPnl } from '../src/modules/wallet-data/index.js';
+import { previewWallet, fetchWalletSummary, fetchWalletPnl, fetchSpamContracts } from '../src/modules/wallet-data/index.js';
+import { isHeuristicNftSpam, classifyNftSpam } from '../src/modules/wallet-data/nft-spam.js';
 import { sumHistoricalTokenValue } from '../src/modules/wallet-data/sync.js';
 import type {
   ProviderResult,
@@ -688,6 +689,98 @@ describe('AlchemyWalletProvider — getTransferHistory + getNftHoldings (retrofi
     const [url] = fetchMock.mock.calls[0]! as [string];
     expect(String(url)).toContain('/nft/v3/al_key/getNFTsForOwner');
     expect(String(url)).toContain(`owner=${WALLET}`);
+  });
+
+  it('getSpamContracts → lowercased Set; non-ok / solana / unsupported chain → null (retrofit-84)', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ contractAddresses: ['0xSPAM1', '0xSpam2'] }),
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const set = await provider.getSpamContracts('eth');
+    expect(set).not.toBeNull();
+    expect([...set!].sort()).toEqual(['0xspam1', '0xspam2']); // lowercased
+    const [url] = fetchMock.mock.calls[0]! as [string];
+    expect(String(url)).toBe('https://eth-mainnet.g.alchemy.com/nft/v3/al_key/getSpamContracts');
+
+    // solana + unsupported chain short-circuit to null without a fetch.
+    expect(await provider.getSpamContracts('solana')).toBeNull();
+    expect(await provider.getSpamContracts('dogechain')).toBeNull();
+
+    // non-ok HTTP → null (never throws).
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) }) as Response));
+    expect(await provider.getSpamContracts('eth')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-84 (H13) — multi-signal NFT spam classifier + cross-provider spam-contract union
+// ---------------------------------------------------------------------------
+
+describe('NFT spam classifier (retrofit-84)', () => {
+  it('isHeuristicNftSpam flags promotional airdrop patterns, leaves legit names alone', () => {
+    // Spam tells — URLs, claim/reward/voucher, "$<amount>", "<n> USDC".
+    expect(isHeuristicNftSpam('Claim 2000 USDC at rewards.xyz', null)).toBe(true);
+    expect(isHeuristicNftSpam('Visit https://free-airdrop.io', null)).toBe(true);
+    expect(isHeuristicNftSpam('$5000 Voucher', 'Giveaway')).toBe(true);
+    expect(isHeuristicNftSpam(null, 'Reward Pool — redeem now')).toBe(true);
+    expect(isHeuristicNftSpam('1.5 ETH Gift', null)).toBe(true);
+
+    // Legit collections must NOT trip the heuristic.
+    expect(isHeuristicNftSpam('Bored Ape #1234', 'Bored Ape Yacht Club')).toBe(false);
+    expect(isHeuristicNftSpam('Azuki #148', 'Azuki')).toBe(false);
+    expect(isHeuristicNftSpam('CryptoPunk #5822', 'CryptoPunks')).toBe(false);
+    expect(isHeuristicNftSpam(null, null)).toBe(false);
+  });
+
+  it('classifyNftSpam ORs provider flag, spam-contract hit, and heuristic', () => {
+    // Provider holdings flag (primary) → spam regardless of an innocent name.
+    expect(classifyNftSpam({ possibleSpam: true, name: 'Innocent', collectionName: 'Coll' })).toBe(true);
+    // Spam-contract DB hit (primary) → spam even when the name looks fine ("Garbage Bags" pattern).
+    expect(classifyNftSpam({ spamContract: true, name: 'Garbage Bags', collectionName: null })).toBe(true);
+    // Heuristic-only (secondary) → spam.
+    expect(classifyNftSpam({ name: 'Claim your reward at site.xyz', collectionName: null })).toBe(true);
+    // No signal → not spam.
+    expect(classifyNftSpam({ possibleSpam: false, spamContract: false, name: 'Azuki #1', collectionName: 'Azuki' })).toBe(false);
+    expect(classifyNftSpam({ name: null, collectionName: null })).toBe(false);
+  });
+});
+
+describe('fetchSpamContracts (retrofit-84)', () => {
+  // A minimal fake provider exposing only getSpamContracts.
+  function spamProvider(name: string, set: Set<string> | null, configured = true): WalletDataProvider {
+    return {
+      name,
+      isConfigured: () => configured,
+      supportsChain: () => true,
+      getSummary: async () => ({ status: 'error' }),
+      getSpamContracts: async () => set,
+    };
+  }
+
+  it('unions spam-contract sets across configured providers; skips unconfigured + null', async () => {
+    const providers = [
+      spamProvider('a', new Set(['0xaaa', '0xbbb'])),
+      spamProvider('b', new Set(['0xbbb', '0xccc'])),
+      spamProvider('c', new Set(['0xddd']), false), // unconfigured → skipped
+      spamProvider('d', null), // provider can't supply → skipped
+    ];
+    const out = await fetchSpamContracts({ slug: 'eth' }, providers);
+    expect([...out].sort()).toEqual(['0xaaa', '0xbbb', '0xccc']);
+  });
+
+  it('no provider supports it → empty set (never null), and a throwing provider is swallowed', async () => {
+    const throwing: WalletDataProvider = {
+      name: 'boom',
+      isConfigured: () => true,
+      supportsChain: () => true,
+      getSummary: async () => ({ status: 'error' }),
+      getSpamContracts: async () => { throw new Error('spam DB down'); },
+    };
+    const out = await fetchSpamContracts({ slug: 'eth' }, [throwing]);
+    expect(out).toBeInstanceOf(Set);
+    expect(out.size).toBe(0);
   });
 });
 

@@ -528,6 +528,11 @@ model Nft {
   // ("Hefty Presents" ×17, "Garbage Bags") can be filtered out of the holdings list / badged
   // instead of presented as real holdings. Default false (legacy + non-spam rows).
   possibleSpam    Boolean   @default(false)
+  // retrofit-84 (H13): the COMBINED spam verdict — provider flags (Moralis possible_spam, Alchemy
+  // spam-contract DB, GoldRush is_spam) ORed with a conservative name/collection heuristic. This is
+  // the field the holdings list + NFT count filter on (possibleSpam stays the raw provider signal).
+  // Default false; set during NFT sync and re-evaluated by the reclassify backfill.
+  spam            Boolean   @default(false)
 
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt

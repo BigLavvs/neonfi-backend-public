@@ -27,6 +27,7 @@ import { ok, err } from '../../lib/envelope.js';
 import { verifyMoralisSignature } from '../../lib/moralis-signature.js';
 import { createTransactionFromWebhook } from '../transactions/transactions.service.js';
 import { refreshConnectedBalancesFromProvider } from '../wallet-data/sync.js';
+import { isHeuristicNftSpam } from '../wallet-data/nft-spam.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 
 // js-sha3 is CommonJS with dynamically-built exports — default-import then destructure
@@ -411,6 +412,10 @@ async function processNftTransfers(
             traits: transfer.traits !== undefined
               ? (transfer.traits as Prisma.InputJsonValue)
               : Prisma.DbNull,
+            // retrofit-84 (H13): the real-time webhook carries no provider spam flag, so apply the
+            // conservative name/collection heuristic on arrival. The periodic resync re-evaluates
+            // with the full multi-provider signal (Alchemy spam-contract DB + Moralis possible_spam).
+            spam: isHeuristicNftSpam(transfer.tokenName ?? null, transfer.collectionName ?? null),
           },
           update: {
             // Refresh marketplace data if present in this webhook

@@ -124,6 +124,11 @@ export interface WalletDataProvider {
     opts: { cursor?: string | null; limit?: number },
   ): Promise<TransferPage | null>;
   getNftHoldings?(address: string, chainSlug: string): Promise<WalletNftHolding[] | null>;
+  // retrofit-84 (H13): optional cross-provider spam-contract DB. Returns the set of LOWERCASED
+  // spam contract addresses for the chain (Alchemy getSpamContracts). The orchestrator unions
+  // these across providers and ORs a contract-address hit into each NFT's spam verdict, so the
+  // spam signal isn't tied to whichever provider supplied the holdings. null = unsupported/no key.
+  getSpamContracts?(chainSlug: string): Promise<Set<string> | null>;
   // retrofit-56: optional connected-portfolio value/count sources (GoldRush/Covalent
   // implements both; other providers skip → null). getTransactionCount is the wallet's
   // REAL on-chain tx total (the fixed count the overview consumes). getValueHistory is the
