@@ -215,6 +215,21 @@ const schema = z
       .default('0 0 * * *')
       .refine((v) => cron.validate(v), 'SNAPSHOT_CRON must be a valid cron expression'),
 
+    // --- Avatar object storage (Cloudflare R2, retrofit-90) ---
+    // R2 is S3-compatible. All five connection vars are OPTIONAL: when any is missing,
+    // `isAvatarStorageConfigured` (below) is false and the avatar upload endpoint returns
+    // 503 AVATAR_STORAGE_UNAVAILABLE — the rest of the app is unaffected and still boots.
+    // The `neonfi` bucket is reused; avatar objects live under the `avatars/` key prefix and
+    // are served public-read from R2_PUBLIC_BASE_URL (https://images.neonfi.live).
+    R2_ENDPOINT: z.string().url().optional(),
+    R2_ACCESS_KEY_ID: z.string().min(1).optional(),
+    R2_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+    R2_BUCKET: z.string().min(1).optional(),
+    R2_PUBLIC_BASE_URL: z.string().url().optional(),
+    // Upload guardrail (sensible default; overridable). Backstop only — the frontend
+    // downsizes before upload, so payloads are normally small.
+    AVATAR_MAX_BYTES: z.coerce.number().int().min(1024).default(5 * 1024 * 1024), // 5 MB
+
     // --- DB keep-alive ping (retrofit-17 Part 3) ---
     // OPTIONAL, default OFF. When true, src/index.ts runs `SELECT 1` every 4 min
     // to keep the Neon compute from scale-to-zero auto-suspend (which causes the
@@ -253,3 +268,12 @@ export const config: Config = parsed.data;
 
 export const isProduction = config.NODE_ENV === 'production';
 export const isTest = config.NODE_ENV === 'test';
+
+// retrofit-90: true only when EVERY R2 connection var is set. The avatar upload/clear
+// endpoint 503s cleanly when this is false, so the app boots on machines without R2.
+export const isAvatarStorageConfigured =
+  !!config.R2_ENDPOINT &&
+  !!config.R2_ACCESS_KEY_ID &&
+  !!config.R2_SECRET_ACCESS_KEY &&
+  !!config.R2_BUCKET &&
+  !!config.R2_PUBLIC_BASE_URL;

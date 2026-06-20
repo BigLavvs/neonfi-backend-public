@@ -8,6 +8,7 @@ import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
+import { config } from '../src/lib/config.js';
 import { cookieValue, cookieMaxAge, clearRedisAuthKeys, seedPayment, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,43 @@ vi.mock('../src/modules/email/email.service.js', () => ({
   sendSubscriptionExpiredEmail: vi.fn().mockResolvedValue(undefined),
   sendPlanDowngradeAppliedEmail: vi.fn().mockResolvedValue(undefined),
 }));
+
+// ---------------------------------------------------------------------------
+// Avatar storage mock (retrofit-90) — tests never touch Cloudflare R2.
+// `publicUrl` / `keyFromPublicUrl` mirror the real implementation against the
+// .env R2_PUBLIC_BASE_URL (https://images.neonfi.live) so URL ⇄ key round-trips.
+// ---------------------------------------------------------------------------
+
+const R2_BASE = 'https://images.neonfi.live';
+
+const { mockPutObject, mockDeleteObject } = vi.hoisted(() => ({
+  mockPutObject: vi.fn(),
+  mockDeleteObject: vi.fn(),
+}));
+
+vi.mock('../src/lib/storage.js', () => ({
+  putObject: mockPutObject,
+  deleteObject: mockDeleteObject,
+  publicUrl: (key: string) => `https://images.neonfi.live/${key}`,
+  keyFromPublicUrl: (url: string | null) => {
+    const base = 'https://images.neonfi.live/';
+    return url && url.startsWith(base) ? url.slice(base.length) : null;
+  },
+}));
+
+// Toggle for `isAvatarStorageConfigured` so one test can exercise the 503 path.
+// Every other config value passes through unchanged (real .env has the R2 vars set).
+const { storageState } = vi.hoisted(() => ({ storageState: { configured: true } }));
+
+vi.mock('../src/lib/config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lib/config.js')>();
+  return {
+    ...actual,
+    get isAvatarStorageConfigured() {
+      return storageState.configured;
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -102,6 +140,27 @@ async function del(path: string, cookies?: string): Promise<Response> {
   });
 }
 
+// retrofit-90: multipart upload helper (field `file`). FormData sets the
+// Content-Type (with boundary) automatically — do not set it by hand.
+async function postFile(
+  path: string,
+  bytes: Uint8Array,
+  filename: string,
+  type: string,
+  cookies?: string,
+): Promise<Response> {
+  const fd = new FormData();
+  fd.append('file', new Blob([bytes], { type }), filename);
+  return app.request(`${USERS_BASE}${path}`, {
+    method: 'POST',
+    headers: { ...(cookies ? { Cookie: cookies } : {}) },
+    body: fd,
+  });
+}
+
+// Minimal valid PNG header (magic bytes are all sniffImage inspects).
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+
 async function registerAndLogin(): Promise<string> {
   await authPost('/register', {
     email: TEST_EMAIL,
@@ -119,6 +178,12 @@ async function registerAndLogin(): Promise<string> {
 beforeEach(async () => {
   await truncateAllUserData();
   await clearRedisAuthKeys();
+  // retrofit-90: reset avatar storage mocks + the configured toggle each test.
+  storageState.configured = true;
+  mockPutObject.mockReset();
+  mockPutObject.mockResolvedValue(undefined);
+  mockDeleteObject.mockReset();
+  mockDeleteObject.mockResolvedValue(undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -666,5 +731,161 @@ it('58: PATCH /users/preferences rejects an unsupported baseCurrency', async () 
 
 it('59: PATCH /users/preferences without auth returns 401', async () => {
   const res = await patch('/preferences', { pushEnabled: true });
+  expect(res.status).toBe(401);
+});
+
+// ---------------------------------------------------------------------------
+// 60. POST /users/me/avatar — happy path: PNG uploaded, public URL persisted.
+// ---------------------------------------------------------------------------
+
+it('60: POST /users/me/avatar uploads a PNG and persists the public URL', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  const res = await postFile('/me/avatar', PNG_BYTES, 'pic.png', 'image/png', sessionCookie);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { user: { avatarUrl: string } } };
+  const url = json.data.user.avatarUrl;
+  expect(url.startsWith(`${R2_BASE}/avatars/`)).toBe(true);
+  expect(url.endsWith('.png')).toBe(true);
+
+  // putObject called exactly once with an avatars/<id>/<uuid>.png key + sniffed type
+  expect(mockPutObject).toHaveBeenCalledTimes(1);
+  const [key, , contentType] = mockPutObject.mock.calls[0]!;
+  expect(key).toMatch(/^avatars\/\d+\/[0-9a-f-]+\.png$/);
+  expect(contentType).toBe('image/png');
+
+  // Persisted in the DB
+  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  expect(dbUser.avatarUrl).toBe(url);
+});
+
+// ---------------------------------------------------------------------------
+// 61. POST /users/me/avatar — non-image bytes → 400 (sniff, not Content-Type).
+// ---------------------------------------------------------------------------
+
+it('61: POST /users/me/avatar rejects non-image bytes with 400 UNSUPPORTED_MEDIA_TYPE', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  // Lie about the type (image/png) but send junk bytes — magic-byte sniff must reject.
+  const res = await postFile('/me/avatar', new Uint8Array([1, 2, 3, 4, 5, 6]), 'x.png', 'image/png', sessionCookie);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('UNSUPPORTED_MEDIA_TYPE');
+  expect(mockPutObject).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 62. POST /users/me/avatar — oversize image → 400 FILE_TOO_LARGE.
+// ---------------------------------------------------------------------------
+
+it('62: POST /users/me/avatar rejects an oversize image with 400 FILE_TOO_LARGE', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  const big = new Uint8Array(config.AVATAR_MAX_BYTES + 1);
+  big.set(PNG_BYTES); // valid PNG sig, but the size guard fires before the sniff
+  const res = await postFile('/me/avatar', big, 'big.png', 'image/png', sessionCookie);
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('FILE_TOO_LARGE');
+  expect(mockPutObject).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 63. POST /users/me/avatar — no auth → 401.
+// ---------------------------------------------------------------------------
+
+it('63: POST /users/me/avatar without auth returns 401', async () => {
+  const res = await postFile('/me/avatar', PNG_BYTES, 'pic.png', 'image/png');
+  expect(res.status).toBe(401);
+  expect(mockPutObject).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 64. POST /users/me/avatar — replacing an avatar deletes the previous object.
+// ---------------------------------------------------------------------------
+
+it('64: POST /users/me/avatar deletes the previously stored object', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  const first = await postFile('/me/avatar', PNG_BYTES, 'a.png', 'image/png', sessionCookie);
+  const firstUrl = (await first.json() as { data: { user: { avatarUrl: string } } }).data.user.avatarUrl;
+  const oldKey = firstUrl.slice(`${R2_BASE}/`.length);
+  // No prior avatar on the first upload → nothing to delete.
+  expect(mockDeleteObject).not.toHaveBeenCalled();
+
+  const second = await postFile('/me/avatar', PNG_BYTES, 'b.png', 'image/png', sessionCookie);
+  expect(second.status).toBe(200);
+  expect(mockDeleteObject).toHaveBeenCalledWith(oldKey);
+});
+
+// ---------------------------------------------------------------------------
+// 65. DELETE /users/me/avatar — clears avatarUrl and deletes the stored object.
+// ---------------------------------------------------------------------------
+
+it('65: DELETE /users/me/avatar clears avatarUrl and deletes the stored object', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  const up = await postFile('/me/avatar', PNG_BYTES, 'a.png', 'image/png', sessionCookie);
+  const url = (await up.json() as { data: { user: { avatarUrl: string } } }).data.user.avatarUrl;
+  const key = url.slice(`${R2_BASE}/`.length);
+  mockDeleteObject.mockClear();
+
+  const res = await del('/me/avatar', sessionCookie);
+  expect(res.status).toBe(200);
+
+  const json = await res.json() as { data: { user: { avatarUrl: string | null } } };
+  expect(json.data.user.avatarUrl).toBeNull();
+  expect(mockDeleteObject).toHaveBeenCalledWith(key);
+
+  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  expect(dbUser.avatarUrl).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// 66. POST /users/me/avatar — storage unconfigured → 503.
+// ---------------------------------------------------------------------------
+
+it('66: POST /users/me/avatar returns 503 AVATAR_STORAGE_UNAVAILABLE when storage is unconfigured', async () => {
+  storageState.configured = false;
+  const sessionCookie = await registerAndLogin();
+
+  const res = await postFile('/me/avatar', PNG_BYTES, 'pic.png', 'image/png', sessionCookie);
+  expect(res.status).toBe(503);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('AVATAR_STORAGE_UNAVAILABLE');
+  expect(mockPutObject).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 67. POST /users/me/avatar — missing file field → 400 VALIDATION_ERROR.
+// ---------------------------------------------------------------------------
+
+it('67: POST /users/me/avatar with no file field returns 400 VALIDATION_ERROR', async () => {
+  const sessionCookie = await registerAndLogin();
+
+  const fd = new FormData();
+  fd.append('notfile', 'hello');
+  const res = await app.request(`${USERS_BASE}/me/avatar`, {
+    method: 'POST',
+    headers: { Cookie: sessionCookie },
+    body: fd,
+  });
+  expect(res.status).toBe(400);
+
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('VALIDATION_ERROR');
+  expect(mockPutObject).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// 68. DELETE /users/me/avatar — no auth → 401.
+// ---------------------------------------------------------------------------
+
+it('68: DELETE /users/me/avatar without auth returns 401', async () => {
+  const res = await del('/me/avatar');
   expect(res.status).toBe(401);
 });
