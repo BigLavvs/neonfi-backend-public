@@ -477,23 +477,39 @@ async function sampleMoralisValueHistory(
 // stitches; finally pins TODAY's point to the corrected current balance so the chart's right edge
 // equals the headline. Empty result → caller writes nothing (the chart builds forward via the
 // daily snapshot job — the "found_no_history" outcome).
+// retrofit-85 (H11 deep): each value-history point now carries its provenance. `approx=false` =
+// REAL historical value — the one-call providers (GoldRush portfolio_v2, Zerion, Mobula) value each
+// day at that day's HISTORICAL balance × HISTORICAL price on their side (live-probe confirmed:
+// portfolio_v2?days=1095 returns a 3-year daily series with per-day balances + quote_rate). These
+// points are accurate, so they're written approx=false and the dashed "estimated" chart segment
+// (retrofit-82) shrinks to only the genuinely-approximate part. `approx=true` = the bounded Moralis
+// `to_block` tail, whose USD is ~CURRENT-priced (historical balance × today's price) — the only
+// remaining estimate, kept as a last-resort fill for the deep tail / chains a priced provider can't
+// cover (path 3). The stitched TODAY point is the corrected current balance → real (approx=false).
+interface ValuePoint {
+  date: string;
+  value: number;
+  approx: boolean;
+}
 async function buildConnectedValueHistory(
   portfolio: PortfolioWithRelations,
   address: string,
   chain: { slug: string },
   days: number,
-): Promise<Array<{ date: string; value: number }>> {
+): Promise<ValuePoint[]> {
   const currentValue = await currentConnectedValue(portfolio.id);
 
-  // 1. Deepest priced one-call series.
-  let series = (await fetchValueHistory(address, chain, days)) ?? [];
+  // 1. Deepest priced one-call series — REAL historical value (approx=false).
+  const priced = (await fetchValueHistory(address, chain, days)) ?? [];
 
   // 2. Tail-fill the older gap (>1 week before the priced series' earliest point) with the
-  //    bounded Moralis sampler. When the priced series is empty, this covers the whole window.
+  //    bounded Moralis sampler — ~current-priced ESTIMATE (approx=true). When the priced series is
+  //    empty, this covers the whole window. The priced series wins on any overlapping date below.
   const windowStartMs = Date.now() - days * 86400 * 1000;
-  const earliestMs = series.length > 0 ? Date.parse(`${series[0]!.date}T00:00:00.000Z`) : Date.now();
+  const earliestMs = priced.length > 0 ? Date.parse(`${priced[0]!.date}T00:00:00.000Z`) : Date.now();
+  let tail: Array<{ date: string; value: number }> = [];
   if (earliestMs > windowStartMs + 7 * 86400 * 1000) {
-    const tail = await sampleMoralisValueHistory(
+    tail = await sampleMoralisValueHistory(
       address,
       chain.slug,
       portfolio.chain?.moralisId ?? '0x1',
@@ -501,14 +517,15 @@ async function buildConnectedValueHistory(
       earliestMs,
       MAX_MORALIS_VALUE_SAMPLES,
     );
-    series = [...tail, ...series];
   }
 
-  // 3. Stitch today's point to the corrected current balance (right edge = headline).
+  // 3. Merge with provenance. Set the approximate tail FIRST, then let the priced provider series
+  //    OVERWRITE any shared date (real beats estimate). Finally stitch today's real corrected value.
   const today = new Date().toISOString().slice(0, 10);
-  const byDate = new Map<string, number>();
-  for (const p of series) byDate.set(p.date, p.value);
-  byDate.set(today, currentValue);
+  const byDate = new Map<string, { value: number; approx: boolean }>();
+  for (const p of tail) byDate.set(p.date, { value: p.value, approx: true });
+  for (const p of priced) byDate.set(p.date, { value: p.value, approx: false });
+  byDate.set(today, { value: currentValue, approx: false });
 
   // retrofit-67: trim the LEADING run of $0 points — the period before the wallet was first
   // funded. Charting them dates the line back to the window start (the flat June-2025 tail).
@@ -517,7 +534,7 @@ async function buildConnectedValueHistory(
   const sorted = [...byDate.entries()]
     .filter(([d]) => d <= today)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([date, value]) => ({ date, value }));
+    .map(([date, { value, approx }]) => ({ date, value, approx }));
   const firstNonZero = sorted.findIndex((p) => p.value > 0);
   if (firstNonZero === -1) return [];
   return firstNonZero === 0 ? sorted : sorted.slice(firstNonZero);
@@ -558,21 +575,33 @@ async function backfillConnectedSnapshots(
     const series = await buildConnectedValueHistory(portfolio, address, chain, VALUE_HISTORY_DAYS);
     if (series.length === 0) return;
 
-    // Historical points are backfilled ESTIMATES (historical balance × ~today's price) → approx=true
-    // (retrofit-77): they must never serve as a short-term 24h/7d/30d baseline. skipDuplicates keeps
-    // any pre-existing REAL daily-job row for that date untouched.
+    // retrofit-85 (H11 deep): write each historical point with its OWN provenance — provider-priced
+    // points approx=false (REAL historical value), the Moralis tail approx=true (estimate). The
+    // ON CONFLICT clause only overwrites rows that are ALREADY approximate
+    // (`WHERE "balance_snapshot"."approx" = true`), so:
+    //   - a brand-new date is inserted with its provenance,
+    //   - a prior approx=true ESTIMATE is UPGRADED to the accurate provider value (approx flips to
+    //     false where the provider now covers that day) — this is what makes a rebuild flip the old
+    //     "~today's price" estimates to real history,
+    //   - a REAL row (approx=false: the daily-job snapshot or a previously-written provider point)
+    //     is left untouched, so observed history is never clobbered.
     const historical = series.filter((p) => p.date < today);
     if (historical.length > 0) {
-      await prisma.balanceSnapshot.createMany({
-        data: historical.map(({ date, value }) => ({
-          portfolioId: portfolio.id,
-          userId: portfolio.userId,
-          snapshotDate: dayMs(date),
-          value: toDecimalString(value),
-          approx: true,
-        })),
-        skipDuplicates: true,
-      });
+      const rows = historical.map(
+        ({ date, value, approx }) =>
+          Prisma.sql`(${portfolio.id}::int, ${portfolio.userId}::int, ${toDecimalString(value)}::decimal, ${date}::date, ${approx}::boolean)`,
+      );
+      const CHUNK = 500;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const chunk = rows.slice(i, i + CHUNK);
+        await prisma.$executeRaw`
+          INSERT INTO "balance_snapshot" ("portfolioId", "userId", "value", "snapshotDate", "approx")
+          VALUES ${Prisma.join(chunk)}
+          ON CONFLICT ("portfolioId", "snapshotDate")
+          DO UPDATE SET "value" = EXCLUDED."value", "approx" = EXCLUDED."approx"
+          WHERE "balance_snapshot"."approx" = true
+        `;
+      }
     }
 
     // TODAY is the corrected current balance — a REAL observed point → approx=false (retrofit-77).
@@ -593,6 +622,21 @@ async function backfillConnectedSnapshots(
   } catch (e) {
     console.error('[wallet-sync] connected snapshot backfill failed', (e as Error).message);
   }
+}
+
+// retrofit-85 (H11 deep): re-pull the provider's REAL multi-year historical value series for a
+// connected portfolio and UPGRADE its existing approx=true estimate snapshots to accurate
+// (approx=false where a priced provider covers the day). The approx-guarded upsert in
+// backfillConnectedSnapshots protects real (approx=false) rows. This is the EXISTING-portfolio
+// path: normal resync stays incremental (fullHistory=false, today only — retrofit-60 C2) so it
+// never re-pulls the multi-year series, so a one-off rebuild (the rebuild:connected-history script)
+// is how prior estimates get corrected. Best-effort; missing address/chain → no-op.
+export async function rebuildConnectedHistory(portfolio: PortfolioWithRelations): Promise<boolean> {
+  const address = portfolio.walletAddress;
+  const slug = portfolio.chain?.slug;
+  if (!address || !slug) return false;
+  await backfillConnectedSnapshots(portfolio, address, { slug }, { fullHistory: true });
+  return true;
 }
 
 // retrofit-79 (§1): per-token cost basis from the provider PnL, keyed by catalog tokenId.

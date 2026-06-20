@@ -22,6 +22,7 @@
     "backfill:snapshots": "tsx src/scripts/backfill-snapshots.ts",
     "reclassify:snapshots": "tsx src/scripts/reclassify-connected-snapshots.ts",
     "reclassify:nft-spam": "tsx src/scripts/reclassify-nft-spam.ts",
+    "rebuild:connected-history": "tsx src/scripts/rebuild-connected-history.ts",
     "test": "vitest run"
   },
   "prisma": {
