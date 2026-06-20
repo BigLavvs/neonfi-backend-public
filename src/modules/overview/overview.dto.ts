@@ -20,13 +20,16 @@ export interface OverviewDTO {
     // (their current value − that snapshot). A portfolio with no 24h baseline is excluded
     // from BOTH sides, so its current value can't read as a phantom 24h gain.
     pnl24hValue: number;
-    // retrofit-75 (R39): canonical all-time — Σ of each portfolio's per-type all-time
-    // (connected → snapshot-vs-earliest, manual → cost-basis unrealized+realized, which
-    // EXCLUDES cost-unknown holdings so a stablecoin-only portfolio nets ~0). pnlAllTime is
-    // recomputed over the implied aggregate base (Σ baseline). Replaces the netDeposit-based
-    // number, which made a cost-unknown opening read as a phantom gain.
-    pnlAllTime: number; // aggregate % (guarded divide-by-zero → 0)
-    pnlAllTimeValue: number; // Σ canonical per-portfolio all-time
+    // retrofit-75 (R39): canonical all-time — pnlAllTimeValue sums each portfolio's per-type
+    // all-time $ (connected → unrealized+realized, manual → cost-basis unrealized+realized, which
+    // EXCLUDES cost-unknown holdings so a stablecoin-only portfolio nets ~0).
+    // retrofit-80: pnlAllTime (%) is computed ONLY over MANUAL portfolios (whose currentValue −
+    // allTime is a real cost base); CONNECTED portfolios are excluded from the % because their
+    // all-time includes realized proceeds that left the wallet (no lifetime cost base to divide
+    // by). null ("—") when no valid base — never the old impossible >100% / sign-contradicting
+    // headline. The all-time VALUE is still shown.
+    pnlAllTime: number | null; // aggregate % over manual portfolios; null = no valid base ("—")
+    pnlAllTimeValue: number; // Σ canonical per-portfolio all-time $
     // retrofit-27: average-cost PnL aggregate (additive). allTimePnlValue = unrealized +
     // realized; unrealizedPnlPct is over Σ(costBasis) across all the user's assets.
     unrealizedPnlValue: number;

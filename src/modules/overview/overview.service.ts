@@ -68,6 +68,23 @@ function roundN(n: number | null, dp = 2): number | null {
   return n == null ? null : round(n, dp);
 }
 
+// retrofit-80: the aggregate all-time % with the must-not-mislead guards. Returns null ("—") when
+// there's no valid base to divide by, rather than a fabricated or sign-contradicting number:
+//   - base ≤ 0 → null. The base is Σ(manual currentValue − manual all-time) = Σ manual cost basis;
+//     a non-positive base means we can't compute a % (it would be the old negative-base −101% bug).
+//   - pct < −100 → null. A long-only portfolio can't lose more than it invested, so a sub-−100%
+//     result signals a broken base, not a real loss.
+//   - sign mismatch → null. The % sign MUST match the value sign; a positive gain can never be a
+//     negative percent (and vice-versa).
+function aggregateAllTimePct(numerator: number, base: number): number | null {
+  if (!(base > 0)) return null;
+  const pct = (numerator / base) * 100;
+  if (!Number.isFinite(pct)) return null;
+  if (pct < -100) return null;
+  if ((numerator > 0 && pct < 0) || (numerator < 0 && pct > 0)) return null;
+  return pct;
+}
+
 /**
  * retrofit-75 (R39): the canonical all-time PnL for a portfolio. The two portfolio types
  * measure "all-time" differently and derive.ts already computes BOTH:
@@ -309,16 +326,20 @@ async function buildOverview(
   // ---- totals (sum the value fields, recompute aggregate %s) ----
   let totalValue = 0;
   // retrofit-75 (R39): pnlAllTimeValue sums the CANONICAL per-type all-time (connected →
-  // snapshot-based, manual → cost-basis unrealized+realized), NOT the netDeposit-based
-  // d.pnlAllTimeValue, so a cost-unknown manual holding stops reading as a phantom gain.
-  // costBasisAll below is then Σ(d.totalValue − canonical) = Σ(per-portfolio baseline), so
-  // the recomputed pnlAllTime % is over the implied aggregate base (connected stays its
-  // snapshot %, a stablecoin-only manual contributes ~0, the aggregate sits between).
+  // unrealized+realized, manual → cost-basis unrealized+realized), NOT the netDeposit-based
+  // d.pnlAllTimeValue, so a cost-unknown manual holding stops reading as a phantom gain. This is
+  // the DISPLAY $ — every portfolio with a known all-time value contributes to it.
   let pnlAllTimeValue = 0;
-  // retrofit-79 (§2/§4): a portfolio with an UNKNOWN all-time (connected w/o cost basis → null)
-  // is excluded from BOTH the summed value and the implied %-base (allTimeBaseValueNow), so its
-  // current value can't read as a phantom all-time gain (mirrors the 24h totals-exclusion).
-  let allTimeBaseValueNow = 0;
+  // retrofit-80: the aggregate all-time PERCENT is computed ONLY over MANUAL portfolios, whose
+  // implied base (currentValue − allTime = cost basis) is real and non-negative for a long-only
+  // book. A CONNECTED portfolio's all-time includes REALIZED proceeds that have LEFT the wallet, so
+  // currentValue − allTime is NOT its cost base — it goes negative and produced the impossible
+  // −101% headline (value +$1,391 but % −101%). We have no lifetime cost base for connected, so it
+  // is EXCLUDED from the % entirely (its value still shows in pnlAllTimeValue above); when only
+  // connected portfolios are in scope the headline % is null ("—"). pctNumerator/pctBaseValueNow
+  // accumulate the %-eligible (manual) side; the divide is guarded by aggregateAllTimePct.
+  let pctNumerator = 0;
+  let pctBaseValueNow = 0;
   // retrofit-27 average-cost aggregate. unrealized/realized sum the per-portfolio derived
   // values; the %-base Σ(costBasis) is accumulated in the allocation loop below (it already
   // iterates every asset, and each asset row carries costBasis).
@@ -328,16 +349,21 @@ async function buildOverview(
     totalValue += d.totalValue;
     unrealizedPnlValue += d.unrealizedPnlValue;
     realizedPnlValue += d.realizedPnlValue;
-    const canon = canonicalAllTime(portfolios[i]!.type.name, d);
+    const type = portfolios[i]!.type.name;
+    const canon = canonicalAllTime(type, d);
     if (canon.value != null) {
       pnlAllTimeValue += canon.value;
-      allTimeBaseValueNow += d.totalValue;
+      if (type !== 'connected') {
+        pctNumerator += canon.value;
+        pctBaseValueNow += d.totalValue;
+      }
     }
   });
-  // Guard divide-by-zero → 0 (never NaN/Infinity), mirroring computePnlPeriod. The base is the
-  // current value of only the portfolios that HAVE an all-time (Σ value − Σ all-time = Σ baseline).
-  const costBasisAll = allTimeBaseValueNow - pnlAllTimeValue;
-  const pnlAllTime = costBasisAll === 0 ? 0 : (pnlAllTimeValue / costBasisAll) * 100;
+  // The implied aggregate base = Σ(manual currentValue − manual all-time) = Σ manual cost basis.
+  // aggregateAllTimePct returns null (→ "—") for a non-positive base, a < −100% result, or a
+  // sign mismatch — never a fabricated or self-contradicting headline (retrofit-80 guards).
+  const costBasisAll = pctBaseValueNow - pctNumerator;
+  const pnlAllTime = aggregateAllTimePct(pctNumerator, costBasisAll);
   const allTimePnlValue = unrealizedPnlValue + realizedPnlValue;
 
   // ---- 24h PnL from the daily snapshot history (retrofit-20, fixed retrofit-75 M16) ----
@@ -507,7 +533,7 @@ async function buildOverview(
       totalValue: round(totalValue),
       pnl24h: round(pnl24h),
       pnl24hValue: round(pnl24hValue),
-      pnlAllTime: round(pnlAllTime),
+      pnlAllTime: roundN(pnlAllTime), // retrofit-80: null ("—") when there's no valid base
       pnlAllTimeValue: round(pnlAllTimeValue),
       unrealizedPnlValue: round(unrealizedPnlValue),
       unrealizedPnlPct: round(unrealizedPnlPct),

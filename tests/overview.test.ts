@@ -49,7 +49,7 @@ interface OverviewData {
     totalValue: number;
     pnl24h: number;
     pnl24hValue: number;
-    pnlAllTime: number;
+    pnlAllTime: number | null; // retrofit-80: null ("—") when no valid base
     pnlAllTimeValue: number;
     portfolioCount: number;
     transactionCount: number;
@@ -64,10 +64,10 @@ interface OverviewData {
     inceptionDate: string; // retrofit-66
     assetCount: number;
     totalValue: number;
-    pnl24h: number;
-    pnl24hValue: number;
-    pnlAllTime: number;
-    pnlAllTimeValue: number;
+    pnl24h: number | null;
+    pnl24hValue: number | null;
+    pnlAllTime: number | null; // retrofit-79/80: null ("—") for connected (no lifetime base)
+    pnlAllTimeValue: number | null;
     // retrofit-28: raw per-portfolio position data for client recompute.
     holdings: Array<{
       symbol: string;
@@ -574,16 +574,21 @@ it('r79: connected portfolio WITH provider cost basis → cost-basis all-time (u
   expect(row.unrealizedPnlValue).toBeCloseTo(43000, 2);
   expect(row.realizedPnlValue).toBeCloseTo(999, 2);
   expect(row.allTimePnlValue).toBeCloseTo(43999, 2);
-  // Canonical all-time = cost-basis (43999), NOT the snapshot-delta 53000 the old branch gave.
+  // Canonical all-time VALUE = cost-basis unrealized+realized (43999), NOT the snapshot-delta 53000.
   expect(row.pnlAllTimeValue).toBeCloseTo(43999, 2);
-  expect(row.pnlAllTime).toBeCloseTo(86, 1); // unrealizedPnlPct = 43000/50000*100
+  // retrofit-80: the connected all-time PERCENT is null ("—") — the value includes realized (43999)
+  // but we have no lifetime cost base to divide by, so the old +86% (unrealized/current-cost-basis)
+  // was sign/scale-inconsistent with the value. The % sign can never contradict the value sign.
+  expect(row.pnlAllTime).toBeNull();
   // 24h still comes from the snapshot nearest ~1 day ago (93000 − 80000).
   expect(row.pnl24hValue).toBeCloseTo(13000, 2);
 
-  // Totals propagate the cost-basis numbers (single connected portfolio).
+  // Totals propagate the cost-basis VALUE (single connected portfolio); the headline % is null
+  // because connected portfolios are excluded from the aggregate % (no lifetime cost base).
   expect(d.totals.unrealizedPnlValue).toBeCloseTo(43000, 2);
   expect(d.totals.realizedPnlValue).toBeCloseTo(999, 2);
   expect(d.totals.pnlAllTimeValue).toBeCloseTo(43999, 2);
+  expect(d.totals.pnlAllTime).toBeNull(); // retrofit-80: connected-only → no base → "—"
   expect(d.totals.pnl24hValue).toBeCloseTo(13000, 2);
 });
 
@@ -608,9 +613,61 @@ it('r79-§4: connected portfolio WITHOUT cost basis → all-time null ("—"), e
   // No ~24h snapshot baseline → short-term is null too (§2/D1).
   expect(row.pnl24h).toBeNull();
   expect(row.pnl24hValue).toBeNull();
-  // The null-all-time portfolio is EXCLUDED from the totals all-time (not a phantom gain).
+  // The null-all-time portfolio is EXCLUDED from the totals all-time value (not a phantom gain).
   expect(d.totals.pnlAllTimeValue).toBe(0);
-  expect(d.totals.pnlAllTime).toBe(0);
+  // retrofit-80: with no portfolio carrying a valid base in scope, the headline all-time % is null
+  // ("—"), NOT a fabricated 0 (the old code divided by a zero/negative implied base).
+  expect(d.totals.pnlAllTime).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-80 — the all-time % is sign-consistent with the value and never impossible.
+// (Fixes the retrofit-79 regression: +$1,391 value but −99.72% row / −101.19% headline.)
+// ---------------------------------------------------------------------------
+
+it('r80: connected with a NET LOSS all-time → negative value AND null percent (sign never contradicts)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const connId = await createConnectedPortfolio(userId, 'Loss');
+  // Bought BTC at 100000, now 93000 → unrealized −7000; plus a realized loss −500 → all-time −7500.
+  await seedAssetWithCost(connId, btcId, 1.0, { avgCost: 100000, costBasis: 100000, realizedPnl: -500 });
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const row = d.portfolios.find((p) => p.name === 'Loss')!;
+  expect(row.totalValue).toBeCloseTo(93000, 2);
+  // The all-time VALUE is a real loss (−7500); the PERCENT is null ("—") — no lifetime cost base.
+  // The key guard: a NEGATIVE value is never paired with a POSITIVE percent (and vice-versa).
+  expect(row.pnlAllTimeValue).toBeCloseTo(-7500, 2);
+  expect(row.pnlAllTime).toBeNull();
+  // Headline mirrors it: negative value, null percent — never a fabricated < −100% loss.
+  expect(d.totals.pnlAllTimeValue).toBeCloseTo(-7500, 2);
+  expect(d.totals.pnlAllTime).toBeNull();
+});
+
+it('r80: mixed manual + connected → headline % is the MANUAL cost-basis % only; a connected realized gain never drags the base negative', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const manualId = await createManualPortfolio(userId, 'Manual');
+  const connId = await createConnectedPortfolio(userId, 'Conn');
+  // Manual: ETH avgCost 3000, balance 1, now 3200 → unrealized +200, realized 0 → all-time +200.
+  await seedAssetWithCost(manualId, ethId, 1.0, { avgCost: 3000, costBasis: 3000, realizedPnl: 0 });
+  // Connected: a BIG realized gain (+50000) on top of unrealized +43000 (BTC 1 @ 93000, cost 50000)
+  // → all-time +93000. This is exactly the case where currentValue(93000) − allTime(93000) = 0 (and
+  // any larger realized goes negative), which used to drag the aggregate base negative → absurd %.
+  await seedAssetWithCost(connId, btcId, 1.0, { avgCost: 50000, costBasis: 50000, realizedPnl: 50000 });
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // Headline % = the MANUAL cost-basis % only: 200 / 3000 × 100 = 6.67 (connected excluded). The old
+  // code mixed connected in and produced ~3106% (93200 / (96200 − 93200)).
+  expect(d.totals.pnlAllTime).toBeCloseTo(6.67, 2);
+  // The headline VALUE still includes the connected all-time: manual 200 + connected 93000 = 93200.
+  expect(d.totals.pnlAllTimeValue).toBeCloseTo(93200, 2);
 });
 
 // ---------------------------------------------------------------------------

@@ -176,15 +176,26 @@ async function computeFromDb(portfolioId: number): Promise<DerivedFields> {
     };
   }
 
-  // retrofit-79 (§1c): CONNECTED with cost basis uses the SAME cost-basis all-time manual uses
-  // (allTimePnlValue / unrealizedPnlPct), repurposing the legacy pnlAllTime* fields so the
-  // overview canonical + analytics summary both read the honest cost-basis number. MANUAL keeps
-  // the legacy netDeposit-based all-time (retrofit-2/27 Augment), byte-for-byte unchanged.
-  let pnlAllTime: number;
+  // retrofit-79 (§1c): CONNECTED with cost basis reports the cost-basis all-time VALUE
+  // (allTimePnlValue = unrealized + realized). MANUAL keeps the legacy netDeposit-based all-time
+  // (retrofit-2/27 Augment), byte-for-byte unchanged.
+  let pnlAllTime: number | null;
   let pnlAllTimeValue: number;
   if (isConnected) {
+    // retrofit-80: the connected all-time VALUE includes REALIZED PnL (allTimePnlValue =
+    // unrealized + realized), but the honest all-time PERCENT needs the LIFETIME cost base — the
+    // total ever invested to produce BOTH the realized and the still-held units. A windowed
+    // connected import gives us only the cost basis of CURRENTLY-HELD units (costBasis) + realized
+    // PnL, never the cost of the since-sold units, so that % is uncomputable from what we store.
+    // retrofit-79 §1c wrongly set the % to unrealizedPnlPct (unrealized / current cost basis) while
+    // the value carried unrealized + realized — a sign-contradiction (+$1,391 value but −99.72%).
+    // Report the VALUE and leave the % null → the UI shows "—", never a fabricated/contradictory
+    // percentage. (A future retrofit can light up a real % once a provider lifetime-invested field
+    // — Moralis total_usd_invested / a GoldRush upnl total-bought — is probed and persisted
+    // alongside the cost basis; the field exists but isn't reliably served by the PRIMARY provider
+    // today, and the §0 re-probe was quota-blocked, so we ship the honest "—".)
     pnlAllTimeValue = allTimePnlValue;
-    pnlAllTime = unrealizedPnlPct;
+    pnlAllTime = null;
   } else {
     const netDeposit = portfolio ? Number(portfolio.netDeposit.toString()) : 0;
     pnlAllTimeValue = totalValue - netDeposit;
