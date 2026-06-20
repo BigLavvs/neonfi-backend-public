@@ -132,6 +132,8 @@ async function seedSnapshot(
   userId: number,
   ymd: string,
   value: number,
+  // retrofit-77: approx=true marks a backfilled ESTIMATE (excluded from the short-term baseline).
+  opts: { approx?: boolean } = {},
 ): Promise<void> {
   await prisma.balanceSnapshot.create({
     data: {
@@ -139,6 +141,7 @@ async function seedSnapshot(
       userId,
       snapshotDate: new Date(`${ymd}T00:00:00.000Z`),
       value: value.toString(),
+      approx: opts.approx ?? false,
     },
   });
 }
@@ -335,6 +338,32 @@ it('r72-tolerance: a snapshot far older than the window is NOT used as that wind
   expect(d.pnl7d).toBe(0); // 12-day-old baseline rejected for the 7d window
   expect(d.pnl7dValue).toBe(0);
   expect(d.pnl30dValue).toBeCloseTo(23000, 2); // 93000 − 70000 (30d snapshot accepted)
+  expect(d.pnl30d).toBe(32.86);
+});
+
+it('r77-approx: a backfilled (approx) snapshot is NOT used as the short-term baseline (pnl7d=0); a real one is (pnl30d)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSub(userId);
+  const portfolioId = await createManualPortfolio(userId, 'P');
+  await seedAsset(portfolioId, btcId, 1.0); // totalValue = 93000
+  await redis.del('price:BTC');
+
+  // retrofit-77: identical setup to the happy path (7d→85000, 30d→70000) EXCEPT the 7d snapshot is
+  // an APPROXIMATE backfill (connected initial-sync estimate). The short-term baseline must ignore
+  // it → pnl7d = 0 ("—"), even though it's within the H5 tolerance and would otherwise give +8000.
+  // The 30d snapshot is REAL → pnl30d is the true delta, proving it's the approx flag (not absence
+  // of data) that suppresses 7d.
+  await seedSnapshot(portfolioId, userId, ymdDaysAgo(7), 85000, { approx: true });
+  await seedSnapshot(portfolioId, userId, ymdDaysAgo(30), 70000); // real
+
+  const res = await aGet(portfolioId, '/summary', cookies);
+  expect(res.status).toBe(200);
+  const d = ((await res.json()) as { data: Record<string, number> }).data;
+
+  expect(d.pnl7d).toBe(0); // approx baseline ignored
+  expect(d.pnl7dValue).toBe(0);
+  expect(d.pnl30dValue).toBeCloseTo(23000, 2); // 93000 − 70000 (real 30d snapshot accepted)
   expect(d.pnl30d).toBe(32.86);
 });
 

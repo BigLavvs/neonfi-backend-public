@@ -218,6 +218,8 @@ async function seedSnapshot(
   userId: number,
   ymd: string,
   value: number,
+  // retrofit-77: approx=true marks a backfilled ESTIMATE (excluded from the short-term baseline).
+  opts: { approx?: boolean } = {},
 ): Promise<void> {
   await prisma.balanceSnapshot.create({
     data: {
@@ -225,6 +227,7 @@ async function seedSnapshot(
       userId,
       snapshotDate: new Date(`${ymd}T00:00:00.000Z`),
       value: value.toString(),
+      approx: opts.approx ?? false,
     },
   });
 }
@@ -1141,5 +1144,47 @@ it('r76-manual-24h: manual portfolio with a 24h-ago snapshot shows its 24h delta
   // portfolio's change is in the totals but missing from its row, and none is invented.
   const sumRows = d.portfolios.reduce((s, p) => s + p.pnl24hValue, 0);
   expect(d.totals.pnl24hValue).toBe(13200); // 13000 + 200
+  expect(d.totals.pnl24hValue).toBe(sumRows);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-77 (N1) — a freshly-synced connected portfolio whose only ≤24h-old snapshot is
+// a backfilled APPROXIMATE estimate must show 24h = 0 ("—"), NOT a garbage delta off the
+// inflated estimate. A sibling with a REAL 24h-ago snapshot still shows its true delta, and
+// the headline (which excludes the 0 portfolio from both sides, retrofit-75 M16) stays equal
+// to Σ of the per-portfolio rows.
+// ---------------------------------------------------------------------------
+
+it('r77-approx: connected portfolio whose only 24h-ago snapshot is approx shows 24h=0; a sibling with a real snapshot shows the delta; totals == Σ rows', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  // Cfresh: freshly synced — its only ~24h-old snapshot is a backfilled ESTIMATE (approx=true).
+  // Creal:  older portfolio — it has a REAL ~24h-old snapshot (approx=false), as Portfolio 2 does.
+  const cFresh = await createConnectedPortfolio(userId, 'Cfresh', `0x${'a'.repeat(40)}`);
+  const cReal = await createConnectedPortfolio(userId, 'Creal', `0x${'b'.repeat(40)}`);
+  await seedAsset(cFresh, ethId, 1.0); // current 3200
+  await seedAsset(cReal, ethId, 1.0); // current 3200
+  const ymd2dAgo = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+  // Same nominal baseline (3000) for both — only the provenance flag differs, so any difference in
+  // the reported 24h is solely the approx exclusion.
+  await seedSnapshot(cFresh, userId, ymd2dAgo, 3000, { approx: true });
+  await seedSnapshot(cReal, userId, ymd2dAgo, 3000); // real
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const freshRow = d.portfolios.find((p) => p.name === 'Cfresh')!;
+  const realRow = d.portfolios.find((p) => p.name === 'Creal')!;
+
+  // The approx-only portfolio reports NO 24h delta (—), not 3200 − 3000 = +200.
+  expect(freshRow.pnl24hValue).toBe(0);
+  expect(freshRow.pnl24h).toBe(0);
+  // The sibling with a real snapshot shows the true +200 delta off the identical baseline.
+  expect(realRow.pnl24hValue).toBe(200); // 3200 − 3000
+
+  // Headline still reconciles with the rows (the 0 portfolio contributes 0 to both sides).
+  const sumRows = d.portfolios.reduce((s, p) => s + p.pnl24hValue, 0);
+  expect(d.totals.pnl24hValue).toBe(200);
   expect(d.totals.pnl24hValue).toBe(sumRows);
 });

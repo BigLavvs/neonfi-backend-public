@@ -26,6 +26,12 @@ export async function countSnapshotsByPortfolioId(portfolioId: number): Promise<
 
 // Stage 14 (§1.7): most recent snapshot at or before `cutoffDate`. Used by the
 // analytics summary endpoint for pnl7d / pnl30d via findSnapshotNearDaysAgo.
+//
+// retrofit-77 (N1): this is the SHORT-TERM (24h/7d/30d) baseline lookup, so it filters to
+// approx=false — a backfilled ESTIMATE (connected initial-sync net-worth-at-block) must never
+// stand in as a recent-performance baseline. A freshly-synced wallet whose only ≤N-day rows are
+// approx returns null here → the caller renders "—" (0) until real snapshots accrue, instead of a
+// garbage delta off an inflated estimate. (All-time PnL still reads approx rows — see H11/r78.)
 export async function findSnapshotAtOrBefore(
   portfolioId: number,
   cutoffDate: Date,
@@ -33,7 +39,7 @@ export async function findSnapshotAtOrBefore(
   // retrofit-72 (H5): snapshotDate is returned too so findSnapshotNearDaysAgo can reject a
   // baseline that's much older than the target window (a stale delta mislabeled "24H").
   return prisma.balanceSnapshot.findFirst({
-    where: { portfolioId, snapshotDate: { lte: cutoffDate } },
+    where: { portfolioId, approx: false, snapshotDate: { lte: cutoffDate } },
     orderBy: { snapshotDate: 'desc' },
     select: { value: true, snapshotDate: true },
   });

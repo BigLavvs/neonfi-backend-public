@@ -104,13 +104,16 @@ export async function runSnapshotJob(
         where: {
           portfolioId_snapshotDate: { portfolioId: portfolio.id, snapshotDate },
         },
+        // retrofit-77: the daily job records a REAL observed value → approx=false. Setting it on
+        // update too upgrades any same-day backfill ESTIMATE the initial sync may have left.
         create: {
           portfolioId: portfolio.id,
           userId: portfolio.userId,
           snapshotDate,
           value: derived.totalValue,
+          approx: false,
         },
-        update: { value: derived.totalValue },
+        update: { value: derived.totalValue, approx: false },
       });
       snapshotted++;
 

@@ -525,12 +525,13 @@ async function backfillConnectedSnapshots(
     const today = new Date().toISOString().slice(0, 10);
 
     // Resync (incremental): only refresh today's right edge — no multi-year re-pull.
+    // TODAY is a REAL observed point (corrected current balance) → approx=false (retrofit-77).
     if (!fullHistory) {
       const value = await currentConnectedValue(portfolio.id);
       await prisma.balanceSnapshot.upsert({
         where: { portfolioId_snapshotDate: { portfolioId: portfolio.id, snapshotDate: dayMs(today) } },
-        create: { portfolioId: portfolio.id, userId: portfolio.userId, snapshotDate: dayMs(today), value: toDecimalString(value) },
-        update: { value: toDecimalString(value) },
+        create: { portfolioId: portfolio.id, userId: portfolio.userId, snapshotDate: dayMs(today), value: toDecimalString(value), approx: false },
+        update: { value: toDecimalString(value), approx: false },
       });
       return;
     }
@@ -538,6 +539,9 @@ async function backfillConnectedSnapshots(
     const series = await buildConnectedValueHistory(portfolio, address, chain, VALUE_HISTORY_DAYS);
     if (series.length === 0) return;
 
+    // Historical points are backfilled ESTIMATES (historical balance × ~today's price) → approx=true
+    // (retrofit-77): they must never serve as a short-term 24h/7d/30d baseline. skipDuplicates keeps
+    // any pre-existing REAL daily-job row for that date untouched.
     const historical = series.filter((p) => p.date < today);
     if (historical.length > 0) {
       await prisma.balanceSnapshot.createMany({
@@ -546,11 +550,13 @@ async function backfillConnectedSnapshots(
           userId: portfolio.userId,
           snapshotDate: dayMs(date),
           value: toDecimalString(value),
+          approx: true,
         })),
         skipDuplicates: true,
       });
     }
 
+    // TODAY is the corrected current balance — a REAL observed point → approx=false (retrofit-77).
     const todayPoint = series.find((p) => p.date === today);
     if (todayPoint) {
       await prisma.balanceSnapshot.upsert({
@@ -560,8 +566,9 @@ async function backfillConnectedSnapshots(
           userId: portfolio.userId,
           snapshotDate: dayMs(today),
           value: toDecimalString(todayPoint.value),
+          approx: false,
         },
-        update: { value: toDecimalString(todayPoint.value) },
+        update: { value: toDecimalString(todayPoint.value), approx: false },
       });
     }
   } catch (e) {

@@ -40,6 +40,9 @@ export async function listPortfolioSnapshots(
  * "24H". `toleranceDays` bounds how much older than the target the baseline may be; if the
  * nearest snapshot is older than that, return null so the caller shows "—" for the window.
  * Default scales with the window (tight ~1 day for 24h, looser for 7d/30d).
+ *
+ * retrofit-77 (N1): the underlying findSnapshotAtOrBefore filters to approx=false, so this
+ * short-term baseline only ever rests on REAL observed snapshots, never a backfilled estimate.
  */
 export async function findSnapshotNearDaysAgo(
   portfolioId: number,

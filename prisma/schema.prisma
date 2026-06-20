@@ -557,6 +557,13 @@ model BalanceSnapshot {
   value        Decimal   @db.Decimal(20, 8)
   snapshotDate DateTime  @db.Date
 
+  // retrofit-77 (N1): provenance flag. true = a backfilled ESTIMATE (connected-wallet
+  // initial-sync net-worth-at-block, approximate: historical balance × ~today's price).
+  // false = a REAL observed snapshot (daily job + the live "today" stitch). The short-term
+  // (24h/7d/30d) baseline lookup ignores approx rows so a freshly-synced wallet shows "—"
+  // until real snapshots accrue, instead of a garbage delta off an inflated estimate.
+  approx       Boolean   @default(false)
+
   createdAt    DateTime  @default(now())
 
   @@id([portfolioId, snapshotDate])
