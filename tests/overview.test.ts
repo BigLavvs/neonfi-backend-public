@@ -350,8 +350,12 @@ it('372: aggregates totals, merges allocation/holdings by symbol, per-portfolio 
   // totals
   expect(d.totals.totalValue).toBeCloseTo(146900, 2); // 99400 + 47500
   expect(d.totals.portfolioCount).toBe(2);
-  expect(d.totals.pnlAllTimeValue).toBeCloseTo(26900, 2); // 19400 + 7500
-  expect(d.totals.pnlAllTime).toBe(22.42); // 26900 / (146900-26900) * 100 = 22.4166… → 2dp
+  // retrofit-75 (R39): canonical all-time for a MANUAL portfolio is cost-basis
+  // (unrealized+realized), which excludes cost-unknown holdings. These assets are seeded
+  // with no avgCost (cost-unknown), so the honest all-time is 0 — NOT the old netDeposit
+  // phantom (totalValue − netDeposit = +26900). A cost-unknown opening no longer reads as gain.
+  expect(d.totals.pnlAllTimeValue).toBe(0);
+  expect(d.totals.pnlAllTime).toBe(0);
   expect(d.totals.pnl24h).toBe(0); // retrofit-20: no snapshot ≥24h old → 0/0 baseline
   expect(d.totals.pnl24hValue).toBe(0);
 
@@ -379,9 +383,11 @@ it('372: aggregates totals, merges allocation/holdings by symbol, per-portfolio 
   expect(r1.chainId).toBeNull();
   expect(r1.chainName).toBeNull();
   expect(r1.totalValue).toBeCloseTo(99400, 2);
-  expect(r1.pnlAllTimeValue).toBeCloseTo(19400, 2); // 99400 - 80000
+  // retrofit-75 (R39): per-portfolio all-time is the canonical cost-basis number for manual.
+  // Cost-unknown holdings (no avgCost seeded) → 0, replacing the netDeposit-based 19400/7500.
+  expect(r1.pnlAllTimeValue).toBe(0);
   expect(r2.totalValue).toBeCloseTo(47500, 2);
-  expect(r2.pnlAllTimeValue).toBeCloseTo(7500, 2); // 47500 - 40000
+  expect(r2.pnlAllTimeValue).toBe(0);
 });
 
 // ---------------------------------------------------------------------------
@@ -1018,4 +1024,80 @@ it('r50-filter: ?portfolioIds= scopes totals/holdings/recentTransactions/count; 
   const all = await getData(await overviewGet(cookies));
   expect(all.totals.portfolioCount).toBe(2);
   expect(all.totals.totalValue).toBeCloseTo(96200, 2);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-75 (M16) — 24h totals exclude a portfolio with no ~24h-old snapshot
+// (no phantom gain); totals.pnl24hValue == Σ per-portfolio pnl24hValue.
+// ---------------------------------------------------------------------------
+
+it('r75-24h: a portfolio with no 24h snapshot does NOT spike totals 24h; totals == Σ per-portfolio', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  // C1 connected: BTC 1.0 (current 93000) WITH a ~24h-old snapshot (80000) → its own 24h
+  // delta is +13000. M2 manual: USDT 4 (current 4) with NO snapshot → no 24h baseline.
+  const c1 = await createConnectedPortfolio(userId, 'C1');
+  const m2 = await createManualPortfolio(userId, 'M2');
+  await seedAsset(c1, btcId, 1.0);
+  await seedAsset(m2, usdtId, 4);
+  const ymd2dAgo = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+  await seedSnapshot(c1, userId, ymd2dAgo, 80000);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // Totals 24h = ONLY C1's delta (93000 − 80000). The pre-fix code summed M2's whole current
+  // value as a phantom gain (would have been 13004); the fix restricts the delta to the
+  // portfolios that actually have a 24h baseline.
+  expect(d.totals.pnl24hValue).toBe(13000);
+  expect(d.totals.pnl24hValue).not.toBe(13004);
+  // pnl24h is over the included baseline only (80000), never diluted by M2's value.
+  expect(d.totals.pnl24h).toBe(16.25); // 13000 / 80000 * 100
+
+  // And the headline equals the sum of the per-portfolio 24h rows (C1 connected = 13000,
+  // M2 manual = 0 — manual rows carry derive's 0). No portfolio is double-counted or invented.
+  const sumRows = d.portfolios.reduce((s, p) => s + p.pnl24hValue, 0);
+  expect(d.totals.pnl24hValue).toBe(sumRows);
+  expect(d.portfolios.find((p) => p.name === 'C1')!.pnl24hValue).toBe(13000);
+  expect(d.portfolios.find((p) => p.name === 'M2')!.pnl24hValue).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-75 (R39) — manual all-time is canonical cost-basis: a stablecoin-only
+// (cost-unknown) portfolio reads ~0%, a cost-tracked one reads its cost-basis PnL.
+// ---------------------------------------------------------------------------
+
+it('r75-alltime: USDT-only cost-unknown manual → ~0 all-time (not +33%); cost-tracked → cost-basis PnL; totals sum canonical', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  // "Stable": 4 USDT, cost-UNKNOWN (avgCost null), netDeposit 3 — the exact R39 case. The old
+  // netDeposit model read value(4) − netDeposit(3) = +$1 / +33%. The canonical cost-basis
+  // all-time EXCLUDES the cost-unknown holding → 0.
+  const stable = await createManualPortfolio(userId, 'Stable', 3);
+  await seedAssetWithCost(stable, usdtId, 4, { avgCost: null, costBasis: 0, realizedPnl: 0 });
+  // "Tracked": BTC 1.0 at avgCost 90000 (current 93000) → unrealized 3000, the canonical all-time.
+  const tracked = await createManualPortfolio(userId, 'Tracked', 0);
+  await seedAssetWithCost(tracked, btcId, 1.0, { avgCost: 90000, costBasis: 90000, realizedPnl: 0 });
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const stableRow = d.portfolios.find((p) => p.name === 'Stable')!;
+  const trackedRow = d.portfolios.find((p) => p.name === 'Tracked')!;
+
+  // Stablecoin-only: ~0 all-time, NOT the +$1/+33% netDeposit phantom.
+  expect(stableRow.totalValue).toBeCloseTo(4, 2);
+  expect(stableRow.pnlAllTimeValue).toBe(0);
+  expect(stableRow.pnlAllTime).toBe(0);
+
+  // Cost-tracked: canonical = cost-basis unrealized (93000 − 90000 = 3000), % over costBasis.
+  expect(trackedRow.totalValue).toBeCloseTo(93000, 2);
+  expect(trackedRow.pnlAllTimeValue).toBe(3000);
+  expect(trackedRow.pnlAllTime).toBe(3.33); // 3000 / 90000 * 100 → 3.3333 → 2dp
+
+  // Totals sum the canonical per-portfolio all-time (3000 + 0), % over the implied base.
+  expect(d.totals.pnlAllTimeValue).toBe(3000);
+  expect(d.totals.pnlAllTime).toBe(3.33); // 3000 / (93004 − 3000) * 100 = 3.3332… → 2dp
 });

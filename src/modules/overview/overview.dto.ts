@@ -16,9 +16,17 @@ export interface OverviewDTO {
   totals: {
     totalValue: number; // Σ portfolio.totalValue
     pnl24h: number; // aggregate % (guarded divide-by-zero → 0)
-    pnl24hValue: number; // Σ portfolio.pnl24hValue
-    pnlAllTime: number; // aggregate % (legacy netDeposit-based — KEPT, retrofit-27 Augment)
-    pnlAllTimeValue: number; // Σ portfolio.pnlAllTimeValue (legacy netDeposit-based)
+    // retrofit-75 (M16): Σ over the portfolios that actually have a ~24h-old snapshot of
+    // (their current value − that snapshot). A portfolio with no 24h baseline is excluded
+    // from BOTH sides, so its current value can't read as a phantom 24h gain.
+    pnl24hValue: number;
+    // retrofit-75 (R39): canonical all-time — Σ of each portfolio's per-type all-time
+    // (connected → snapshot-vs-earliest, manual → cost-basis unrealized+realized, which
+    // EXCLUDES cost-unknown holdings so a stablecoin-only portfolio nets ~0). pnlAllTime is
+    // recomputed over the implied aggregate base (Σ baseline). Replaces the netDeposit-based
+    // number, which made a cost-unknown opening read as a phantom gain.
+    pnlAllTime: number; // aggregate % (guarded divide-by-zero → 0)
+    pnlAllTimeValue: number; // Σ canonical per-portfolio all-time
     // retrofit-27: average-cost PnL aggregate (additive). allTimePnlValue = unrealized +
     // realized; unrealizedPnlPct is over Σ(costBasis) across all the user's assets.
     unrealizedPnlValue: number;
@@ -49,6 +57,9 @@ export interface OverviewDTO {
     totalValue: number;
     pnl24h: number;
     pnl24hValue: number;
+    // retrofit-75 (R39): canonical per-type all-time — connected → snapshot-vs-earliest,
+    // manual → cost-basis (unrealized+realized / unrealizedPnlPct), which excludes
+    // cost-unknown holdings so a stablecoin manual portfolio reads ~0% not a netDeposit phantom.
     pnlAllTime: number;
     pnlAllTimeValue: number;
     // retrofit-27: average-cost PnL per portfolio (additive).

@@ -18,7 +18,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
 import { getLivePriceMap } from '../../lib/live-price.js';
-import { computeDerived } from '../portfolios/derive.js';
+import { computeDerived, type DerivedFields } from '../portfolios/derive.js';
 import { findPortfoliosByUserId } from '../portfolios/portfolios.repository.js';
 import { slugify } from '../portfolios/slug.js';
 import { findAllAssetsByPortfolioId } from '../assets/assets.repository.js';
@@ -60,6 +60,25 @@ export interface OverviewParams {
 function round(n: number, dp = 2): number {
   const f = 10 ** dp;
   return Math.round(n * f) / f;
+}
+
+/**
+ * retrofit-75 (R39): the canonical all-time PnL for a portfolio. The two portfolio types
+ * measure "all-time" differently and derive.ts already computes BOTH:
+ *   - connected (no trustworthy cost basis from a windowed import) → snapshot-vs-earliest,
+ *     carried in d.pnlAllTimeValue / d.pnlAllTime ("growth since tracking began").
+ *   - manual (has cost basis) → average-cost unrealized + realized (d.allTimePnlValue) over
+ *     Σ(costBasis) (d.unrealizedPnlPct). This EXCLUDES cost-unknown holdings (avgCost null),
+ *     so a stablecoin-only portfolio nets ~0 instead of the netDeposit phantom (value −
+ *     netDeposit read +$1/+33% on 4 USDT when the 4th unit was a cost-unknown opening that
+ *     retrofit-69 correctly left OUT of netDeposit, yet its value was still in totalValue).
+ * Surfaced as the canonical pnlAllTimeValue / pnlAllTime everywhere (per-portfolio DTO +
+ * totals) — the fields the dashboard already reads — so no DTO shape change.
+ */
+function canonicalAllTime(type: string, d: DerivedFields): { value: number; pct: number } {
+  return type === 'connected'
+    ? { value: d.pnlAllTimeValue, pct: d.pnlAllTime }
+    : { value: d.allTimePnlValue, pct: d.unrealizedPnlPct };
 }
 
 // Mirrors analytics.service.ts's GET/parse/recompute pattern: a Redis miss or malformed
@@ -273,38 +292,50 @@ async function buildOverview(
 
   // ---- totals (sum the value fields, recompute aggregate %s) ----
   let totalValue = 0;
+  // retrofit-75 (R39): pnlAllTimeValue sums the CANONICAL per-type all-time (connected →
+  // snapshot-based, manual → cost-basis unrealized+realized), NOT the netDeposit-based
+  // d.pnlAllTimeValue, so a cost-unknown manual holding stops reading as a phantom gain.
+  // costBasisAll below is then Σ(d.totalValue − canonical) = Σ(per-portfolio baseline), so
+  // the recomputed pnlAllTime % is over the implied aggregate base (connected stays its
+  // snapshot %, a stablecoin-only manual contributes ~0, the aggregate sits between).
   let pnlAllTimeValue = 0;
   // retrofit-27 average-cost aggregate. unrealized/realized sum the per-portfolio derived
   // values; the %-base Σ(costBasis) is accumulated in the allocation loop below (it already
   // iterates every asset, and each asset row carries costBasis).
   let unrealizedPnlValue = 0;
   let realizedPnlValue = 0;
-  for (const d of derivedList) {
+  derivedList.forEach((d, i) => {
     totalValue += d.totalValue;
-    pnlAllTimeValue += d.pnlAllTimeValue;
+    pnlAllTimeValue += canonicalAllTime(portfolios[i]!.type.name, d).value;
     unrealizedPnlValue += d.unrealizedPnlValue;
     realizedPnlValue += d.realizedPnlValue;
-  }
+  });
   // Guard divide-by-zero → 0 (never NaN/Infinity), mirroring computePnlPeriod.
   const costBasisAll = totalValue - pnlAllTimeValue;
   const pnlAllTime = costBasisAll === 0 ? 0 : (pnlAllTimeValue / costBasisAll) * 100;
   const allTimePnlValue = unrealizedPnlValue + realizedPnlValue;
 
-  // ---- 24h PnL from the daily snapshot history (retrofit-20) ----
-  // derive.ts can't compute 24h without history, so it hardcodes pnl24h*=0. Recompute
-  // the TOTALS here from BalanceSnapshot: sum each portfolio's most recent snapshot
-  // dated ≤ now−24h → value24hAgo, then pnl24hValue = current total − value24hAgo and
-  // pnl24h = that over the 24h-ago base. If NO portfolio has a snapshot ≥24h old (a
-  // brand-new account) leave 0/0 — the frontend shows +$0.00. Per-portfolio rows keep
-  // derive's 0 here (out of scope, same as pnl7d/pnl30d).
+  // ---- 24h PnL from the daily snapshot history (retrofit-20, fixed retrofit-75 M16) ----
+  // derive.ts can't compute 24h without history, so it hardcodes pnl24h*=0. Recompute the
+  // TOTALS here from BalanceSnapshot. retrofit-75 (M16): the delta MUST be restricted to the
+  // portfolios that actually have a ~24h-old snapshot, on BOTH sides. The prior code summed
+  // the current total of ALL portfolios but only the baselines that existed, so a portfolio
+  // with no 24h-ago snapshot (e.g. a freshly-created manual one) read its WHOLE current value
+  // as a 24h gain (observed totals 24h +$4.04 when the per-portfolio 24h summed to +$0.04).
+  // snaps24hAgo is parallel to portfolios (and to derivedList), so pair each snapshot with its
+  // OWN portfolio's current value and include a portfolio only when it has a baseline. No
+  // baseline anywhere (a brand-new account) → 0/0; the frontend shows +$0.00. Per-portfolio
+  // rows keep derive's 0 here (out of scope, same as pnl7d/pnl30d).
   let value24hAgo = 0;
+  let valueNowWithBaseline = 0;
   let has24hBaseline = false;
-  for (const s of snaps24hAgo) {
-    if (!s) continue;
-    value24hAgo += Number(s.value.toString());
+  snaps24hAgo.forEach((s, i) => {
+    if (!s) return; // no ~24h-old snapshot → exclude this portfolio from BOTH sides
     has24hBaseline = true;
-  }
-  const pnl24hValue = has24hBaseline ? totalValue - value24hAgo : 0;
+    value24hAgo += Number(s.value.toString());
+    valueNowWithBaseline += derivedList[i]!.totalValue;
+  });
+  const pnl24hValue = has24hBaseline ? valueNowWithBaseline - value24hAgo : 0;
   const pnl24h = has24hBaseline && value24hAgo > 0 ? (pnl24hValue / value24hAgo) * 100 : 0;
 
   // ---- per-portfolio rows + allocation/holdings aggregation ----
@@ -371,6 +402,11 @@ async function buildOverview(
         unrealizedCostBasisSum += costBasis;
       }
     }
+    // retrofit-75 (R39): surface the canonical per-type all-time (connected → snapshot-based,
+    // manual → cost-basis), so a cost-unknown manual holding reads ~0% not the netDeposit
+    // phantom. Same fields the dashboard already consumes; the retrofit-27 unrealized/realized
+    // fields below are unchanged.
+    const canon = canonicalAllTime(p.type.name, d);
     return {
       id: p.id,
       name: p.name,
@@ -383,8 +419,8 @@ async function buildOverview(
       totalValue: round(d.totalValue),
       pnl24h: round(d.pnl24h),
       pnl24hValue: round(d.pnl24hValue),
-      pnlAllTime: round(d.pnlAllTime),
-      pnlAllTimeValue: round(d.pnlAllTimeValue),
+      pnlAllTime: round(canon.pct),
+      pnlAllTimeValue: round(canon.value),
       unrealizedPnlValue: round(d.unrealizedPnlValue),
       unrealizedPnlPct: round(d.unrealizedPnlPct),
       realizedPnlValue: round(d.realizedPnlValue),
