@@ -52,3 +52,16 @@ export const UpdateAssetBodySchema = z
 
 export type CreateAssetBody = z.infer<typeof CreateAssetBodySchema>;
 export type UpdateAssetBody = z.infer<typeof UpdateAssetBodySchema>;
+
+// retrofit-87: CSV bulk import of STARTING ASSETS. Envelope only (mode + rows-is-array); each
+// row stays a loose object so a bad cell becomes a precise per-row error rather than failing the
+// whole request. The row cap (TOO_MANY_ROWS), the cost-mode derivation, and the per-row parity
+// check (each row is re-parsed through CreateAssetBodySchema) live in the bulk service.
+export const BulkAssetsBodySchema = z
+  .object({
+    mode: z.enum(['all_or_nothing', 'skip_invalid']),
+    rows: z.array(z.record(z.string(), z.unknown())),
+  })
+  .strict();
+
+export type BulkAssetsBody = z.infer<typeof BulkAssetsBodySchema>;

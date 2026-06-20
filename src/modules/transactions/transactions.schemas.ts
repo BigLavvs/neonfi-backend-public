@@ -123,3 +123,17 @@ export const TransferBodySchema = z
   .strict();
 
 export type TransferBody = z.infer<typeof TransferBodySchema>;
+
+// retrofit-87: CSV bulk import. The ENVELOPE is validated here (mode + rows-is-array); each
+// row stays a loose object so a single bad cell becomes a precise per-row error instead of
+// collapsing the whole request to one VALIDATION_ERROR. The row cap (TOO_MANY_ROWS) and the
+// per-row parity check (each row is re-parsed through CreateTransactionBodySchema as a native
+// transaction) live in the bulk service, not here.
+export const BulkTransactionsBodySchema = z
+  .object({
+    mode: z.enum(['all_or_nothing', 'skip_invalid']),
+    rows: z.array(z.record(z.string(), z.unknown())),
+  })
+  .strict();
+
+export type BulkTransactionsBody = z.infer<typeof BulkTransactionsBodySchema>;

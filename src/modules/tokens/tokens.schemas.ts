@@ -22,3 +22,15 @@ export const TokenHistoryQuerySchema = z.object({
 });
 
 export type TokenHistoryQuery = z.infer<typeof TokenHistoryQuerySchema>;
+
+// retrofit-87: POST /tokens/validate-symbols — the CSV-import preview asks which symbols
+// don't resolve, WITHOUT shipping the whole catalog to the client. Cap the array at 1000
+// (Zod rejects beyond → 400) so a pathological upload can't fan out an unbounded `IN` query;
+// blanks/dupes/casing are normalized in the service.
+export const ValidateSymbolsBodySchema = z
+  .object({
+    symbols: z.array(z.string().max(255)).max(1000, 'at most 1000 symbols per request'),
+  })
+  .strict();
+
+export type ValidateSymbolsBody = z.infer<typeof ValidateSymbolsBodySchema>;

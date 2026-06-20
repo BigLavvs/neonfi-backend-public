@@ -3,9 +3,11 @@ import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 import {
   findManyTokens,
   findTokenById,
+  findExistingTokenSymbols,
   findTokenPriceSnapshotsSince,
   aggregateTokenPriceExtremes,
 } from './tokens.repository.js';
+import { normalizeSymbol } from '../../lib/bulk-import.js';
 import {
   toTokenListDTO,
   toTokenDetailDTO,
@@ -60,6 +62,18 @@ export async function listTokens(
     tokens: items.map((t) => toTokenListDTO(t, priceMap.get(t.symbol))),
     meta: { limit: query.limit, nextCursor },
   };
+}
+
+// retrofit-87: read-only pre-import check for the CSV-import preview. Normalizes the input
+// (trim + upper-case + dedup, drop blanks) so it matches the canonical catalog symbol, then
+// returns the ones that DON'T resolve — upper-cased — so the frontend can flag unknown tokens
+// per-row without holding the catalog client-side. Uses the same Token.symbol resolution as
+// the single transaction/asset create, so a symbol that passes here will import.
+export async function validateSymbols(symbols: string[]): Promise<{ unknown: string[] }> {
+  const normalized = [...new Set(symbols.map(normalizeSymbol).filter((s) => s.length > 0))];
+  if (normalized.length === 0) return { unknown: [] };
+  const found = await findExistingTokenSymbols(normalized);
+  return { unknown: normalized.filter((s) => !found.has(s)) };
 }
 
 export async function getTokenById(id: number): Promise<TokenDetailDTO> {

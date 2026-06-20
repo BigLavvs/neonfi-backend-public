@@ -2,10 +2,40 @@ import { Hono } from 'hono';
 import { ok, err } from '../../lib/envelope.js';
 import type { AuthEnv } from '../auth/middleware.js';
 import { requireAuth } from '../auth/middleware.js';
-import { TokenError, listTokens, getTokenById, getTokenPriceHistory } from './tokens.service.js';
-import { ListTokensQuerySchema, TokenHistoryQuerySchema } from './tokens.schemas.js';
+import {
+  TokenError,
+  listTokens,
+  getTokenById,
+  getTokenPriceHistory,
+  validateSymbols,
+} from './tokens.service.js';
+import {
+  ListTokensQuerySchema,
+  TokenHistoryQuerySchema,
+  ValidateSymbolsBodySchema,
+} from './tokens.schemas.js';
 
 const router = new Hono<AuthEnv>();
+
+// ---------------------------------------------------------------------------
+// POST /tokens/validate-symbols — CSV-import preview pre-check (retrofit-87)
+// ---------------------------------------------------------------------------
+// Body { symbols: string[] } → { unknown: string[] }. Authed; no rate-limit beyond the
+// global. A POST so it never collides with the GET /:id routes below.
+
+router.post('/validate-symbols', requireAuth, async (c) => {
+  const rawBody = await c.req.json().catch(() => null);
+  if (rawBody === null) {
+    return c.json(err('VALIDATION_ERROR', 'Request body required'), 400);
+  }
+  const parsed = ValidateSymbolsBodySchema.safeParse(rawBody);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return c.json(err('VALIDATION_ERROR', issue?.message ?? 'Validation failed'), 400);
+  }
+  const result = await validateSymbols(parsed.data.symbols);
+  return c.json(ok(result), 200);
+});
 
 // ---------------------------------------------------------------------------
 // GET /tokens — cursor-paginated, searchable, plan-filtered list

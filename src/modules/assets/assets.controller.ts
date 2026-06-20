@@ -12,7 +12,9 @@ import {
   updateAsset,
   removeAsset,
 } from './assets.service.js';
-import { CreateAssetBodySchema, UpdateAssetBodySchema } from './assets.schemas.js';
+import { CreateAssetBodySchema, UpdateAssetBodySchema, BulkAssetsBodySchema } from './assets.schemas.js';
+import { bulkCreateAssets } from './assets.bulk.js';
+import { BulkError } from '../../lib/bulk-import.js';
 
 type AssetEnv = AuthEnv & { Variables: { portfolio: PortfolioWithRelations } };
 
@@ -68,6 +70,42 @@ router.post('', async (c) => {
   } catch (e) {
     if (e instanceof AssetError) {
       return c.json(assetErr(e), e.statusCode as 400 | 403 | 409);
+    }
+    throw e;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /portfolios/:portfolioId/assets/bulk (retrofit-87) — CSV bulk import
+// ---------------------------------------------------------------------------
+// Manual portfolios only. Body { mode, rows[] }. Literal path — no conflict with POST ''.
+// all_or_nothing failure → 400 carrying both a standard error message and the per-row
+// errors in `data` (see DECISIONS-retrofit-87).
+
+router.post('/bulk', async (c) => {
+  const rawBody = await c.req.json().catch(() => null);
+  if (rawBody === null) {
+    return c.json(err('VALIDATION_ERROR', 'Request body required'), 400);
+  }
+  const parsed = BulkAssetsBodySchema.safeParse(rawBody);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return c.json(err('VALIDATION_ERROR', issue?.message ?? 'Validation failed'), 400);
+  }
+  const user = c.get('user');
+  const portfolio = c.get('portfolio');
+  try {
+    const result = await bulkCreateAssets(user.id, portfolio, parsed.data);
+    return c.json(ok(result), 200);
+  } catch (e) {
+    if (e instanceof BulkError) {
+      if (e.errors) {
+        return c.json(
+          { error: { code: e.code, message: e.message }, data: { imported: 0, skipped: 0, errors: e.errors } },
+          400,
+        );
+      }
+      return c.json(err(e.code, e.message), e.statusCode as 400);
     }
     throw e;
   }

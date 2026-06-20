@@ -18,7 +18,10 @@ import {
   CreateTransactionBodySchema,
   UpdateTransactionBodySchema,
   TransferBodySchema,
+  BulkTransactionsBodySchema,
 } from './transactions.schemas.js';
+import { bulkCreateTransactions } from './transactions.bulk.js';
+import { BulkError } from '../../lib/bulk-import.js';
 import { importMoreTransfers } from '../wallet-data/sync.js';
 
 type TxEnv = AuthEnv & { Variables: { portfolio: PortfolioWithRelations } };
@@ -67,6 +70,42 @@ router.post('', async (c) => {
   } catch (e) {
     if (e instanceof TransactionError) {
       return c.json(err(e.code, e.message), e.statusCode as 400 | 403 | 409);
+    }
+    throw e;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /portfolios/:portfolioId/transactions/bulk (retrofit-87) — CSV bulk import
+// ---------------------------------------------------------------------------
+// Manual portfolios only. Body { mode, rows[] }. Literal path — no conflict with POST ''.
+// On an all_or_nothing validation failure we return 400 carrying BOTH a standard error
+// (so the frontend's api.post surfaces a message) AND the full per-row errors in `data`
+// (so any client can map them back to cells) — see DECISIONS-retrofit-87.
+
+router.post('/bulk', async (c) => {
+  const rawBody = await c.req.json().catch(() => null);
+  if (rawBody === null) {
+    return c.json(err('VALIDATION_ERROR', 'Request body required'), 400);
+  }
+  const parsed = BulkTransactionsBodySchema.safeParse(rawBody);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return c.json(err('VALIDATION_ERROR', issue?.message ?? 'Validation failed'), 400);
+  }
+  const portfolio = c.get('portfolio');
+  try {
+    const result = await bulkCreateTransactions(portfolio, parsed.data);
+    return c.json(ok(result), 200);
+  } catch (e) {
+    if (e instanceof BulkError) {
+      if (e.errors) {
+        return c.json(
+          { error: { code: e.code, message: e.message }, data: { imported: 0, skipped: 0, errors: e.errors } },
+          400,
+        );
+      }
+      return c.json(err(e.code, e.message), e.statusCode as 400);
     }
     throw e;
   }

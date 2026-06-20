@@ -33,6 +33,19 @@ export async function findTokenById(id: number): Promise<Token | null> {
   return prisma.token.findUnique({ where: { id } });
 }
 
+// retrofit-87: which of the given (already canonical, upper-cased) symbols exist in the
+// catalog — returned as a Set for O(1) membership. Resolves by the same unique Token.symbol
+// the single transaction/asset create uses, so the validate-symbols preview and the actual
+// bulk import agree on what "unknown" means.
+export async function findExistingTokenSymbols(symbols: string[]): Promise<Set<string>> {
+  if (symbols.length === 0) return new Set();
+  const rows = await prisma.token.findMany({
+    where: { symbol: { in: symbols } },
+    select: { symbol: true },
+  });
+  return new Set(rows.map((r) => r.symbol));
+}
+
 // retrofit-21: price-history rows for one token within the look-back window, oldest
 // first (the chart plots left→right). Decimal price is converted to number here so the
 // service stays Decimal-free, matching how the token DTOs surface currentPrice.
