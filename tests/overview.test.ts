@@ -77,8 +77,8 @@ interface OverviewData {
       realizedPnl: number;
     }>;
   }>;
-  valueHistory: Array<{ date: string; value: number }>;
-  connectedValueHistory: Array<{ date: string; value: number }>; // retrofit-56
+  valueHistory: Array<{ date: string; value: number; approx: boolean }>; // retrofit-81: per-point provenance
+  connectedValueHistory: Array<{ date: string; value: number; approx: boolean }>; // retrofit-56 + retrofit-81
   allocation: Array<{ symbol: string; value: number; percentage: number }>;
   // retrofit-28: aggregate holdings carry cost fields too.
   holdings: Array<{
@@ -416,9 +416,9 @@ it('373: valueHistory forward-fills each portfolio across the union of snapshot 
   // 06-11: P1 forward-fills its 06-10 value (100), P2=50      => 150
   // 06-12: P1=120, P2 forward-fills its 06-11 value (50)      => 170
   expect(d.valueHistory).toEqual([
-    { date: '2026-06-10', value: 100 },
-    { date: '2026-06-11', value: 150 },
-    { date: '2026-06-12', value: 170 },
+    { date: '2026-06-10', value: 100, approx: false },
+    { date: '2026-06-11', value: 150, approx: false },
+    { date: '2026-06-12', value: 170, approx: false },
   ]);
 });
 
@@ -440,8 +440,8 @@ it('374: ?days=2 keeps only the last two snapshot dates (forward-fill preserved)
   const d = await getData(res);
 
   expect(d.valueHistory).toEqual([
-    { date: '2026-06-11', value: 150 },
-    { date: '2026-06-12', value: 170 },
+    { date: '2026-06-11', value: 150, approx: false },
+    { date: '2026-06-12', value: 170, approx: false },
   ]);
 });
 
@@ -465,13 +465,13 @@ it('r56: connectedValueHistory contains only connected portfolios; valueHistory 
 
   // Aggregate (all): 06-10 = 100 + 30 = 130; 06-11 = manual fwd-fill 100 + connected 40 = 140.
   expect(d.valueHistory).toEqual([
-    { date: '2026-06-10', value: 130 },
-    { date: '2026-06-11', value: 140 },
+    { date: '2026-06-10', value: 130, approx: false },
+    { date: '2026-06-11', value: 140, approx: false },
   ]);
   // Connected-only: 06-10 = 30; 06-11 = 40. The manual portfolio contributes nothing here.
   expect(d.connectedValueHistory).toEqual([
-    { date: '2026-06-10', value: 30 },
-    { date: '2026-06-11', value: 40 },
+    { date: '2026-06-10', value: 30, approx: false },
+    { date: '2026-06-11', value: 40, approx: false },
   ]);
 });
 
@@ -483,8 +483,65 @@ it('r56: connectedValueHistory is [] when the user has only manual portfolios', 
 
   const res = await overviewGet(cookies);
   const d = await getData(res);
-  expect(d.valueHistory).toEqual([{ date: '2026-06-10', value: 100 }]);
+  expect(d.valueHistory).toEqual([{ date: '2026-06-10', value: 100, approx: false }]);
   expect(d.connectedValueHistory).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-81 — value-history KEEPS the backfilled (approx) timeline and flags it, instead of
+// retrofit-79 §3's filter that DELETED the connected wallet's entire multi-year history.
+// ---------------------------------------------------------------------------
+
+it('r81: value-history retains approx backfill points (full timeline) and flags them per-point; real points stay approx=false', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const connected = await createConnectedPortfolio(userId, 'Connected');
+  // Two old backfilled ESTIMATE points (the multi-year history retrofit-79 §3 wrongly dropped),
+  // then a recent REAL daily observation. retrofit-81 must serve ALL three, tagging provenance.
+  await seedSnapshot(connected, userId, '2024-01-01', 200, { approx: true });
+  await seedSnapshot(connected, userId, '2024-06-01', 150, { approx: true });
+  await seedSnapshot(connected, userId, '2026-06-19', 12, { approx: false });
+
+  const res = await overviewGet(cookies, '?days=1095');
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // The full span is present (NOT collapsed to the single real point), each carrying `approx`.
+  expect(d.valueHistory).toEqual([
+    { date: '2024-01-01', value: 200, approx: true },
+    { date: '2024-06-01', value: 150, approx: true },
+    { date: '2026-06-19', value: 12, approx: false },
+  ]);
+  expect(d.connectedValueHistory).toEqual([
+    { date: '2024-01-01', value: 200, approx: true },
+    { date: '2024-06-01', value: 150, approx: true },
+    { date: '2026-06-19', value: 12, approx: false },
+  ]);
+});
+
+it('r81: a manual portfolio aggregated with a connected one only taints the dates it estimates; a real sibling snapshot keeps that date approx=false', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const connected = await createConnectedPortfolio(userId, 'Connected');
+  const manual = await createManualPortfolio(userId, 'Manual');
+  // Connected: an approx point on 06-10, then a real point on 06-12.
+  await seedSnapshot(connected, userId, '2026-06-10', 200, { approx: true });
+  await seedSnapshot(connected, userId, '2026-06-12', 100, { approx: false });
+  // Manual: a real point on 06-11 only (forward-fills onward); always approx=false.
+  await seedSnapshot(manual, userId, '2026-06-11', 50, { approx: false });
+
+  const res = await overviewGet(cookies, '?days=1095');
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  // 06-10: connected approx 200 (manual no snapshot yet → 0, doesn't taint)          => 200 approx
+  // 06-11: connected fwd-fills its approx 200 + manual real 50                         => 250 approx
+  // 06-12: connected real 100 + manual fwd-fills real 50 (no approx contributor left)  => 150 real
+  expect(d.valueHistory).toEqual([
+    { date: '2026-06-10', value: 200, approx: true },
+    { date: '2026-06-11', value: 250, approx: true },
+    { date: '2026-06-12', value: 150, approx: false },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -757,15 +814,15 @@ it('r67: leading $0 points trimmed from valueHistory/connectedValueHistory; inte
 
   // The two leading $0 days are dropped; the interior 06-09 $0 stays; series starts at funding.
   expect(d.connectedValueHistory).toEqual([
-    { date: '2026-06-08', value: 100 },
-    { date: '2026-06-09', value: 0 },
-    { date: '2026-06-10', value: 120 },
+    { date: '2026-06-08', value: 100, approx: false },
+    { date: '2026-06-09', value: 0, approx: false },
+    { date: '2026-06-10', value: 120, approx: false },
   ]);
   // Aggregate valueHistory (only this connected portfolio here) trims identically.
   expect(d.valueHistory).toEqual([
-    { date: '2026-06-08', value: 100 },
-    { date: '2026-06-09', value: 0 },
-    { date: '2026-06-10', value: 120 },
+    { date: '2026-06-08', value: 100, approx: false },
+    { date: '2026-06-09', value: 0, approx: false },
+    { date: '2026-06-10', value: 120, approx: false },
   ]);
 });
 

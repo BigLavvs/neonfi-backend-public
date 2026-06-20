@@ -42,7 +42,11 @@ export interface PerformanceDTO {
   portfolioId: number;
   // ASC by date; `date` is a bare YYYY-MM-DD calendar day. AreaChart consumes the
   // points left-to-right, so ascending is the natural order.
-  snapshots: Array<{ date: string; value: number }>;
+  // retrofit-81 (reverts retrofit-79 §3): approx (backfilled-estimate) snapshots are no longer
+  // omitted — every recorded point is returned, each carrying `approx` so the chart can draw the
+  // estimated portion distinctly instead of deleting the timeline. `approx=false` for real daily
+  // observations (manual portfolios are all false by default).
+  snapshots: Array<{ date: string; value: number; approx: boolean }>;
 }
 
 export interface HoldingsDTO {

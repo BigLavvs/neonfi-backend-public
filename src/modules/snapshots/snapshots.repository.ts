@@ -63,17 +63,20 @@ export async function findEarliestSnapshotByPortfolio(
 // The AreaChart consumes points left-to-right, so ascending order is the natural fit (the
 // paginated DESC list above serves a different, table-style consumer).
 //
-// retrofit-79 (§3): filters to approx=false — the connected initial-sync backfill writes
-// ESTIMATE points (historical balance × ~today's price) marked approx=true, which charted as a
-// fabricated cliff ($223→$169→$12). PnL endpoints give a figure, not a daily series, so there's
-// no accurate history to substitute → we omit the estimate and serve only REAL observed points
-// (it grows daily). Manual snapshots are approx=false by default, so they're unaffected.
+// retrofit-81 (reverts retrofit-79 §3): serve ALL snapshots again — the approx=false filter
+// dropped the connected wallet's entire multi-year backfill (all approx=true), collapsing the
+// aggregate value chart from ~3 years to the manual portfolio's recent creation date and
+// regressing retrofit-72's union timeline. Omitting the estimate to hide a misleading SHAPE also
+// deleted the TIMELINE the user relies on. The right move is to KEEP every point and MARK the
+// estimated ones (the `approx` flag is now selected and surfaced per-point so the chart can render
+// the backfilled segment distinctly). The SHORT-TERM baseline read (findSnapshotAtOrBefore) keeps
+// its approx=false filter — that's retrofit-77/78 and is a different, still-correct concern.
 export async function findAllSnapshotsAscByPortfolio(
   portfolioId: number,
-): Promise<Array<{ snapshotDate: Date; value: Prisma.Decimal }>> {
+): Promise<Array<{ snapshotDate: Date; value: Prisma.Decimal; approx: boolean }>> {
   return prisma.balanceSnapshot.findMany({
-    where: { portfolioId, approx: false },
+    where: { portfolioId },
     orderBy: { snapshotDate: 'asc' },
-    select: { snapshotDate: true, value: true },
+    select: { snapshotDate: true, value: true, approx: true },
   });
 }

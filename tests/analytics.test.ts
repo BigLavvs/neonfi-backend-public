@@ -426,33 +426,43 @@ it('329: GET /performance happy path — snapshots ASC by date, each { date, val
   expect(res.status).toBe(200);
 
   const json = (await res.json()) as {
-    data: { portfolioId: number; snapshots: Array<{ date: string; value: number }> };
+    data: {
+      portfolioId: number;
+      snapshots: Array<{ date: string; value: number; approx: boolean }>;
+    };
   };
   expect(json.data.portfolioId).toBe(portfolioId);
   expect(json.data.snapshots.map((s) => s.date)).toEqual(['2026-06-10', '2026-06-11', '2026-06-12']);
   expect(json.data.snapshots.map((s) => s.value)).toEqual([100, 110, 120]);
-  // Each item has exactly { date, value }
+  // retrofit-81: each item has exactly { date, value, approx }; manual snapshots are all approx=false.
   for (const s of json.data.snapshots) {
-    expect(Object.keys(s).sort()).toEqual(['date', 'value'].sort());
+    expect(Object.keys(s).sort()).toEqual(['approx', 'date', 'value'].sort());
     expect(typeof s.value).toBe('number');
+    expect(s.approx).toBe(false);
     expect(s.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   }
 });
 
-it('r79-§3: GET /performance OMITS approx (estimate) snapshots — only real observed points', async () => {
+it('r81 (reverts r79-§3): GET /performance INCLUDES approx (estimate) snapshots, flagged per-point — full timeline kept', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   await createProSub(userId);
   const portfolioId = await createManualPortfolio(userId);
-  // A real observed point and a backfilled ESTIMATE (approx) on the same chart. §3: the estimate
-  // (which charted the fake cliff for connected wallets) must be omitted — real points only.
+  // A real observed point and a backfilled ESTIMATE (approx) on the same chart. retrofit-81: the
+  // estimate must be KEPT (so the timeline isn't deleted) and TAGGED approx=true so the frontend
+  // can draw it distinctly — the opposite of retrofit-79 §3's omit-the-estimate behavior.
   await seedSnapshot(portfolioId, userId, '2026-06-10', 100); // real
   await seedSnapshot(portfolioId, userId, '2026-06-11', 999, { approx: true }); // estimate
 
   const res = await aGet(portfolioId, '/performance', cookies);
   expect(res.status).toBe(200);
-  const json = (await res.json()) as { data: { snapshots: Array<{ date: string; value: number }> } };
-  expect(json.data.snapshots).toEqual([{ date: '2026-06-10', value: 100 }]);
+  const json = (await res.json()) as {
+    data: { snapshots: Array<{ date: string; value: number; approx: boolean }> };
+  };
+  expect(json.data.snapshots).toEqual([
+    { date: '2026-06-10', value: 100, approx: false },
+    { date: '2026-06-11', value: 999, approx: true },
+  ]);
 });
 
 it('330: GET /performance on portfolio with no snapshots → 200, empty snapshots array', async () => {

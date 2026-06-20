@@ -130,9 +130,12 @@ async function buildPerformance(portfolioId: number): Promise<PerformanceDTO> {
   const snapshots = await findAllSnapshotsAscByPortfolio(portfolioId);
   return {
     portfolioId,
+    // retrofit-81: serve ALL recorded points (no approx filter) and tag each with its provenance
+    // so the chart spans the portfolio's full life with the estimated portion marked, not deleted.
     snapshots: snapshots.map((s) => ({
       date: s.snapshotDate.toISOString().slice(0, 10),
       value: round(Number(s.value.toString())),
+      approx: s.approx === true,
     })),
   };
 }
