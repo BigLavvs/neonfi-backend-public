@@ -394,7 +394,10 @@ model Transaction {
   from            String?                  @db.VarChar(255)
   to              String?                  @db.VarChar(255)
   gasFee          Decimal?                 @db.Decimal(20, 8)
-  transactionHash String?                  @unique @db.VarChar(255)
+  // retrofit-74 (§4): the hash is unique PER PORTFOLIO, not globally (see @@unique below).
+  // A wallet re-added in a second portfolio (or shared across two) must import its transfers
+  // into each rather than being globally dedup-blocked after the first import.
+  transactionHash String?                  @db.VarChar(255)
   timestamp       DateTime
   // NOTE (schema delta beyond docx — Idowu owns the docx edit, retrofit-7): free-text
   // user note attached to a manually-logged transaction (frontend AddTransactionModal).
@@ -413,6 +416,10 @@ model Transaction {
 
   createdAt       DateTime                 @default(now())
 
+  // retrofit-74 (§4): per-portfolio hash uniqueness (was a global @unique on transactionHash).
+  // Null hashes (manual transactions) stay distinct under a Postgres unique index, so multiple
+  // hash-less rows per portfolio are still allowed.
+  @@unique([portfolioId, transactionHash])
   @@index([portfolioId])
   @@index([typeId])
   @@index([directionId])

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { ok, err } from '../../lib/envelope.js';
 import type { AuthEnv } from '../auth/middleware.js';
 import { requireAuth } from '../auth/middleware.js';
+import { requirePlan } from '../auth/plan.js';
 import { findPortfolioById } from '../portfolios/portfolios.repository.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import {
@@ -142,14 +143,16 @@ router.get('', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /portfolios/:portfolioId/transactions/sync-more  (retrofit-49 §6)
+// GET /portfolios/:portfolioId/transactions/sync-more  (retrofit-49 §6, Pro-gated retrofit-74 §3)
 // ---------------------------------------------------------------------------
-// "Load more": import the next page (~100) of the connected wallet's real transfers using
-// the portfolio's stored provider cursor, advance the cursor, and report what was imported.
-// Authed + ownership-gated by the middleware above. A manual portfolio (or a connected one
-// with no remaining cursor) returns { imported: 0, nextCursor: null }. Registered BEFORE the
-// dynamic GET '/:id' so the literal path isn't captured as an id.
-router.get('/sync-more', async (c) => {
+// "Load more": import the next page (50, retrofit-74 §2) of the connected wallet's real transfers
+// using the portfolio's stored provider cursor, advance the cursor, and report what was imported.
+// Authed + ownership-gated by the middleware above. retrofit-74 (§3): load-more is a Pro feature —
+// requirePlan(['pro']) refuses a free user with 403 PLAN_LIMIT_REACHED (the frontend also hides the
+// button for free users). A manual portfolio (or a connected one with no remaining cursor) returns
+// { imported: 0, nextCursor: null }. Registered BEFORE the dynamic GET '/:id' so the literal path
+// isn't captured as an id (the Pro gate runs after the *-mounted auth + ownership middleware).
+router.get('/sync-more', requirePlan(['pro']), async (c) => {
   const portfolio = c.get('portfolio');
   const result = await importMoreTransfers(portfolio.id);
   return c.json(ok(result), 200);

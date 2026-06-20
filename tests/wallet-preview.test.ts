@@ -514,8 +514,9 @@ it('414: an NFT transfer creates an nft transaction + an Nft row; current NFT ho
   expect(nfts[1]!.description).toBeNull();
 });
 
-it('415: sync-more imports the next page using the stored cursor and advances/clears it', async () => {
-  const { cookie } = await registerAndLogin();
+it('415: sync-more (Pro) imports the next page using the stored cursor and advances/clears it', async () => {
+  const { cookie, userId } = await registerAndLogin();
+  await setUserPro(userId); // retrofit-74 (§3): load-more is Pro-only.
   const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
   const catalog = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
 
@@ -554,7 +555,31 @@ it('415: sync-more imports the next page using the stored cursor and advances/cl
   expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } })).syncCursor).toBeNull();
 });
 
-it('416: overview transactionCount = imported DB rows (headline); connected on-chain total is a separate stat (retrofit-73 H10)', async () => {
+it('415b: sync-more is refused for a free user (load-more is Pro-only) — retrofit-74 §3', async () => {
+  const { cookie } = await registerAndLogin(); // free sub by default
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const catalog = await prisma.token.findFirstOrThrow({ orderBy: { id: 'asc' } });
+
+  // A connected portfolio with a stored cursor (so the only thing stopping load-more is the plan).
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: catalog.symbol, nativeBalance: 1, totalUsd: 1000, tokenCount: 1,
+    tokens: [{ symbol: catalog.symbol, name: catalog.name, contractAddress: null, balance: 1, decimals: 18, usdPrice: 1000, usdValue: 1000, isNative: true }],
+    provider: 'moralis',
+  });
+  fetchTransferPageMock.mockResolvedValue({ transfers: [], nextCursor: 'CURSOR2', totalCount: null });
+
+  const created = await portPost('', { name: 'Free Wallet', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  const portfolioId = (await created.json()).data.portfolio.id as number;
+  expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } })).syncCursor).toBe('CURSOR2');
+
+  const res = await syncMoreGet(portfolioId, cookie);
+  expect(res.status).toBe(403);
+  expect((await res.json()).error.code).toBe('PLAN_LIMIT_REACHED');
+  // No-op: nothing imported, the cursor is untouched.
+  expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: portfolioId } })).syncCursor).toBe('CURSOR2');
+});
+
+it('416: overview transactionCount = connected on-chain total + manual DB rows (retrofit-74 §1)', async () => {
   const { cookie, userId } = await registerAndLogin();
   // Upgrade to Pro so the user can hold both a connected and a manual portfolio.
   const pro = await prisma.plan.findUniqueOrThrow({ where: { name: 'pro' } });
@@ -592,11 +617,11 @@ it('416: overview transactionCount = imported DB rows (headline); connected on-c
   const res = await overviewGet(cookie);
   expect(res.status).toBe(200);
   const d = (await res.json()).data;
-  // retrofit-73 (H10): the headline counts the rows the list can show — 0 (connected, no imported
-  // rows) + 3 (manual) = 3 — never 137 next to a 3-row list. The connected wallet's real on-chain
-  // total (137) is surfaced separately as onChainTransactionCount.
-  expect(d.totals.transactionCount).toBe(3);
-  expect(d.totals.onChainTransactionCount).toBe(137);
+  // retrofit-74 (§1, reverts H10): the REAL total — 137 (connected on-chain) + 3 (manual DB rows)
+  // = 140. The connected portfolio's own DB rows (0 here) are not added on top; externalTxCount IS
+  // its total. One honest number; the separate onChainTransactionCount is gone.
+  expect(d.totals.transactionCount).toBe(140);
+  expect(d.totals.onChainTransactionCount).toBeUndefined();
 });
 
 // ---------------------------------------------------------------------------

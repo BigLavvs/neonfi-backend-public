@@ -52,8 +52,10 @@ import {
 } from './index.js';
 import type { WalletNftHolding, WalletTransfer } from './types.js';
 
-// How many transfers to pull per page (initial sync + each "load more").
-const PAGE_LIMIT = 100;
+// How many transfers to pull per page (initial sync + resync + each "load more").
+// retrofit-74 (§2): 50 (was 100) — the initial sync seeds the latest 50 and each Pro "load more"
+// pulls the next 50 via the stored cursor.
+const PAGE_LIMIT = 50;
 // retrofit-60: how many days of daily value history to backfill into BalanceSnapshot on (re)sync.
 // Up to ~3 years now that the one-call providers (Zerion/Mobula) reach multi-year in ONE call.
 const VALUE_HISTORY_DAYS = 1095;

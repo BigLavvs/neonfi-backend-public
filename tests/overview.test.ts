@@ -53,7 +53,6 @@ interface OverviewData {
     pnlAllTimeValue: number;
     portfolioCount: number;
     transactionCount: number;
-    onChainTransactionCount: number;
   };
   portfolios: Array<{
     id: number;
@@ -166,7 +165,13 @@ async function createManualPortfolio(
 }
 
 // retrofit-56: a connected portfolio (needs a chain FK + walletAddress for type='connected').
-async function createConnectedPortfolio(userId: number, name = 'C'): Promise<number> {
+// retrofit-74: walletAddress is parameterized so the dedupe test can give two portfolios the
+// SAME wallet (externalTxCount counted once) vs DIFFERENT wallets (counted per portfolio).
+async function createConnectedPortfolio(
+  userId: number,
+  name = 'C',
+  walletAddress = `0x${'a'.repeat(40)}`,
+): Promise<number> {
   const type = await prisma.portfolioType.findUniqueOrThrow({ where: { name: 'connected' } });
   const chain = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
   const p = await prisma.portfolio.create({
@@ -175,7 +180,7 @@ async function createConnectedPortfolio(userId: number, name = 'C'): Promise<num
       name,
       typeId: type.id,
       chainId: chain.id,
-      walletAddress: `0x${'a'.repeat(40)}`,
+      walletAddress,
     },
   });
   return p.id;
@@ -314,7 +319,6 @@ it('371: empty user (no portfolios) → 200, all totals 0, all arrays empty (NOT
     allTimePnlValue: 0,
     portfolioCount: 0,
     transactionCount: 0,
-    onChainTransactionCount: 0, // retrofit-73 (H10)
   });
   expect(d.portfolios).toEqual([]);
   expect(d.valueHistory).toEqual([]);
@@ -545,12 +549,12 @@ it('375: recentTransactions = most recent txLimit across all portfolios (desc); 
   expect(d.recentTransactions[1]!.portfolioId).toBe(p1);
 });
 
-it('r73-txcount: headline transactionCount = imported rows; connected on-chain total is a separate stat', async () => {
+it('r74-txcount: transactionCount = connected on-chain total (externalTxCount) + manual DB rows', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const manual = await createManualPortfolio(userId, 'M');
   const connected = await createConnectedPortfolio(userId, 'C');
-  // The connected wallet reports 421 on-chain txns, but only 3 were imported as rows.
+  // The connected wallet reports 421 on-chain txns; only 3 were imported as rows.
   await prisma.portfolio.update({ where: { id: connected }, data: { externalTxCount: 421 } });
   await seedNativeTx(manual, '2026-01-01T00:00:00.000Z');
   await seedNativeTx(manual, '2026-01-02T00:00:00.000Z');
@@ -562,10 +566,35 @@ it('r73-txcount: headline transactionCount = imported rows; connected on-chain t
   expect(res.status).toBe(200);
   const d = await getData(res);
 
-  // retrofit-73 (H10): headline = the 5 rows the list can actually show, NOT 421.
-  expect(d.totals.transactionCount).toBe(5);
-  // The on-chain total is surfaced separately.
-  expect(d.totals.onChainTransactionCount).toBe(421);
+  // retrofit-74 (§1, reverts H10): the REAL total — 421 (connected on-chain) + 2 (manual DB
+  // rows) = 423. The connected portfolio's own DB rows (3) are NOT added on top — externalTxCount
+  // already IS its total. One honest number; no separate onChainTransactionCount.
+  expect(d.totals.transactionCount).toBe(423);
+  expect((d.totals as Record<string, unknown>).onChainTransactionCount).toBeUndefined();
+});
+
+it('r74-dedupe: the SAME wallet in two portfolios is not double-counted; distinct wallets are', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  // Two connected portfolios sharing ONE wallet address, each carrying that wallet's 100-tx total.
+  const sameWallet = `0x${'b'.repeat(40)}`;
+  const c1 = await createConnectedPortfolio(userId, 'C1', sameWallet);
+  const c2 = await createConnectedPortfolio(userId, 'C2', sameWallet);
+  await prisma.portfolio.update({ where: { id: c1 }, data: { externalTxCount: 100 } });
+  await prisma.portfolio.update({ where: { id: c2 }, data: { externalTxCount: 100 } });
+
+  // Counted once for the shared wallet (100), not 200.
+  const shared = await getData(await overviewGet(cookies));
+  expect(shared.totals.transactionCount).toBe(100);
+
+  // A THIRD connected portfolio on a DIFFERENT wallet adds its own total. Flush the per-user
+  // overview cache first (60s TTL) so the second read reflects the new portfolio.
+  const c3 = await createConnectedPortfolio(userId, 'C3', `0x${'c'.repeat(40)}`);
+  await prisma.portfolio.update({ where: { id: c3 }, data: { externalTxCount: 30 } });
+  const keys = await redis.keys('overview:*');
+  if (keys.length > 0) await redis.del(keys);
+  const both = await getData(await overviewGet(cookies));
+  expect(both.totals.transactionCount).toBe(130); // 100 (shared, once) + 30 (distinct wallet)
 });
 
 // ---------------------------------------------------------------------------

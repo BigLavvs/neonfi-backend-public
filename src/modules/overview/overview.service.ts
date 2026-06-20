@@ -98,7 +98,6 @@ function emptyOverview(): OverviewAggregate {
       allTimePnlValue: 0,
       portfolioCount: 0,
       transactionCount: 0,
-      onChainTransactionCount: 0,
     },
     portfolios: [],
     valueHistory: [],
@@ -251,16 +250,24 @@ async function buildOverview(
   const allSymbols = assetsList.flat().map((a) => a.token.symbol);
   const liveMap = await getLivePriceMap(allSymbols);
 
-  // retrofit-73 (H10): the headline "Transactions" = the imported/DB rows the list can show, so
-  // it never reads 421 next to a 17-row list. The connected wallets' real on-chain total
-  // (externalTxCount) is surfaced separately as onChainTransactionCount (a clearly-labelled stat),
-  // not folded into the headline.
+  // retrofit-74 (§1, reverts retrofit-73 H10): the headline "Transactions" is the wallet's REAL
+  // total — a connected portfolio shows its provider-reported on-chain total (externalTxCount,
+  // resolved at sync time by resolveExternalTxCount) and a manual portfolio shows its DB row
+  // count. The H10 split (imported-rows headline + a separate onChainTransactionCount) understated
+  // real activity (17 vs ~420) and is dropped: one honest number, no dual count. The table is
+  // paginated (load-more, Pro) so the list can reach the rest. Dedupe externalTxCount by wallet
+  // address so the SAME wallet connected in two portfolios isn't double-counted (each reports the
+  // same on-chain total). Manual / connected-without-a-provider-total fall back to the DB rows.
   let transactionCount = 0;
-  let onChainTransactionCount = 0;
+  const countedWallets = new Set<string>();
   for (const p of portfolios) {
-    transactionCount += dbTxCountByPortfolio.get(p.id) ?? 0;
     if (p.type.name === 'connected' && p.externalTxCount != null) {
-      onChainTransactionCount += p.externalTxCount;
+      const walletKey = (p.walletAddress ?? '').toLowerCase();
+      if (walletKey && countedWallets.has(walletKey)) continue; // same wallet already counted
+      if (walletKey) countedWallets.add(walletKey);
+      transactionCount += p.externalTxCount;
+    } else {
+      transactionCount += dbTxCountByPortfolio.get(p.id) ?? 0;
     }
   }
 
@@ -447,7 +454,6 @@ async function buildOverview(
       allTimePnlValue: round(allTimePnlValue),
       portfolioCount: portfolios.length,
       transactionCount,
-      onChainTransactionCount,
     },
     portfolios: portfoliosDTO,
     valueHistory,

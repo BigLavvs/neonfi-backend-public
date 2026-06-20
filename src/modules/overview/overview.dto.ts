@@ -26,12 +26,12 @@ export interface OverviewDTO {
     realizedPnlValue: number;
     allTimePnlValue: number;
     portfolioCount: number;
-    // retrofit-73 (H10): transactionCount is the number of transactions the list can actually
-    // show (imported/DB rows) so the headline matches the visible list. onChainTransactionCount
-    // is the separate, clearly-labelled connected-wallet on-chain total (Σ externalTxCount) — it
-    // is NOT what the list renders, so it gets its own stat instead of inflating "Transactions".
-    transactionCount: number; // displayable rows across all the user's portfolios
-    onChainTransactionCount: number; // connected wallets' real on-chain total (separate stat)
+    // retrofit-74 (§1, reverts retrofit-73 H10): the wallet's REAL transaction total — each
+    // connected portfolio's provider-reported on-chain total (externalTxCount, deduped by wallet
+    // address) plus each manual portfolio's DB row count. One honest number; the H10 split into a
+    // separate onChainTransactionCount is removed. The transaction table is paginated (load-more,
+    // Pro) so the list can reach beyond the first page.
+    transactionCount: number;
   };
   portfolios: Array<{
     id: number;
