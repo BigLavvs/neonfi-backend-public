@@ -140,6 +140,14 @@ const schema = z
     // renders). Lower it for a faster keyless run. Default 250.
     REAL_HISTORY_LIMIT: z.coerce.number().int().min(1).default(250),
 
+    // --- NFT spam: behavioral bulk signal (retrofit-86, H13.1) ---
+    // A non-allowlisted contract held this many times in ONE wallet is treated as a bulk airdrop
+    // (e.g. "Hefty Presents" ×17). Default 10 clears the observed legit max in the demo wallet (4)
+    // with wide margin so a normal collector is never hidden; the Show-spam toggle + per-NFT manual
+    // override (spamOverride) are the escape hatches for the residual edge case. Provider flags +
+    // curated blocklist are PRIMARY; this is a SECONDARY, allowlist-guarded signal.
+    NFT_BULK_SPAM_MIN: z.coerce.number().int().min(2).default(10),
+
     // --- Email ---
     RESEND_API_KEY: z.string().min(1),
     EMAIL_FROM_ADDRESS: z.string().min(1),

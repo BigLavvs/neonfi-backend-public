@@ -511,6 +511,35 @@ export class GoldRushWalletProvider implements WalletDataProvider {
       return null;
     }
   }
+
+  // retrofit-86 (H13.1): GoldRush's spam classification is PER-WALLET (balances_nft.is_spam), not a
+  // chain-global DB — so this is the wallet-scoped spam-contract source the orchestrator unions in
+  // (defect #1: previously NOTHING wired GoldRush spam, leaving the whole signal on the plan-gated
+  // Alchemy list). We re-query balances_nft with no-spam=FALSE (getNftHoldings uses no-spam=true,
+  // which DROPS the flagged rows) and collect every contract GoldRush marks is_spam. Returns
+  // LOWERCASED contracts; null on unsupported chain / non-2xx / parse (caller treats as no signal).
+  async getWalletSpamContracts(address: string, chainSlug: string): Promise<Set<string> | null> {
+    const cov = COV_CHAIN[chainSlug];
+    if (!cov || chainSlug === 'solana') return null;
+    try {
+      const url =
+        `https://api.covalenthq.com/v1/${cov}/address/${address}/balances_nft/` + `?no-spam=false`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${this.apiKey!}`, accept: 'application/json' },
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as { data?: { items?: CovNftItem[] } };
+      const items = Array.isArray(json.data?.items) ? json.data!.items! : [];
+      const out = new Set<string>();
+      for (const c of items) {
+        if (c.is_spam === true && c.contract_address) out.add(c.contract_address.toLowerCase());
+      }
+      return out;
+    } catch (e) {
+      console.error('[wallet-data] goldrush getWalletSpamContracts failed', (e as Error).message);
+      return null;
+    }
+  }
 }
 
 // portfolio_v2 daily holding entry (probe-confirmed: open/high/low/close each carry a USD

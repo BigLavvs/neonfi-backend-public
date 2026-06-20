@@ -24,8 +24,8 @@ vi.mock('../src/lib/redis.js', () => ({
   },
 }));
 
-import { previewWallet, fetchWalletSummary, fetchWalletPnl, fetchSpamContracts } from '../src/modules/wallet-data/index.js';
-import { isHeuristicNftSpam, classifyNftSpam } from '../src/modules/wallet-data/nft-spam.js';
+import { previewWallet, fetchWalletSummary, fetchWalletPnl, fetchSpamContracts, fetchWalletSpamContracts } from '../src/modules/wallet-data/index.js';
+import { isHeuristicNftSpam, classifyNftSpam, effectiveNftSpam } from '../src/modules/wallet-data/nft-spam.js';
 import { sumHistoricalTokenValue } from '../src/modules/wallet-data/sync.js';
 import type {
   ProviderResult,
@@ -779,6 +779,124 @@ describe('fetchSpamContracts (retrofit-84)', () => {
       getSpamContracts: async () => { throw new Error('spam DB down'); },
     };
     const out = await fetchSpamContracts({ slug: 'eth' }, [throwing]);
+    expect(out).toBeInstanceOf(Set);
+    expect(out.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-86 (H13.1) — conservative behavioral signal + curated lists + GoldRush per-wallet spam
+// ---------------------------------------------------------------------------
+
+const GARBAGE_BAGS = '0xbdead093d03758772fc2f0dd6d836f0df6bdb6e7'; // curated blocklist (verified spam)
+const HEFTY_PRESENTS = '0x248e21b0aa161efe3045e3d067d972cd6a01d1b5'; // blocklist + bulk (held ×17)
+const UNISWAP_V3 = '0xc36442b4a4522e871399cd717abdd847ab11fe88'; // allowlist canary (LP positions)
+const ENS_NAMEWRAPPER = '0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401'; // allowlist
+
+describe('NFT spam classifier — behavioral + curated lists (retrofit-86)', () => {
+  it('curated blocklist → spam even with an innocent name and no provider flag (Garbage Bags ×2)', () => {
+    // §0 proved no provider flags this contract; the blocklist catches it. heldCount 2 alone wouldn't.
+    expect(classifyNftSpam({ contractAddress: GARBAGE_BAGS, name: 'Garbage Bags', heldCount: 2 })).toBe(true);
+    expect(classifyNftSpam({ contractAddress: GARBAGE_BAGS.toUpperCase(), heldCount: 1 })).toBe(true); // case-insensitive
+  });
+
+  it('bulk held-count ≥ threshold (non-allowlisted) → spam; below threshold → not spam', () => {
+    const innocent = '0x1111111111111111111111111111111111111111';
+    expect(classifyNftSpam({ contractAddress: innocent, name: 'Cool Collectible', heldCount: 17 })).toBe(true);
+    expect(classifyNftSpam({ contractAddress: innocent, name: 'Cool Collectible', heldCount: 10 })).toBe(true);
+    // A normal collector holding a handful (below NFT_BULK_SPAM_MIN=10) stays visible.
+    expect(classifyNftSpam({ contractAddress: innocent, name: 'Cool Collectible', heldCount: 9 })).toBe(false);
+    expect(classifyNftSpam({ contractAddress: innocent, name: 'Cool Collectible', heldCount: 4 })).toBe(false);
+  });
+
+  it('Hefty Presents (×17) is caught by BOTH the blocklist and the bulk signal', () => {
+    expect(classifyNftSpam({ contractAddress: HEFTY_PRESENTS, name: 'Hefty Presents', heldCount: 17 })).toBe(true);
+  });
+
+  it('allowlist canary: Uniswap V3 / ENS stay VISIBLE even with bulk + a spammy-looking name', () => {
+    // The exact "no-floor + free + bulk" shape the spec warns would wrongly flag LP positions.
+    expect(classifyNftSpam({ contractAddress: UNISWAP_V3, name: 'Uniswap V3 Positions', heldCount: 17 })).toBe(false);
+    expect(classifyNftSpam({ contractAddress: ENS_NAMEWRAPPER, name: 'reuben.eth', heldCount: 50 })).toBe(false);
+    // Allowlist even beats a spuriously-set provider flag for these definitively-legit utility contracts.
+    expect(classifyNftSpam({ contractAddress: UNISWAP_V3, possibleSpam: true, spamContract: true, heldCount: 20 })).toBe(false);
+  });
+
+  it('legit small collections held in normal numbers stay visible (Azuki/Beanz ×4)', () => {
+    const azuki = '0xb46275ce53d478c4b75aad0aec2cb41b2616f302';
+    expect(classifyNftSpam({ contractAddress: azuki, name: 'Azuki Mizuki Anime Shorts', heldCount: 4 })).toBe(false);
+  });
+
+  it('effectiveNftSpam: manual override wins over the computed verdict in both directions', () => {
+    expect(effectiveNftSpam({ spam: false, spamOverride: true })).toBe(true); // force spam
+    expect(effectiveNftSpam({ spam: true, spamOverride: false })).toBe(false); // force visible
+    expect(effectiveNftSpam({ spam: true, spamOverride: null })).toBe(true); // no override → computed
+    expect(effectiveNftSpam({ spam: false })).toBe(false); // undefined override → computed
+  });
+});
+
+describe('GoldRushWalletProvider — getWalletSpamContracts (retrofit-86)', () => {
+  const provider = new GoldRushWalletProvider('cqt_key');
+
+  it('collects is_spam contracts (lowercased) via balances_nft no-spam=false; skips clean ones', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          items: [
+            { contract_address: '0xAAA', contract_name: 'Junk', is_spam: true },
+            { contract_address: '0xBBB', contract_name: 'Legit', is_spam: false },
+            { contract_address: '0xCCC', contract_name: 'Also Junk', is_spam: true },
+          ],
+        },
+      }),
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const set = await provider.getWalletSpamContracts('0xabc', 'eth');
+    expect([...set!].sort()).toEqual(['0xaaa', '0xccc']);
+    const [url] = fetchMock.mock.calls[0]! as [string];
+    expect(String(url)).toContain('/v1/eth-mainnet/address/0xabc/balances_nft/');
+    expect(String(url)).toContain('no-spam=false'); // includes flagged rows (getNftHoldings drops them)
+  });
+
+  it('→ null on non-ok / solana / unmapped chain (best-effort, never throws)', async () => {
+    expect(await provider.getWalletSpamContracts('0xabc', 'solana')).toBeNull();
+    expect(await provider.getWalletSpamContracts('0xabc', 'polygon-zkevm')).toBeNull();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 402, json: async () => ({}) }) as Response));
+    expect(await provider.getWalletSpamContracts('0xabc', 'eth')).toBeNull();
+  });
+});
+
+describe('fetchWalletSpamContracts orchestrator (retrofit-86)', () => {
+  function walletSpamProvider(name: string, set: Set<string> | null, configured = true): WalletDataProvider {
+    return {
+      name,
+      isConfigured: () => configured,
+      supportsChain: () => true,
+      getSummary: async () => ({ status: 'error' }),
+      getWalletSpamContracts: async () => set,
+    };
+  }
+
+  it('unions per-wallet spam sets across configured providers; skips unconfigured + null', async () => {
+    const providers = [
+      walletSpamProvider('a', new Set(['0xaaa'])),
+      walletSpamProvider('b', new Set(['0xbbb'])),
+      walletSpamProvider('c', new Set(['0xccc']), false), // unconfigured → skipped
+      walletSpamProvider('d', null), // can't supply → skipped
+    ];
+    const out = await fetchWalletSpamContracts('0xWALLET', { slug: 'eth' }, providers);
+    expect([...out].sort()).toEqual(['0xaaa', '0xbbb']);
+  });
+
+  it('a provider without the capability → empty set (never null)', async () => {
+    const summaryOnly: WalletDataProvider = {
+      name: 'summary-only',
+      isConfigured: () => true,
+      supportsChain: () => true,
+      getSummary: async () => ({ status: 'error' }),
+    };
+    const out = await fetchWalletSpamContracts('0xWALLET', { slug: 'eth' }, [summaryOnly]);
     expect(out).toBeInstanceOf(Set);
     expect(out.size).toBe(0);
   });

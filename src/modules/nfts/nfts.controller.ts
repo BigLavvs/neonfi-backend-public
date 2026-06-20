@@ -5,7 +5,7 @@ import { requireAuth } from '../auth/middleware.js';
 import { requirePlan } from '../auth/plan.js';
 import { findPortfolioById } from '../portfolios/portfolios.repository.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
-import { NftError, listNfts, getNftById } from './nfts.service.js';
+import { NftError, listNfts, getNftById, setNftSpamOverride } from './nfts.service.js';
 
 type NftEnv = AuthEnv & { Variables: { portfolio: PortfolioWithRelations } };
 
@@ -58,6 +58,40 @@ router.get('/:id', async (c) => {
   const portfolio = c.get('portfolio');
   try {
     const nft = await getNftById(portfolio, id);
+    return c.json(ok({ nft }), 200);
+  } catch (e) {
+    if (e instanceof NftError) {
+      return c.json(err(e.code, e.message), e.statusCode as 404);
+    }
+    throw e;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /portfolios/:portfolioId/nfts/:id  — manual spam flag/unflag (retrofit-86, H13.1)
+// Body: { spamOverride: true | false | null }. true = force spam (hide), false = force visible,
+// null = clear the override (fall back to the computed verdict). The two-way escape hatch for the
+// behavioral signal's residual FP risk.
+// ---------------------------------------------------------------------------
+
+router.patch('/:id', async (c) => {
+  const id = parseId(c.req.param('id'));
+  if (id === null) {
+    return c.json(err('VALIDATION_ERROR', 'NFT ID must be a positive integer'), 400);
+  }
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json(err('VALIDATION_ERROR', 'Request body must be valid JSON'), 400);
+  }
+  const raw = (body as { spamOverride?: unknown }).spamOverride;
+  if (!(raw === true || raw === false || raw === null)) {
+    return c.json(err('VALIDATION_ERROR', 'spamOverride must be true, false, or null'), 400);
+  }
+  const portfolio = c.get('portfolio');
+  try {
+    const nft = await setNftSpamOverride(portfolio, id, raw);
     return c.json(ok({ nft }), 200);
   } catch (e) {
     if (e instanceof NftError) {

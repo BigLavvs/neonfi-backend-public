@@ -27,7 +27,8 @@ import { ok, err } from '../../lib/envelope.js';
 import { verifyMoralisSignature } from '../../lib/moralis-signature.js';
 import { createTransactionFromWebhook } from '../transactions/transactions.service.js';
 import { refreshConnectedBalancesFromProvider } from '../wallet-data/sync.js';
-import { isHeuristicNftSpam } from '../wallet-data/nft-spam.js';
+import { classifyNftSpam } from '../wallet-data/nft-spam.js';
+import { fetchSpamContracts, fetchWalletSpamContracts } from '../wallet-data/index.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 
 // js-sha3 is CommonJS with dynamically-built exports — default-import then destructure
@@ -369,6 +370,28 @@ async function processNftTransfers(
 ): Promise<number> {
   let processed = 0;
 
+  // retrofit-86 (H13.1, defect #3): apply the SAME combined spam verdict the resync uses, not the
+  // name-heuristic-only stopgap. The provider spam-contract set is per chain+wallet — memoize it for
+  // this webhook so a burst of NFT events doesn't refetch it per transfer (it's also Redis-cached
+  // for cross-webhook reuse). Best-effort: any failure leaves an empty set → verdict degrades to
+  // blocklist/bulk/heuristic, never throws.
+  const spamSetByWallet = new Map<string, Set<string>>();
+  const spamSetFor = async (wallet: string): Promise<Set<string>> => {
+    const key = wallet.toLowerCase();
+    const memo = spamSetByWallet.get(key);
+    if (memo) return memo;
+    let set = new Set<string>();
+    try {
+      set = await fetchSpamContracts({ slug: chainSlug });
+      const walletSpam = await fetchWalletSpamContracts(wallet, { slug: chainSlug });
+      for (const c of walletSpam) set.add(c);
+    } catch (e) {
+      console.error('[moralis] nft spam-set fetch failed', (e as Error).message);
+    }
+    spamSetByWallet.set(key, set);
+    return set;
+  };
+
   for (const transfer of nftTransfers) {
     const fromAddr = (transfer.from ?? '').toLowerCase();
     const toAddr = (transfer.to ?? '').toLowerCase();
@@ -387,6 +410,21 @@ async function processNftTransfers(
       if (!portfolio) continue;
 
       if (direction === 'received') {
+        // retrofit-86 (H13.1, defect #3): full combined verdict (provider spam-contract set ∪
+        // curated blocklist ∪ allowlist ∪ bulk held-count ∪ name heuristic) — same as the resync.
+        // heldCount = existing rows from this contract + this arrival, so a bulk airdrop trips the
+        // signal in real time without waiting for a manual resync.
+        const spamSet = await spamSetFor(addr);
+        const existingHeld = await prisma.nft.count({
+          where: { portfolioId: portfolio.id, contractAddress: tokenAddress },
+        });
+        const spam = classifyNftSpam({
+          spamContract: spamSet.has(tokenAddress),
+          name: transfer.tokenName ?? null,
+          collectionName: transfer.collectionName ?? null,
+          contractAddress: tokenAddress,
+          heldCount: existingHeld + 1,
+        });
         await prisma.nft.upsert({
           where: {
             portfolioId_contractAddress_tokenId: {
@@ -412,10 +450,7 @@ async function processNftTransfers(
             traits: transfer.traits !== undefined
               ? (transfer.traits as Prisma.InputJsonValue)
               : Prisma.DbNull,
-            // retrofit-84 (H13): the real-time webhook carries no provider spam flag, so apply the
-            // conservative name/collection heuristic on arrival. The periodic resync re-evaluates
-            // with the full multi-provider signal (Alchemy spam-contract DB + Moralis possible_spam).
-            spam: isHeuristicNftSpam(transfer.tokenName ?? null, transfer.collectionName ?? null),
+            spam,
           },
           update: {
             // Refresh marketplace data if present in this webhook
@@ -423,6 +458,7 @@ async function processNftTransfers(
             ...(transfer.floorPriceUsd !== undefined && { floorPriceUsd: transfer.floorPriceUsd }),
             ...(transfer.lastSale !== undefined && { lastSale: transfer.lastSale }),
             ...(transfer.lastSaleNote !== undefined && { lastSaleNote: transfer.lastSaleNote }),
+            spam, // re-evaluate on re-delivery (does not touch the user's spamOverride)
           },
         });
         processed++;

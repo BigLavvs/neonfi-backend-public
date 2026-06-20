@@ -529,10 +529,16 @@ model Nft {
   // instead of presented as real holdings. Default false (legacy + non-spam rows).
   possibleSpam    Boolean   @default(false)
   // retrofit-84 (H13): the COMBINED spam verdict — provider flags (Moralis possible_spam, Alchemy
-  // spam-contract DB, GoldRush is_spam) ORed with a conservative name/collection heuristic. This is
-  // the field the holdings list + NFT count filter on (possibleSpam stays the raw provider signal).
-  // Default false; set during NFT sync and re-evaluated by the reclassify backfill.
+  // spam-contract DB, GoldRush is_spam) ORed with the curated blocklist + bulk held-count + a
+  // conservative name/collection heuristic. This is the field the holdings list + NFT count filter
+  // on (possibleSpam stays the raw provider signal). Default false; set during NFT sync and
+  // re-evaluated by the reclassify backfill / webhook.
   spam            Boolean   @default(false)
+  // retrofit-86 (H13.1): per-NFT MANUAL override of the computed `spam` verdict — the honest
+  // two-way escape hatch for the behavioral signal's residual FP risk. true = force spam (hide),
+  // false = force visible, null = no override (use computed `spam`). Applied at READ time
+  // (effectiveNftSpam = spamOverride ?? spam) so a resync recomputing `spam` never clobbers it.
+  spamOverride    Boolean?
 
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt

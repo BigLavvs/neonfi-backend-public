@@ -34,6 +34,13 @@ over it with a heuristic.
    rows only ever get the name heuristic on backfill; the provider DB applies on the next resync. That
    is by design (network-free backfill) but means the backfill can't catch contract-DB spam — keep in
    mind when picking the backfill path for the new signal.
+3. **The live webhook NFT path is name-heuristic-only too.** `moralis-handlers.ts:418`
+   (`processNftTransfers`) sets `spam: isHeuristicNftSpam(...)` on each NFT that arrives via a Moralis
+   Stream — it does NOT call `fetchSpamContracts` or the behavioral signal. Combined with the fact that
+   nothing auto-resyncs connected wallets (only a manual Resync does), a freshly-airdropped spam NFT can
+   stay `spam=false` indefinitely. Fix the webhook path to apply the SAME combined verdict as
+   `importNftHoldings` (share a per-chain cached spam-contract set so the webhook doesn't refetch it per
+   event).
 
 ## §0 — PROBE FIRST (gate; decides path A vs path B)
 Do NOT build the heuristic until this is answered. Add a tiny read-only probe (a `scripts/` one-off,

@@ -53,6 +53,8 @@ vi.mock('../src/modules/wallet-data/index.js', () => ({
   // retrofit-84 (H13): importNftHoldings now pulls the cross-provider spam-contract DB; an empty
   // set keeps these wiring tests offline (the spam verdict degrades to provider-flag-OR-heuristic).
   fetchSpamContracts: vi.fn().mockResolvedValue(new Set()),
+  // retrofit-86 (H13.1): importNftHoldings also unions the GoldRush per-wallet spam set; empty too.
+  fetchWalletSpamContracts: vi.fn().mockResolvedValue(new Set()),
 }));
 
 const AUTH_BASE = '/api/v1/auth';

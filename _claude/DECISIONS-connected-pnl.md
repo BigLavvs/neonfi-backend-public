@@ -71,11 +71,16 @@ estimated" to "mostly real" — the §0 probe found GoldRush honors a 3-year win
   heuristic). The cross-provider contract signal contributes zero, and only Alchemy implements
   `getSpamContracts` (GoldRush `is_spam` was NEVER wired in, contrary to 84's doc). "Garbage Bags"
   (0xbdead09…) + "Hefty Presents" (0x248e21b0…, ×17) still show. → retrofit-86.
-- **86** 📨 AUTHORED (this doc's sibling) — fix the spam signal then a conservative fallback. §0 probe
-  GATES it: verify whether Alchemy `getSpamContracts` actually returns these contracts (fix the call if
-  it's silently empty — Path A, no FP risk) before adding a behavioral heuristic (Path B). Hard FP
-  guard: Uniswap V3 Positions / ENS / Azuki must stay visible. Reuses the shipped toggle — no further
-  frontend work.
+- **86** ✅ SHIPPED + live-validated (CC). §0 probe verdict: Alchemy `getSpamContracts` is HTTP 403
+  **plan-gated** (correct endpoint, just not on our tier) → the chain-global signal is empty, NOT a
+  fixable call. GoldRush is callable but didn't flag the two targets; floor/lastSale never populate and
+  the NFTs have no transfer rows → "no-floor"/"free-acquisition" signals weren't computable. Hybrid fix:
+  wired GoldRush **per-wallet** `is_spam` (defect #1) + fixed the webhook NFT path to the full verdict
+  (defect #3) + a precision OR-stack in `classifyNftSpam` — allowlist canary (Uniswap V3/ENS/POAP, never
+  spam) → curated blocklist (Garbage Bags/Hefty Presents) → provider flags → bulk held-count (≥10) →
+  name heuristic — plus a per-NFT manual override (`spamOverride`, PATCH endpoint, wins at read time so a
+  resync can't clobber it). Live: reclassify marked exactly (Hefty 17 + Garbage 2)×2; all legit canaries
+  visible. No frontend change (the toggle's flag is now override-aware). DETAILS: DECISIONS-retrofit-86.md.
 - **85** ✅ shipped (ec22b0c) — accurate connected historical value. §0 probe RESOLVED: GoldRush
   portfolio_v2?days=1095 returns a real 3-year historically-priced daily series (Zerion empty, Mobula
   key dead, Moralis tail current-priced). Per-point provenance (provider → approx=false, Moralis tail
@@ -83,9 +88,16 @@ estimated" to "mostly real" — the §0 probe found GoldRush honors a 3-year win
   estimates → accurate; P17 929 accurate + 44 deep-tail estimates). No frontend change needed — the
   dashed segment shrinks on its own as points flip to approx=false.
 
+- **87** ✅ SHIPPED (CC) — CSV bulk import for MANUAL portfolios: `POST /tokens/validate-symbols` +
+  `/portfolios/:id/transactions/bulk` + `/assets/bulk` (`{mode, rows[]}` → `{imported, skipped,
+  errors[]}`), shared `bulk-import.ts`, parity double-enforced against the single-create Zod + write
+  primitives; all_or_nothing wraps one Prisma tx, skip_invalid returns the skip list. 23 new tests + 109
+  existing green. Frontend (ImportCsvModal + csv-import.ts) was already built to this contract → now
+  live. DETAILS: DECISIONS-retrofit-87.md.
+
 ## Status
-retrofit-84 + 85 SHIPPED (f36003b, ec22b0c) and live-validated. The 84 frontend Show-spam toggle is
-now SHIPPED + verified too. OPEN: retrofit-86 (NFT spam detection) — authored, awaiting CC: run the §0
-probe (is Alchemy's spam call working?), then Path A (fix provider signal) or Path B (conservative
-behavioral heuristic). Also OPEN: user runs `npm run check` on the frontend (sandbox VM was down this
-session so it couldn't be run here).
+retrofit-84/85/86/87 all SHIPPED; 84/85/86 live-validated. OPEN: (1) **commit** retrofit-86 + 87 — both
+are uncommitted in the backend working tree (CC built + tested but didn't commit); (2) **restart the
+backend dev server** — CC stopped it to regenerate the Prisma client for 86's `spamOverride` migration;
+(3) **live-verify** the Import CSV flow end-to-end + the spam hiding (needs the backend up + a fresh
+login). Frontend `npm run check` was already run + clean (the csv-import fix committed).

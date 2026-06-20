@@ -37,6 +37,11 @@ const { fetchWalletSummaryMock } = vi.hoisted(() => ({ fetchWalletSummaryMock: v
 vi.mock('../src/modules/wallet-data/index.js', async (importOriginal) => ({
   ...((await importOriginal()) as object),
   fetchWalletSummary: fetchWalletSummaryMock,
+  // retrofit-86: the NFT webhook path now layers in the provider spam-contract set. Stub the two
+  // fetchers to empty so the webhook tests stay hermetic (no real Alchemy/GoldRush HTTP) — the
+  // name-heuristic + blocklist + bulk signals still run offline against the verdict.
+  fetchSpamContracts: vi.fn(async () => new Set<string>()),
+  fetchWalletSpamContracts: vi.fn(async () => new Set<string>()),
 }));
 
 // Build a provider WalletSummary from a simple token list (contractAddress null → resolved by

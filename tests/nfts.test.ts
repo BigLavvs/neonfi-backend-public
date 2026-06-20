@@ -150,6 +150,14 @@ async function nftGet(url: string, cookie?: string): Promise<Response> {
   });
 }
 
+async function nftPatch(url: string, body: unknown, cookie?: string): Promise<Response> {
+  return app.request(url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+    body: JSON.stringify(body),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
@@ -416,6 +424,76 @@ it('291: GET /portfolios/:id/nfts/:nftId returns description when set, null when
   expect(r2.status).toBe(200);
   expect(((await r2.json()) as { data: { nft: { description: string | null } } }).data.nft.description)
     .toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-86 (H13.1): manual spam override (PATCH) — the two-way escape hatch
+// ---------------------------------------------------------------------------
+
+it('r86-override-hide: PATCH spamOverride=true hides a non-spam NFT; spamCount rises; spam=true in DTO', async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const portfolioId = await createConnectedPortfolio(userId);
+
+  const realId = await seedNft(portfolioId, { name: 'Real NFT', tokenId: 'r1', contractAddress: '0xreal' });
+  const flagId = await seedNft(portfolioId, { name: 'Looks Legit But Isnt', tokenId: 'x1', contractAddress: '0xmaybe' });
+
+  // Force the second one to spam via the override.
+  const patch = await nftPatch(nftUrl(portfolioId, flagId), { spamOverride: true }, cookie);
+  expect(patch.status).toBe(200);
+  const pb = await patch.json() as { data: { nft: { id: number; spam: boolean; spamOverride: boolean | null } } };
+  expect(pb.data.nft.spam).toBe(true); // effective verdict folds in the override
+  expect(pb.data.nft.spamOverride).toBe(true);
+
+  // Default list now hides it; spamCount = 1; only the real one remains.
+  const list = await nftGet(nftUrl(portfolioId), cookie);
+  const lb = await list.json() as { data: { nfts: Array<{ id: number }>; spamCount: number } };
+  expect(lb.data.nfts.map((n) => n.id)).toEqual([realId]);
+  expect(lb.data.spamCount).toBe(1);
+});
+
+it('r86-override-reveal: PATCH spamOverride=false keeps a computed-spam NFT visible; null clears it', async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const portfolioId = await createConnectedPortfolio(userId);
+
+  // A row the classifier marked spam (e.g. bulk/blocklist at sync time).
+  const spamId = await seedNft(portfolioId, { name: 'Bulk Airdrop', tokenId: 's1', contractAddress: '0xbulk', spam: true });
+
+  // Force visible.
+  const reveal = await nftPatch(nftUrl(portfolioId, spamId), { spamOverride: false }, cookie);
+  expect(reveal.status).toBe(200);
+  const revealed = await nftGet(nftUrl(portfolioId), cookie);
+  const rb = await revealed.json() as { data: { nfts: Array<{ id: number; spam: boolean }>; spamCount: number } };
+  expect(rb.data.nfts.map((n) => n.id)).toEqual([spamId]);
+  expect(rb.data.nfts[0]!.spam).toBe(false); // override wins
+  expect(rb.data.spamCount).toBe(0);
+
+  // Clear the override → falls back to the computed spam verdict (hidden again).
+  const clear = await nftPatch(nftUrl(portfolioId, spamId), { spamOverride: null }, cookie);
+  expect(clear.status).toBe(200);
+  const after = await nftGet(nftUrl(portfolioId), cookie);
+  const ab = await after.json() as { data: { nfts: unknown[]; spamCount: number } };
+  expect(ab.data.nfts).toHaveLength(0);
+  expect(ab.data.spamCount).toBe(1);
+});
+
+it('r86-override-validation: PATCH with a non-boolean/null spamOverride → 400; missing NFT → 404', async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const portfolioId = await createConnectedPortfolio(userId);
+  const nftId = await seedNft(portfolioId);
+
+  const bad = await nftPatch(nftUrl(portfolioId, nftId), { spamOverride: 'yes' }, cookie);
+  expect(bad.status).toBe(400);
+  expect(((await bad.json()) as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+
+  const missing = await nftPatch(nftUrl(portfolioId, 999999), { spamOverride: true }, cookie);
+  expect(missing.status).toBe(404);
+  expect(((await missing.json()) as { error: { code: string } }).error.code).toBe('NFT_NOT_FOUND');
 });
 
 // ---------------------------------------------------------------------------

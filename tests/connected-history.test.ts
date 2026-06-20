@@ -22,6 +22,7 @@ vi.mock('../src/modules/wallet-data/index.js', () => ({
   fetchTransferPage: vi.fn(),
   fetchNftHoldings: vi.fn().mockResolvedValue(null),
   fetchSpamContracts: vi.fn().mockResolvedValue(new Set()),
+  fetchWalletSpamContracts: vi.fn().mockResolvedValue(new Set()), // retrofit-86 (H13.1)
   fetchTransactionCount: vi.fn().mockResolvedValue(null),
   fetchValueHistory: fetchValueHistoryMock,
   fetchWalletPnl: vi.fn().mockResolvedValue(null),

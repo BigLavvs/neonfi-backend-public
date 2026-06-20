@@ -133,27 +133,81 @@ export async function fetchNftHoldings(
   return null;
 }
 
-// retrofit-84 (H13): cross-provider spam-contract DB. UNLIKE the first-non-null capabilities
-// above, this UNIONS every provider that can supply a spam-contract set (Alchemy getSpamContracts;
-// others may layer in later) so the strongest combined signal is used regardless of which provider
+// retrofit-84 (H13): cross-provider CHAIN-GLOBAL spam-contract DB. UNLIKE the first-non-null
+// capabilities above, this UNIONS every provider that can supply a chain-global spam-contract set
+// (Alchemy getSpamContracts) so the strongest combined signal is used regardless of which provider
 // supplied the NFT holdings. Returns a set of LOWERCASED contract addresses (empty when no provider
 // supports it — never null, so the caller treats "no signal" uniformly).
+// NOTE (retrofit-86): on our plan Alchemy's NFT API is 403 plan-gated, so this set is empty today;
+// the working cross-provider signal is the PER-WALLET fetchWalletSpamContracts (GoldRush) below.
+// Cached per chain (Redis, SPAM_CONTRACTS_TTL_S) so a sync loop / webhook doesn't refetch it.
+const SPAM_CONTRACTS_TTL_S = 6 * 60 * 60; // 6h — spam DBs change slowly; resync isn't frequent.
+
+// cacheKey null = don't cache (the test path injects custom providers and must stay deterministic;
+// caching is a production concern keyed on the default PROVIDERS).
+async function unionSpamContracts(
+  cacheKey: string | null,
+  providers: WalletDataProvider[],
+  fetchOne: (p: WalletDataProvider) => Promise<Set<string> | null>,
+  supports: (p: WalletDataProvider) => boolean,
+): Promise<Set<string>> {
+  if (cacheKey) {
+    const cached = await redis.get(cacheKey).catch(() => null);
+    if (cached) {
+      try {
+        return new Set(JSON.parse(cached) as string[]);
+      } catch {
+        /* malformed — refetch below */
+      }
+    }
+  }
+  const out = new Set<string>();
+  for (const p of providers) {
+    if (!p.isConfigured() || !supports(p)) continue;
+    try {
+      const set = await fetchOne(p);
+      if (set) for (const addr of set) out.add(addr);
+    } catch (e) {
+      // A spam-DB hiccup must never break the NFT sync — fall through with whatever we have.
+      console.error('[wallet-data] spam-contract provider failed', p.name, (e as Error).message);
+    }
+  }
+  if (cacheKey) {
+    await redis
+      .set(cacheKey, JSON.stringify([...out]), 'EX', SPAM_CONTRACTS_TTL_S)
+      .catch((e: Error) => console.error('[wallet-data] spam-contract cache set failed', e.message));
+  }
+  return out;
+}
+
 export async function fetchSpamContracts(
   chain: { slug: string },
   providers: WalletDataProvider[] = PROVIDERS,
 ): Promise<Set<string>> {
-  const out = new Set<string>();
-  for (const p of providers) {
-    if (!p.isConfigured() || !p.supportsChain(chain.slug) || !p.getSpamContracts) continue;
-    try {
-      const set = await p.getSpamContracts(chain.slug);
-      if (set) for (const addr of set) out.add(addr);
-    } catch (e) {
-      // A spam-DB hiccup must never break the NFT sync — fall through with whatever we have.
-      console.error('[wallet-data] fetchSpamContracts provider failed', p.name, (e as Error).message);
-    }
-  }
-  return out;
+  return unionSpamContracts(
+    providers === PROVIDERS ? `spam_contracts:${chain.slug}` : null,
+    providers,
+    (p) => p.getSpamContracts!(chain.slug),
+    (p) => p.supportsChain(chain.slug) && Boolean(p.getSpamContracts),
+  );
+}
+
+// retrofit-86 (H13.1): PER-WALLET spam-contract set, unioned across providers that classify spam on
+// the wallet's holdings rather than chain-globally (GoldRush balances_nft.is_spam). This is the
+// signal that actually contributes on our plan (Alchemy's chain-global list is 403-gated). Cached
+// per wallet+chain so a resync / a burst of webhook events reuses it. Empty set = no signal (never
+// null). The caller unions this with fetchSpamContracts() for the full provider spam-contract view.
+export async function fetchWalletSpamContracts(
+  address: string,
+  chain: { slug: string },
+  providers: WalletDataProvider[] = PROVIDERS,
+): Promise<Set<string>> {
+  return unionSpamContracts(
+    providers === PROVIDERS ? `wallet_spam_contracts:${chain.slug}:${address.toLowerCase()}` : null,
+    providers,
+    (p) => p.getWalletSpamContracts!(address, chain.slug),
+    (p) => p.supportsChain(chain.slug) && Boolean(p.getWalletSpamContracts),
+  );
 }
 
 // retrofit-56: the wallet's REAL on-chain tx total (GoldRush implements it; Moralis history

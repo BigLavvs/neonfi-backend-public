@@ -48,6 +48,7 @@ import {
   fetchTransferPage,
   fetchNftHoldings,
   fetchSpamContracts,
+  fetchWalletSpamContracts,
   fetchTransactionCount,
   fetchValueHistory,
   fetchWalletPnl,
@@ -321,21 +322,36 @@ async function importNftHoldings(
   holdings: WalletNftHolding[],
 ): Promise<void> {
   const chainSlug = portfolio.chain?.slug ?? '';
-  // retrofit-84 (H13): pull the cross-provider spam-contract DB ONCE (Alchemy getSpamContracts,
-  // unioned across providers). Best-effort — fetchSpamContracts never throws and returns an empty
-  // set when no provider supports it, so the combined verdict simply degrades to
-  // provider-flag-OR-heuristic.
+  // retrofit-84/86 (H13/H13.1): pull the cross-provider spam-contract signal ONCE. The chain-global
+  // set (Alchemy getSpamContracts — 403 plan-gated on our tier) is unioned with the PER-WALLET set
+  // (GoldRush balances_nft.is_spam — the signal that actually fires on our plan). Both best-effort:
+  // they never throw and return empty when no provider supports them, so the verdict degrades
+  // cleanly to blocklist/bulk/heuristic.
   const spamContracts = await fetchSpamContracts({ slug: chainSlug });
+  if (portfolio.walletAddress) {
+    const walletSpam = await fetchWalletSpamContracts(portfolio.walletAddress, { slug: chainSlug });
+    for (const c of walletSpam) spamContracts.add(c);
+  }
+  // retrofit-86 (H13.1): per-contract held count in THIS wallet drives the bulk-airdrop signal
+  // (e.g. "Hefty Presents" ×17). Counted from the current holdings list itself.
+  const heldByContract = new Map<string, number>();
+  for (const h of holdings) {
+    const c = h.contractAddress.toLowerCase();
+    heldByContract.set(c, (heldByContract.get(c) ?? 0) + 1);
+  }
   for (const h of holdings) {
     try {
-      // retrofit-84 (H13): combine the provider holdings flag (h.possibleSpam) with the
-      // spam-contract DB hit and the conservative name/collection heuristic → the `spam` verdict
-      // the list + count filter on. possibleSpam stays the raw provider signal.
+      // retrofit-84/86 (H13/H13.1): combine the provider holdings flag (h.possibleSpam), the
+      // cross-provider spam-contract hit, the curated blocklist + allowlist (by contract), the bulk
+      // held-count signal, and the conservative name/collection heuristic → the `spam` verdict the
+      // list + count filter on. possibleSpam stays the raw provider signal.
       const spam = classifyNftSpam({
         possibleSpam: h.possibleSpam,
         spamContract: spamContracts.has(h.contractAddress.toLowerCase()),
         name: h.name,
         collectionName: h.collectionName,
+        contractAddress: h.contractAddress,
+        heldCount: heldByContract.get(h.contractAddress.toLowerCase()) ?? 1,
       });
       await prisma.nft.upsert({
         where: {

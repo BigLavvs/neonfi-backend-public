@@ -128,7 +128,14 @@ export interface WalletDataProvider {
   // spam contract addresses for the chain (Alchemy getSpamContracts). The orchestrator unions
   // these across providers and ORs a contract-address hit into each NFT's spam verdict, so the
   // spam signal isn't tied to whichever provider supplied the holdings. null = unsupported/no key.
+  // NOTE (retrofit-86): Alchemy's NFT API is plan-gated (HTTP 403 on the free tier), so this
+  // chain-global set is empty on our plan today — getWalletSpamContracts (GoldRush) carries it.
   getSpamContracts?(chainSlug: string): Promise<Set<string> | null>;
+  // retrofit-86 (H13.1): optional PER-WALLET spam-contract set. GoldRush classifies spam on the
+  // wallet's NFT holdings (balances_nft.is_spam) rather than a chain-global DB, so this is the
+  // wallet-scoped counterpart to getSpamContracts. The orchestrator (fetchWalletSpamContracts)
+  // unions it with the chain-global set. Returns LOWERCASED contract addresses; null = unsupported.
+  getWalletSpamContracts?(address: string, chainSlug: string): Promise<Set<string> | null>;
   // retrofit-56: optional connected-portfolio value/count sources (GoldRush/Covalent
   // implements both; other providers skip → null). getTransactionCount is the wallet's
   // REAL on-chain tx total (the fixed count the overview consumes). getValueHistory is the

@@ -1,24 +1,29 @@
-// retrofit-84 (H13) — one-off, idempotent reclassification of EXISTING NFT rows against the new
+// retrofit-84/86 (H13/H13.1) — one-off, idempotent reclassification of EXISTING NFT rows against the
 // multi-signal spam classifier.
 //
 // retrofit-73 persisted Moralis' possible_spam and filtered on it, but it under-flags airdrop spam,
 // and the retrofit-84 migration defaults every pre-existing row to spam=false. This backfill
-// re-evaluates each row with the signals available WITHOUT a network call:
-//   - the row's stored possible_spam flag (a provider already flagged it), OR
-//   - the conservative name/collection heuristic (URLs, "claim"/"reward"/"voucher"/"$<amount>", …).
-// Any hit → spam=true. We only ever SET spam=true here (never flip back to false), so the script is
-// monotonic + fully idempotent and never undoes a sync-time verdict.
+// re-evaluates each row with the signals computable WITHOUT a network call (via the shared
+// classifyNftSpam):
+//   - the row's stored possible_spam flag (a provider already flagged it),
+//   - the curated known-spam blocklist (Garbage Bags / Hefty Presents) — catches provider-missed
+//     spam offline (retrofit-86),
+//   - the BULK held-count from the DB (≥ NFT_BULK_SPAM_MIN copies of one contract in the wallet),
+//   - the conservative name/collection heuristic (URLs, "claim"/"reward"/"voucher"/"$<amount>", …),
+//   - the legit/utility ALLOWLIST (Uniswap V3 positions / ENS / POAP) — never flagged.
+// Any spam hit → spam=true. We only ever SET spam=true here (never flip back to false), so the
+// script is monotonic + fully idempotent and never undoes a sync-time verdict.
 //
-// The cross-provider spam-contract DB (Alchemy getSpamContracts) needs the wallet/chain context and
-// is applied on the NEXT resync (sync.importNftHoldings) — so a resync remains the way to catch the
-// provider-only spam ("Garbage Bags" / "Hefty Presents") that has no telltale name. This script
-// gives immediate relief for the name/heuristic + already-flagged cases.
+// What needs a resync (NOT offline): the cross-provider spam-contract DB (GoldRush per-wallet
+// is_spam / the plan-gated Alchemy list) — applied on the NEXT resync (sync.importNftHoldings). The
+// transfer-based airdrop signal isn't computed at all (we have no per-NFT transfer rows). This
+// script gives immediate relief for the blocklist / bulk / name / already-flagged cases.
 //
 // Run: `npm run reclassify:nft-spam`  (add `-- --dry-run` to preview counts without writing).
 
 import { pathToFileURL } from 'node:url';
 import { prisma } from '../lib/prisma.js';
-import { isHeuristicNftSpam } from '../modules/wallet-data/nft-spam.js';
+import { classifyNftSpam } from '../modules/wallet-data/nft-spam.js';
 
 export interface ReclassifyNftSpamResult {
   scanned: number; // NFT rows examined (currently spam=false)
@@ -35,15 +40,36 @@ export async function runReclassifyNftSpam(
 ): Promise<ReclassifyNftSpamResult> {
   const dryRun = opts.dryRun ?? false;
 
+  // Bulk signal needs the TRUE held count per (portfolio, contract), counted across ALL rows (not
+  // just the not-yet-flagged ones), so a partially-flagged bulk contract still scores correctly.
+  const counts = await prisma.nft.groupBy({
+    by: ['portfolioId', 'contractAddress'],
+    _count: { _all: true },
+  });
+  const heldByKey = new Map<string, number>();
+  for (const g of counts) {
+    heldByKey.set(`${g.portfolioId}:${g.contractAddress.toLowerCase()}`, g._count._all);
+  }
+
   // Only rows not already flagged — keeps the work (and the marked count) idempotent on re-run.
   const rows = await prisma.nft.findMany({
     where: { spam: false },
-    select: { id: true, name: true, collectionName: true, possibleSpam: true },
+    select: { id: true, portfolioId: true, name: true, collectionName: true, possibleSpam: true, contractAddress: true },
   });
 
   const toMark: number[] = [];
   for (const r of rows) {
-    if (r.possibleSpam || isHeuristicNftSpam(r.name, r.collectionName)) toMark.push(r.id);
+    const heldCount = heldByKey.get(`${r.portfolioId}:${r.contractAddress.toLowerCase()}`) ?? 1;
+    // spamContract omitted (provider DB needs the network/resync); classifyNftSpam still applies the
+    // blocklist, allowlist, bulk held-count, and name heuristic offline.
+    const spam = classifyNftSpam({
+      possibleSpam: r.possibleSpam,
+      name: r.name,
+      collectionName: r.collectionName,
+      contractAddress: r.contractAddress,
+      heldCount,
+    });
+    if (spam) toMark.push(r.id);
   }
 
   if (!dryRun && toMark.length > 0) {
