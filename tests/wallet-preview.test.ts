@@ -802,10 +802,14 @@ it('r65-pro: pro user 2nd resync same portfolio → 429 (retryAfter ~300, 5-min 
   await setUserPro(userId); // 5-min cooldown applies
   const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
 
+  // retrofit-88 (Issue 2): the two portfolios must be DIFFERENT wallets — connecting the same
+  // wallet+chain twice is now a 409. The cooldown key is per-portfolio-id, so distinct wallets
+  // still prove the per-portfolio independence this test is about.
+  const SECOND_EVM = '0xBeefEf1234567890AbCdEf1234567890AbCdEf12';
   const p1res = await portPost('', { name: 'Pro Wallet One', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
   expect(p1res.status).toBe(201);
   const p1 = (await p1res.json()).data.portfolio.id as number;
-  const p2res = await portPost('', { name: 'Pro Wallet Two', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  const p2res = await portPost('', { name: 'Pro Wallet Two', type: 'connected', walletAddress: SECOND_EVM, chainId: eth.id }, cookie);
   expect(p2res.status).toBe(201);
   const p2 = (await p2res.json()).data.portfolio.id as number;
 

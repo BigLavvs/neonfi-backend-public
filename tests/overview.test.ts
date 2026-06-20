@@ -262,6 +262,19 @@ function overviewGet(cookies?: string, query = ''): Promise<Response> {
   });
 }
 
+// retrofit-88 (Issue 1): the /portfolios summary DTO is the surface whose pnlAllTimeValue/pnlAllTime
+// must agree with the overview's per-portfolio P&L — fetch it to assert all three measures align.
+async function portfoliosGet(cookies: string): Promise<
+  Array<{ id: number; name: string; pnlAllTimeValue: number; pnlAllTime: number; allTimePnlValue: number; netDeposit: number; totalValue: number }>
+> {
+  const res = await app.request('/api/v1/portfolios', {
+    method: 'GET',
+    headers: { Cookie: cookies },
+  });
+  const json = (await res.json()) as { data: { portfolios: Array<Record<string, number>> } };
+  return json.data.portfolios as never;
+}
+
 async function getData(res: Response): Promise<OverviewData> {
   return ((await res.json()) as { data: OverviewData }).data;
 }
@@ -1264,6 +1277,52 @@ it('r75-alltime: USDT-only cost-unknown manual → ~0 all-time (not +33%); cost-
   // Totals sum the canonical per-portfolio all-time (3000 + 0), % over the implied base.
   expect(d.totals.pnlAllTimeValue).toBe(3000);
   expect(d.totals.pnlAllTime).toBe(3.33); // 3000 / (93004 − 3000) * 100 = 3.3332… → 2dp
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-88 (Issue 1) — the /portfolios summary pnlAllTimeValue/pnlAllTime now equal the
+// DISPLAYED realized+unrealized measure (== the overview's per-portfolio P&L), NOT the legacy
+// `value − netDeposit`. The two diverge precisely when a manual portfolio holds a cost-unknown
+// ("none" mode) asset, where value − netDeposit books that asset's whole value as phantom gain.
+// ---------------------------------------------------------------------------
+
+it('r88-issue1: manual portfolio with a cost-unknown asset → /portfolios pnlAllTimeValue === realized+unrealized === overview per-portfolio P&L (NOT value − netDeposit)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+
+  // P1 mirrors the live audit: BTC cost-tracked (real PnL) + DOGE-style cost-UNKNOWN holding that
+  // still has market value. netDeposit = 90000 (BTC cost only; the cost-unknown lot is excluded,
+  // retrofit-69). USDT here stands in for the cost-unknown lot at price 1 → 416.30 of value.
+  const p1 = await createManualPortfolio(userId, 'P1', 90000);
+  await seedAssetWithCost(p1, btcId, 1.0, { avgCost: 90000, costBasis: 90000, realizedPnl: 0 }); // current 93000 → unrealized 3000
+  await seedAssetWithCost(p1, usdtId, 416.3, { avgCost: null, costBasis: 0, realizedPnl: 0 }); // cost-unknown, value 416.30
+
+  // Realized+unrealized EXCLUDES the cost-unknown lot: all-time = unrealized 3000 + realized 0.
+  const realizedPlusUnrealized = 3000;
+  // The legacy netDeposit measure would WRONGLY add the cost-unknown lot's whole value:
+  // totalValue (93000 + 416.30) − netDeposit (90000) = 3416.30. This is the bug retrofit-88 fixes.
+  const legacyValueMinusNetDeposit = 3416.3;
+
+  // --- /portfolios summary DTO ---
+  const portfolios = await portfoliosGet(cookies);
+  const summary = portfolios.find((p) => p.name === 'P1')!;
+
+  // pnlAllTimeValue now equals realized+unrealized (== the DTO's own allTimePnlValue field), and is
+  // NOT the netDeposit-inflated phantom. % is over cost basis (3000 / 90000 = 3.33%).
+  expect(summary.pnlAllTimeValue).toBeCloseTo(realizedPlusUnrealized, 2);
+  expect(summary.pnlAllTimeValue).toBeCloseTo(summary.allTimePnlValue, 2);
+  expect(summary.pnlAllTimeValue).not.toBeCloseTo(legacyValueMinusNetDeposit, 2);
+  expect(summary.pnlAllTime).toBeCloseTo(3.33, 2); // 3000 / 90000 * 100
+
+  // --- overview per-portfolio P&L (the displayed surface) ---
+  const res = await overviewGet(cookies);
+  const d = await getData(res);
+  const row = d.portfolios.find((p) => p.name === 'P1')!;
+
+  // All three agree: summary pnlAllTimeValue === realized+unrealized === overview per-portfolio P&L.
+  expect(row.pnlAllTimeValue).toBeCloseTo(realizedPlusUnrealized, 2);
+  expect(summary.pnlAllTimeValue).toBeCloseTo(row.pnlAllTimeValue!, 2);
+  expect(summary.pnlAllTime).toBeCloseTo(row.pnlAllTime!, 2);
 });
 
 // ---------------------------------------------------------------------------

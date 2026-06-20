@@ -8,6 +8,7 @@ import {
   findPortfolioById,
   findPortfoliosByUserId,
   countPortfoliosByUserId,
+  findConnectedPortfolioByWallet,
   findUserPortfolioNames,
   createPortfolioRow,
   updatePortfolioName,
@@ -95,6 +96,29 @@ export async function createPortfolio(
         { chainSlug: chain.slug },
       );
     }
+
+    // retrofit-88 (Issue 2): reject connecting the SAME wallet+chain twice. Two connected
+    // portfolios for one wallet make the overview DOUBLE-COUNT its value (net worth ~doubles)
+    // while the on-chain tx count is deduped to one — an inconsistent, misleading aggregate. A
+    // clean 409 prevents the confusing duplicate up front; the user can resync/rename the existing
+    // one instead. The same address on a DIFFERENT chain is a genuinely separate holding (matched
+    // by chainId), so it stays allowed.
+    const duplicate = await findConnectedPortfolioByWallet(userId, validation.normalized!, chain.id);
+    if (duplicate) {
+      throw new PortfolioError(
+        409,
+        'WALLET_ALREADY_CONNECTED',
+        'This wallet is already connected on this chain',
+        {
+          walletAddress: validation.normalized!,
+          chainId: chain.id,
+          chainSlug: chain.slug,
+          existingPortfolioId: duplicate.id,
+          existingPortfolioName: duplicate.name,
+        },
+      );
+    }
+
     const portfolio = await createPortfolioRow({
       userId,
       name: body.name,

@@ -929,6 +929,69 @@ it('174: DELETE /portfolios/:id connected with moralisStreamId → deleteStream 
 });
 
 // ---------------------------------------------------------------------------
+// retrofit-88 (Issue 2). Connecting the SAME wallet+chain twice is rejected with 409 —
+// duplicates double-count the wallet's value in the overview total while the on-chain tx
+// count is deduped, an inconsistent/misleading aggregate. Same address on a DIFFERENT chain
+// is a separate holding and stays allowed.
+// ---------------------------------------------------------------------------
+
+it('r88-issue2: POST connected for a wallet+chain already connected → 409 WALLET_ALREADY_CONNECTED (case-insensitive); only the first row exists', async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId); // Pro so the 1-portfolio free cap doesn't mask the 409
+
+  const ethChain = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const mixedCase = '0xAbCdEf1234567890AbCdEf1234567890AbCdEf12';
+  const lowerCase = mixedCase.toLowerCase();
+
+  // First connect succeeds.
+  const first = await portPost(
+    { name: 'Wallet A', type: 'connected', walletAddress: mixedCase, chainId: ethChain.id },
+    cookie,
+  );
+  expect(first.status).toBe(201);
+
+  // Second connect of the SAME wallet+chain (different casing) → 409, nothing created.
+  const dupe = await portPost(
+    { name: 'Wallet A again', type: 'connected', walletAddress: lowerCase, chainId: ethChain.id },
+    cookie,
+  );
+  expect(dupe.status).toBe(409);
+  const dupeJson = (await dupe.json()) as { error: { code: string; details?: Record<string, unknown> } };
+  expect(dupeJson.error.code).toBe('WALLET_ALREADY_CONNECTED');
+  expect(dupeJson.error.details?.chainSlug).toBe('eth');
+
+  // Only one connected portfolio exists for that wallet+chain (the duplicate wrote nothing).
+  const rows = await prisma.portfolio.count({
+    where: { userId, walletAddress: lowerCase, chainId: ethChain.id },
+  });
+  expect(rows).toBe(1);
+});
+
+it('r88-issue2: same wallet on a DIFFERENT chain is allowed (separate holding) → 201', async () => {
+  const cookie = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+
+  const ethChain = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+  const polygonChain = await prisma.chain.findUniqueOrThrow({ where: { slug: 'polygon' } });
+  const wallet = '0xfeed1234567890abcdef1234567890abcdef1234';
+
+  const onEth = await portPost(
+    { name: 'On Eth', type: 'connected', walletAddress: wallet, chainId: ethChain.id },
+    cookie,
+  );
+  expect(onEth.status).toBe(201);
+
+  // Same address, different chain → genuinely separate holding, NOT a duplicate.
+  const onPolygon = await portPost(
+    { name: 'On Polygon', type: 'connected', walletAddress: wallet, chainId: polygonChain.id },
+    cookie,
+  );
+  expect(onPolygon.status).toBe(201);
+});
+
+// ---------------------------------------------------------------------------
 // 311-312. retrofit-2 — Portfolio.netDeposit seeded on create.
 // ---------------------------------------------------------------------------
 

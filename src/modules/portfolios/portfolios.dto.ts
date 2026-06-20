@@ -43,6 +43,26 @@ export interface PortfolioDTO {
 
 export async function toPortfolioDTO(portfolio: PortfolioWithRelations): Promise<PortfolioDTO> {
   const derived = await computeDerived(portfolio.id);
+
+  // retrofit-88 (Issue 1): the per-portfolio all-time P&L this summary exposes must equal what
+  // every DISPLAY surface shows. The dashboard/overview totals and the Performance headline read
+  // the cost-basis realized+unrealized measure (overview's canonicalAllTime: value =
+  // allTimePnlValue, % = unrealizedPnlPct over Σ costBasis) — NOT derive's legacy MANUAL
+  // `totalValue − netDeposit`. The two are identical EXCEPT when a manual portfolio holds a
+  // cost-unknown ("none" mode) asset: netDeposit excludes its (unknown) cost, so value − netDeposit
+  // books that asset's WHOLE value as gain, while realized+unrealized honestly EXCLUDES it (no basis
+  // to measure against). Remapping manual here makes pnlAllTimeValue === allTimePnlValue === the
+  // overview's per-portfolio P&L, so the field can never diverge from what's shown.
+  //
+  // CONNECTED already carries its cost-basis all-time (allTimePnlValue) / null in
+  // derived.pnlAllTime* — matching canonicalAllTime('connected') — so only MANUAL is remapped.
+  // derive.ts (and therefore the analytics summary, which reads derived.pnlAllTime* directly) is
+  // intentionally left untouched: the displayed Performance headline comes from the overview, not
+  // that endpoint.
+  const isManual = portfolio.type.name === 'manual';
+  const pnlAllTimeValue = isManual ? derived.allTimePnlValue : derived.pnlAllTimeValue;
+  const pnlAllTime = isManual ? derived.unrealizedPnlPct : derived.pnlAllTime;
+
   return {
     id: portfolio.id,
     userId: portfolio.userId,
@@ -57,6 +77,9 @@ export async function toPortfolioDTO(portfolio: PortfolioWithRelations): Promise
         : null,
     netDeposit: Number(portfolio.netDeposit.toString()),
     ...derived,
+    // Override the spread's derive-supplied pnlAllTime* with the displayed measure (manual only).
+    pnlAllTimeValue,
+    pnlAllTime,
     createdAt: portfolio.createdAt,
     updatedAt: portfolio.updatedAt,
   };

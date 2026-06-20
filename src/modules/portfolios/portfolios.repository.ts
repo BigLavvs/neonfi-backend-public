@@ -38,6 +38,22 @@ export async function countPortfoliosByUserId(userId: number): Promise<number> {
   return prisma.portfolio.count({ where: { userId } });
 }
 
+// retrofit-88 (Issue 2): does this user already have a CONNECTED portfolio for this EXACT
+// wallet+chain? Connecting the same wallet twice double-counts its value in the overview total
+// (net worth ~doubles) while the on-chain tx count is deduped to one — an inconsistent, misleading
+// aggregate. createPortfolio uses this to 409 before creating the duplicate. Same address on a
+// DIFFERENT chain is a genuinely separate holding, so chainId is part of the match.
+export async function findConnectedPortfolioByWallet(
+  userId: number,
+  walletAddress: string,
+  chainId: number,
+): Promise<{ id: number; name: string } | null> {
+  return prisma.portfolio.findFirst({
+    where: { userId, chainId, walletAddress, type: { name: 'connected' } },
+    select: { id: true, name: true },
+  });
+}
+
 export async function findUserPortfolioNames(
   userId: number,
 ): Promise<Array<{ id: number; name: string }>> {
