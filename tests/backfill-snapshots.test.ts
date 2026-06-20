@@ -210,6 +210,52 @@ it('r42c: re-running is idempotent — same row counts and same values', async (
   }
 });
 
+it('r78-A1: backfill rows are approx=true and a re-run never clobbers a real (approx=false) daily snapshot', async () => {
+  const type = await prisma.portfolioType.findUniqueOrThrow({ where: { name: 'manual' } });
+  const [authProvider, onboarding] = await Promise.all([
+    prisma.authProvider.findUniqueOrThrow({ where: { name: 'email' } }),
+    prisma.onboardingStatus.findUniqueOrThrow({ where: { name: 'complete' } }),
+  ]);
+  const user = await prisma.user.create({
+    data: {
+      email: 'backfill.snap.a1@neonfi.test',
+      passwordHash: 'x',
+      fullName: 'Backfill A1 User',
+      authProviderId: authProvider.id,
+      onboardingStatusId: onboarding.id,
+    },
+  });
+  const portfolio = await prisma.portfolio.create({ data: { userId: user.id, name: 'Main', typeId: type.id } });
+  await prisma.asset.create({ data: { portfolioId: portfolio.id, tokenId: btcId, balance: '2' } });
+
+  // A REAL daily-job snapshot already exists for TODAY (the backfill writes that date too) — a
+  // distinctive value + approx=false, exactly what the cron would leave.
+  const today = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`);
+  const REAL_VALUE = 123456.789; // distinct from any Σ(balance × mocked price) the backfill computes
+  await prisma.balanceSnapshot.create({
+    data: { portfolioId: portfolio.id, userId: user.id, snapshotDate: today, value: REAL_VALUE.toString(), approx: false },
+  });
+
+  await runSnapshotsBackfill({ source: mockSource(), throttleMs: 0 });
+
+  // Today's real row is untouched: same value, still approx=false (the conflict clause only
+  // overwrites already-approx rows).
+  const todayRow = await prisma.balanceSnapshot.findUniqueOrThrow({
+    where: { portfolioId_snapshotDate: { portfolioId: portfolio.id, snapshotDate: today } },
+  });
+  expect(Number(todayRow.value.toString())).toBeCloseTo(REAL_VALUE, 5);
+  expect(todayRow.approx).toBe(false);
+
+  // Every OTHER (historical) row the script wrote is an estimate → approx=true, so it can never
+  // serve as a short-term baseline (retrofit-77).
+  const historical = await prisma.balanceSnapshot.findMany({
+    where: { portfolioId: portfolio.id, snapshotDate: { lt: today } },
+    select: { approx: true },
+  });
+  expect(historical.length).toBe(DAYS - 1);
+  expect(historical.every((r) => r.approx === true)).toBe(true);
+});
+
 it('r42-fallback: an unmapped token uses the deterministic synthetic series (seriesFor)', async () => {
   await runSnapshotsBackfill({ source: mockSource(), throttleMs: 0 });
   const usdt = await prisma.token.findUniqueOrThrow({ where: { symbol: 'USDT' } });

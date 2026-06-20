@@ -20,6 +20,7 @@
     "seed:tokens": "tsx src/scripts/seed-catalog.ts",
     "backfill:costbasis": "tsx src/scripts/backfill-costbasis.ts",
     "backfill:snapshots": "tsx src/scripts/backfill-snapshots.ts",
+    "reclassify:snapshots": "tsx src/scripts/reclassify-connected-snapshots.ts",
     "test": "vitest run"
   },
   "prisma": {

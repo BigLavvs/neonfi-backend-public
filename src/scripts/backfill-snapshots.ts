@@ -21,6 +21,10 @@
 //   3. Per-portfolio daily value = Σ(current balance × that-day price) using whichever series each
 //      held token ended up with, for EVERY portfolio (the read isn't Pro-gated). (Simplification:
 //      uses CURRENT balances for all past days — a demo curve, not a holdings reconstruction.)
+//      retrofit-78 A1: these balance rows are written approx=true (they're estimates by
+//      construction) so they never serve as a short-term 24h/7d/30d baseline (retrofit-77), and the
+//      ON CONFLICT clause only overwrites already-approx rows — a re-run never clobbers the real
+//      daily-job snapshots' observed values.
 //   4. Invalidate the affected derived caches + per-user overview caches.
 //
 // IDEMPOTENT: synthetic series use a per-tokenId-seeded PRNG (same curve every run) and real series
@@ -221,10 +225,18 @@ async function bulkUpsert(
         ON CONFLICT ("tokenId", "snapshotDate") DO UPDATE SET "price" = EXCLUDED."price"
       `;
     } else {
+      // retrofit-78 A1: every balance row this demo backfill writes is an ESTIMATE
+      // (Σ CURRENT balance × that-day price — the file header's "demo curve"), so it is
+      // marked approx=true and must NEVER serve as a short-term 24h/7d/30d baseline
+      // (retrofit-77). The conflict clause only overwrites rows that are ALREADY approximate
+      // (`WHERE "balance_snapshot"."approx" = true`), so a real daily-job snapshot
+      // (approx=false) keeps its observed value and flag if this script is re-run after the
+      // cron has written real history.
       written += await prisma.$executeRaw`
-        INSERT INTO "balance_snapshot" ("portfolioId", "userId", "value", "snapshotDate")
+        INSERT INTO "balance_snapshot" ("portfolioId", "userId", "value", "snapshotDate", "approx")
         VALUES ${Prisma.join(chunk)}
-        ON CONFLICT ("portfolioId", "snapshotDate") DO UPDATE SET "value" = EXCLUDED."value"
+        ON CONFLICT ("portfolioId", "snapshotDate") DO UPDATE SET "value" = EXCLUDED."value", "approx" = true
+        WHERE "balance_snapshot"."approx" = true
       `;
     }
   }
@@ -343,7 +355,8 @@ export async function runSnapshotsBackfill(opts: BackfillSnapshotsOpts = {}): Pr
       let value = 0;
       for (const h of holdings) if (h.series) value += h.balance * h.series[i]!;
       balanceRowSql.push(
-        Prisma.sql`(${p.id}::int, ${p.userId}::int, ${dec8(value)}::decimal, ${ymdByIndex[i]!}::date)`,
+        // retrofit-78 A1: trailing `true` = approx — this is a demo/estimate curve, never a baseline.
+        Prisma.sql`(${p.id}::int, ${p.userId}::int, ${dec8(value)}::decimal, ${ymdByIndex[i]!}::date, true)`,
       );
     }
   }
