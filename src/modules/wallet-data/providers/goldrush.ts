@@ -4,15 +4,36 @@
 // Raw balances are integer strings scaled by contract_decimals. Network/HTTP/parse
 // failure → { status: 'error' }.
 
+import WebSocket from 'ws';
 import type {
   ProviderResult,
   TransferPage,
   WalletDataProvider,
   WalletNftHolding,
+  WalletPnl,
   WalletToken,
+  WalletTokenPnl,
   WalletTransfer,
 } from '../types.js';
 import { buildSummary, NATIVE_SYMBOLS } from '../build-summary.js';
+
+// retrofit-79 (§1): GoldRush Streaming API (GraphQL-over-WebSocket) — the home of the
+// turnkey `upnlForWallet` query (cost basis + realized + unrealized per token). It is a
+// QUERY (not a subscription) but only served over the graphql-transport-ws protocol; auth is
+// a Bearer header. slug → the `ChainNameUpnl` enum the query takes (probe-confirmed the 7
+// supported chains — a SUBSET of COV_CHAIN, so PnL gets its own map). Beta endpoint: we pin
+// to the exact fields the probe verified and tolerate schema drift (any miss → null).
+const GOLDRUSH_STREAMING_URL = 'wss://streaming.goldrushdata.com/graphql';
+const UPNL_TIMEOUT_MS = 60000; // server-side compute is ~30-46s for active wallets; bounded headroom.
+const COV_UPNL_CHAIN: Record<string, string> = {
+  eth: 'ETH_MAINNET',
+  base: 'BASE_MAINNET',
+  bnb: 'BSC_MAINNET',
+  polygon: 'POLYGON_MAINNET',
+  optimism: 'OPTIMISM_MAINNET',
+  gnosis: 'GNOSIS_MAINNET',
+  solana: 'SOLANA_MAINNET',
+};
 
 // slug → Covalent chain name. polygon-zkevm intentionally omitted (uncertain mapping).
 const COV_CHAIN: Record<string, string> = {
@@ -99,6 +120,99 @@ export class GoldRushWalletProvider implements WalletDataProvider {
       console.error('[wallet-data] goldrush getSummary failed', (e as Error).message);
       return { status: 'error' };
     }
+  }
+
+  // retrofit-79 (§1, PnL PRIMARY): turnkey wallet PnL / cost basis via the Streaming API's
+  // `upnlForWallet` GraphQL query. Probe-confirmed shape: a flat list of UpnlWalletItem, each
+  // with token_address, cost_basis (per-unit weighted-avg buy price), pnl_realized_usd,
+  // pnl_unrealized_usd, and a nested contract_metadata { contract_ticker_symbol,
+  // contract_address }. NOTE current_price is unreliable (returns 0), so we ignore it and let
+  // derive.ts recompute unrealized from our live prices. Unsupported chain / non-ok / timeout /
+  // parse → null so the orchestrator falls through to Moralis. Never throws.
+  async getWalletPnl(address: string, chainSlug: string): Promise<WalletPnl | null> {
+    const chainEnum = COV_UPNL_CHAIN[chainSlug];
+    if (!chainEnum || !this.apiKey) return null;
+    // SCALARS ONLY — the nested `contract_metadata` subselection makes the server-side
+    // computation far slower (it times out for active wallets), and we don't need the ticker:
+    // the sync resolves each item to a catalog token by its on-chain `token_address`. Probe-
+    // confirmed this scalar query returns in time where the metadata variant did not.
+    const query =
+      `query { upnlForWallet(chain_name: ${chainEnum}, wallet_address: "${address}") {` +
+      ` token_address cost_basis pnl_realized_usd pnl_unrealized_usd } }`;
+    try {
+      const data = await this.runStreamingQuery<{ upnlForWallet?: UpnlWalletItem[] }>(query);
+      const items = Array.isArray(data?.upnlForWallet) ? data!.upnlForWallet! : null;
+      if (!items) return null;
+      const tokens: WalletTokenPnl[] = [];
+      for (const it of items) {
+        const contract = (it.token_address ?? '').toLowerCase();
+        if (!contract) continue;
+        const symbol = null; // not fetched (metadata subquery is too slow); resolved by contract
+        // cost_basis is the per-unit avg buy price of currently-held units; > 0 means the token
+        // was genuinely bought (cost-tracked). 0 / null → cost-unknown (transfer-acquired).
+        const cb = typeof it.cost_basis === 'number' && Number.isFinite(it.cost_basis) ? it.cost_basis : null;
+        tokens.push({
+          symbol,
+          contractAddress: contract || null,
+          avgCost: cb != null && cb > 0 ? cb : null,
+          realizedPnlUsd: num(it.pnl_realized_usd),
+          unrealizedPnlUsd: num(it.pnl_unrealized_usd),
+        });
+      }
+      return { provider: this.name, tokens };
+    } catch (e) {
+      console.error('[wallet-data] goldrush getWalletPnl failed', (e as Error).message);
+      return null;
+    }
+  }
+
+  // One-shot GraphQL-over-WebSocket (graphql-transport-ws) query: connect with a Bearer header,
+  // connection_init → connection_ack → subscribe → first `next` → resolve its data, then close.
+  // Any error/complete-without-data/close/timeout resolves null (best-effort, never throws out).
+  private runStreamingQuery<T>(query: string): Promise<T | null> {
+    return new Promise<T | null>((resolve) => {
+      let settled = false;
+      const finish = (r: T | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          ws.close();
+        } catch {
+          /* already closing */
+        }
+        resolve(r);
+      };
+      const ws = new WebSocket(GOLDRUSH_STREAMING_URL, 'graphql-transport-ws', {
+        headers: { Authorization: `Bearer ${this.apiKey!}` },
+      });
+      const timer = setTimeout(() => finish(null), UPNL_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      ws.on('open', () => ws.send(JSON.stringify({ type: 'connection_init', payload: {} })));
+      ws.on('message', (raw: WebSocket.RawData) => {
+        let msg: { type?: string; payload?: { data?: T; errors?: unknown } };
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch {
+          return;
+        }
+        if (msg.type === 'connection_ack') {
+          ws.send(JSON.stringify({ id: '1', type: 'subscribe', payload: { query } }));
+        } else if (msg.type === 'ping') {
+          // graphql-transport-ws keepalive — the server stalls result delivery if we don't pong.
+          ws.send(JSON.stringify({ type: 'pong' }));
+        } else if (msg.type === 'next') {
+          if (msg.payload?.errors) {
+            console.error('[wallet-data] goldrush uPnL query errors', JSON.stringify(msg.payload.errors).slice(0, 300));
+          }
+          finish(msg.payload?.data ?? null);
+        } else if (msg.type === 'error' || msg.type === 'complete' || msg.type === 'connection_error') {
+          finish(null);
+        }
+      });
+      ws.on('error', () => finish(null));
+      ws.on('close', () => finish(null));
+    });
   }
 
   // retrofit-56: the wallet's REAL on-chain tx total. Probe-confirmed shape:
@@ -457,6 +571,21 @@ interface CovNftItem {
   supports_erc?: string[] | null;
   is_spam?: boolean;
   nft_data?: CovNftData[] | null;
+}
+
+// upnlForWallet item (retrofit-79 §1, probe-confirmed: UpnlWalletItem fields are snake_case;
+// cost_basis/current_price/pnl_*_usd are Float; contract_metadata is a nested object).
+interface UpnlWalletItem {
+  token_address?: string | null;
+  cost_basis?: number | null;
+  pnl_realized_usd?: number | null;
+  pnl_unrealized_usd?: number | null;
+}
+
+function num(v: number | string | null | undefined): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 // Covalent returns the raw integer balance as a string; divide by 10^decimals.

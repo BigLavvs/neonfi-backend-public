@@ -46,6 +46,12 @@ function round(n: number, dp = 2): number {
   return Math.round(n * f) / f;
 }
 
+// retrofit-79 (§2/§4): null-preserving round — an unknown PnL (no baseline / no cost basis)
+// stays null on the wire so the frontend renders "—" rather than a fabricated 0.
+function roundN(n: number | null, dp = 2): number | null {
+  return n == null ? null : round(n, dp);
+}
+
 // Mirrors derive.ts's GET/parse/return-or-recompute pattern: a Redis miss or a
 // malformed payload falls through to a fresh compute, and a SET failure logs but
 // never blocks the read.
@@ -65,10 +71,10 @@ async function withCache<T>(key: string, compute: () => Promise<T>): Promise<T> 
   return result;
 }
 
-// Period PnL from a past snapshot value. Null (no snapshot in the window) or a zero
-// baseline → [0, 0]: "no historical comparison available", never NaN/Infinity.
-function computePnlPeriod(today: number, pastValue: number | null): [number, number] {
-  if (pastValue === null || pastValue === 0) return [0, 0];
+// Period PnL from a past snapshot value. retrofit-79 (§2/D1): no snapshot in the window (or a
+// zero baseline) → [null, null] ("unknown", the UI shows "—"), distinct from a real flat 0.
+function computePnlPeriod(today: number, pastValue: number | null): [number | null, number | null] {
+  if (pastValue === null || pastValue === 0) return [null, null];
   const delta = today - pastValue;
   const pct = (delta / pastValue) * 100;
   return [pct, delta];
@@ -99,16 +105,24 @@ async function buildSummary(portfolioId: number, isConnected: boolean): Promise<
     snap30d ? Number(snap30d.value.toString()) : null,
   );
 
+  // retrofit-79 (§6): a connected wallet WITH provider cost basis (pnlAllTimeValue non-null)
+  // surfaces "Total invested" (Σ current Asset.costBasis, the floor) + "Realized" (Σ per-token
+  // realized PnL) in place of the misleading windowed deposits/withdrawals (which stay null).
+  // Manual keeps its real Deposits/Withdrawals; connected w/o cost basis gets all four null (§4).
+  const connectedWithCostBasis = isConnected && derived.pnlAllTimeValue !== null;
+
   return {
     portfolioId,
-    allTimePnlPct: round(derived.pnlAllTime),
-    allTimePnlValue: round(derived.pnlAllTimeValue),
+    allTimePnlPct: roundN(derived.pnlAllTime),
+    allTimePnlValue: roundN(derived.pnlAllTimeValue),
     totalDeposits: totals ? round(totals.totalDeposits) : null,
     totalWithdrawals: totals ? round(totals.totalWithdrawals) : null,
-    pnl7d: round(pnl7d),
-    pnl7dValue: round(pnl7dValue),
-    pnl30d: round(pnl30d),
-    pnl30dValue: round(pnl30dValue),
+    totalInvested: connectedWithCostBasis ? round(derived.costBasisTotal) : null,
+    realizedPnl: connectedWithCostBasis ? round(derived.realizedPnlValue) : null,
+    pnl7d: roundN(pnl7d),
+    pnl7dValue: roundN(pnl7dValue),
+    pnl30d: roundN(pnl30d),
+    pnl30dValue: roundN(pnl30dValue),
   };
 }
 

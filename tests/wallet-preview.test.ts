@@ -27,13 +27,21 @@ vi.mock('../src/modules/email/email.service.js', () => ({
 // this module, so mock all four (retrofit-49 added the history + nft-holdings reads).
 // retrofit-56 added fetchTransactionCount + fetchValueHistory (connected count + snapshot
 // backfill); default them to null so the sync's best-effort calls are clean no-ops here.
-const { previewWalletMock, fetchWalletSummaryMock, fetchTransferPageMock, fetchNftHoldingsMock } =
-  vi.hoisted(() => ({
-    previewWalletMock: vi.fn(),
-    fetchWalletSummaryMock: vi.fn(),
-    fetchTransferPageMock: vi.fn(),
-    fetchNftHoldingsMock: vi.fn(),
-  }));
+const {
+  previewWalletMock,
+  fetchWalletSummaryMock,
+  fetchTransferPageMock,
+  fetchNftHoldingsMock,
+  fetchWalletPnlMock,
+} = vi.hoisted(() => ({
+  previewWalletMock: vi.fn(),
+  fetchWalletSummaryMock: vi.fn(),
+  fetchTransferPageMock: vi.fn(),
+  fetchNftHoldingsMock: vi.fn(),
+  // retrofit-79 (§1): the sync now also fetches provider PnL; default null (no cost basis) so the
+  // existing wiring tests stay deterministic. The cost-basis-applied case overrides it per-test.
+  fetchWalletPnlMock: vi.fn().mockResolvedValue(null),
+}));
 vi.mock('../src/modules/wallet-data/index.js', () => ({
   previewWallet: previewWalletMock,
   fetchWalletSummary: fetchWalletSummaryMock,
@@ -41,6 +49,7 @@ vi.mock('../src/modules/wallet-data/index.js', () => ({
   fetchNftHoldings: fetchNftHoldingsMock,
   fetchTransactionCount: vi.fn().mockResolvedValue(null),
   fetchValueHistory: vi.fn().mockResolvedValue(null),
+  fetchWalletPnl: fetchWalletPnlMock,
 }));
 
 const AUTH_BASE = '/api/v1/auth';
@@ -51,7 +60,7 @@ const VALID_EVM = '0xAbCdEf1234567890AbCdEf1234567890AbCdEf12';
 const AUTO_SYMBOL = 'ZZAUTO47';
 // retrofit-48: catalog rows pre-seeded / auto-listed by the sync-resolution cases below.
 // Cleared each run (after truncate drops their asset FKs) so resolution starts clean.
-const SYNC_TEST_SYMBOLS = [AUTO_SYMBOL, 'ZZEXIST48', 'ZZWALLET48', 'ZZBACKFILL48', 'ZZCOLLIDE48', 'WAYTOOLONGSYMBOLNAME1234567890'];
+const SYNC_TEST_SYMBOLS = [AUTO_SYMBOL, 'ZZEXIST48', 'ZZWALLET48', 'ZZBACKFILL48', 'ZZCOLLIDE48', 'WAYTOOLONGSYMBOLNAME1234567890', 'ZZPNL79A', 'ZZPNL79B'];
 
 async function authPost(path: string, body: Record<string, unknown>): Promise<Response> {
   return app.request(`${AUTH_BASE}${path}`, {
@@ -122,9 +131,11 @@ beforeEach(async () => {
   fetchWalletSummaryMock.mockReset();
   fetchTransferPageMock.mockReset();
   fetchNftHoldingsMock.mockReset();
+  fetchWalletPnlMock.mockReset();
   fetchWalletSummaryMock.mockResolvedValue(null); // default: connected create seeds nothing
   fetchTransferPageMock.mockResolvedValue(null); // default: no transfer history
   fetchNftHoldingsMock.mockResolvedValue(null); // default: no current nft holdings
+  fetchWalletPnlMock.mockResolvedValue(null); // default: no provider PnL (cost-unknown)
 });
 
 afterAll(async () => {
@@ -261,6 +272,47 @@ it('405: connected create sets balances DIRECTLY from the provider summary (no o
 
   // Existing stream registration is unchanged (still wired).
   expect(portfolio.moralisStreamId).toBe('mock-stream-preview');
+});
+
+it('r79: provider PnL writes per-token cost basis on sync (cost-tracked → avgCost/costBasis/realized; not-in-PnL → cost-unknown null)', async () => {
+  const { cookie } = await registerAndLogin();
+  const eth = await prisma.chain.findUniqueOrThrow({ where: { slug: 'eth' } });
+
+  // Held: token A (in the provider PnL → cost-tracked) + token B (NOT in the PnL → cost-unknown).
+  fetchWalletSummaryMock.mockResolvedValue({
+    nativeSymbol: 'ETH',
+    nativeBalance: 0,
+    totalUsd: 90,
+    tokenCount: 2,
+    tokens: [
+      { symbol: 'ZZPNL79A', name: 'Cost Tracked', contractAddress: '0xpnla', balance: 5, decimals: 18, usdPrice: 10, usdValue: 50, isNative: false },
+      { symbol: 'ZZPNL79B', name: 'Cost Unknown', contractAddress: '0xpnlb', balance: 4, decimals: 18, usdPrice: 10, usdValue: 40, isNative: false },
+    ],
+    provider: 'moralis',
+  });
+  // GoldRush-style PnL: only token A has a cost basis (avg buy 8/unit, realized +12.5). The
+  // orchestrator keys items by on-chain token_address (contractAddress).
+  fetchWalletPnlMock.mockResolvedValue({
+    provider: 'goldrush',
+    tokens: [
+      { symbol: null, contractAddress: '0xpnla', avgCost: 8, realizedPnlUsd: 12.5, unrealizedPnlUsd: 0 },
+    ],
+  });
+
+  const res = await portPost('', { name: 'PnL Sync', type: 'connected', walletAddress: VALID_EVM, chainId: eth.id }, cookie);
+  expect(res.status).toBe(201);
+  const portfolioId = (await res.json()).data.portfolio.id as number;
+
+  const assets = await prisma.asset.findMany({ where: { portfolioId }, include: { token: true } });
+  const a = assets.find((x) => x.token.symbol === 'ZZPNL79A')!;
+  const b = assets.find((x) => x.token.symbol === 'ZZPNL79B')!;
+  // Token A got the provider cost basis: avgCost 8, costBasis = 8 × 5 = 40, realized 12.5.
+  expect(Number(a.avgCost)).toBeCloseTo(8, 8);
+  expect(Number(a.costBasis)).toBeCloseTo(40, 8);
+  expect(Number(a.realizedPnl)).toBeCloseTo(12.5, 8);
+  // Token B was not in the PnL → genuinely cost-unknown → stays null/0 ("—").
+  expect(b.avgCost).toBeNull();
+  expect(Number(b.costBasis)).toBe(0);
 });
 
 it('406: connected create with an empty wallet → portfolio still created, no assets', async () => {

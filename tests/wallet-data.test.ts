@@ -11,11 +11,25 @@ import { MoralisWalletProvider } from '../src/modules/wallet-data/providers/mora
 import { GoldRushWalletProvider } from '../src/modules/wallet-data/providers/goldrush.js';
 import { AlchemyWalletProvider } from '../src/modules/wallet-data/providers/alchemy.js';
 import { AnkrWalletProvider } from '../src/modules/wallet-data/providers/ankr.js';
-import { previewWallet, fetchWalletSummary } from '../src/modules/wallet-data/index.js';
+// retrofit-79 (§1): fetchWalletPnl caches in Redis — mock it so these stay pure unit tests
+// (no Redis). get→null is a permanent cache miss; set/del are no-ops. Must be declared before
+// importing index.js (which imports redis).
+// Plain async fns (NOT vi.fn) — the shared afterEach calls vi.restoreAllMocks(), which would
+// reset vi.fn() implementations to return undefined and break fetchWalletPnl's `.catch` chain.
+vi.mock('../src/lib/redis.js', () => ({
+  redis: {
+    get: async () => null,
+    set: async () => 'OK',
+    del: async () => 1,
+  },
+}));
+
+import { previewWallet, fetchWalletSummary, fetchWalletPnl } from '../src/modules/wallet-data/index.js';
 import { sumHistoricalTokenValue } from '../src/modules/wallet-data/sync.js';
 import type {
   ProviderResult,
   WalletDataProvider,
+  WalletPnl,
 } from '../src/modules/wallet-data/types.js';
 
 function stubFetch(handler: (url: string, init?: RequestInit) => unknown): void {
@@ -822,5 +836,76 @@ describe('previewWallet orchestrator', () => {
 
     const none = fakeProvider('moralis', { result: { status: 'empty' } });
     expect(await fetchWalletSummary(VALID, ethChain, [none])).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// retrofit-79 (§1) — fetchWalletPnl orchestrator: GoldRush → Moralis priority, fallthrough
+// ---------------------------------------------------------------------------
+
+function fakePnlProvider(
+  name: string,
+  pnl: WalletPnl | null,
+  opts: { configured?: boolean; supports?: boolean } = {},
+): WalletDataProvider & { getWalletPnl: ReturnType<typeof vi.fn> } {
+  const getWalletPnl = vi.fn(async () => pnl);
+  return {
+    name,
+    isConfigured: () => opts.configured ?? true,
+    supportsChain: () => opts.supports ?? true,
+    getSummary: vi.fn(async () => ({ status: 'error' }) as ProviderResult),
+    getWalletPnl,
+  };
+}
+
+const pnlOf = (provider: string): WalletPnl => ({
+  provider,
+  tokens: [
+    { symbol: 'WBTC', contractAddress: '0xwbtc', avgCost: 35000, realizedPnlUsd: 1080, unrealizedPnlUsd: 0 },
+  ],
+});
+
+describe('fetchWalletPnl orchestrator (retrofit-79 §1)', () => {
+  const ethChain = { slug: 'eth' };
+  const VALID = '0xabcdef1234567890abcdef1234567890abcdef12';
+
+  it('GoldRush wins when it returns PnL — Moralis is not consulted (per-capability priority)', async () => {
+    const goldrush = fakePnlProvider('goldrush', pnlOf('goldrush'));
+    const moralis = fakePnlProvider('moralis', pnlOf('moralis'));
+    // Pass them in the GLOBAL Moralis-first order; fetchWalletPnl must reorder GoldRush first.
+    const out = await fetchWalletPnl(VALID, ethChain, { bypassCache: true }, [moralis, goldrush]);
+    expect(out!.provider).toBe('goldrush');
+    expect(moralis.getWalletPnl).not.toHaveBeenCalled();
+  });
+
+  it('falls through GoldRush → Moralis when GoldRush returns null', async () => {
+    const goldrush = fakePnlProvider('goldrush', null);
+    const moralis = fakePnlProvider('moralis', pnlOf('moralis'));
+    const out = await fetchWalletPnl(VALID, ethChain, { bypassCache: true }, [moralis, goldrush]);
+    expect(out!.provider).toBe('moralis');
+    expect(goldrush.getWalletPnl).toHaveBeenCalled();
+  });
+
+  it('falls through when GoldRush returns an EMPTY token list (no usable PnL)', async () => {
+    const goldrush = fakePnlProvider('goldrush', { provider: 'goldrush', tokens: [] });
+    const moralis = fakePnlProvider('moralis', pnlOf('moralis'));
+    const out = await fetchWalletPnl(VALID, ethChain, { bypassCache: true }, [goldrush, moralis]);
+    expect(out!.provider).toBe('moralis');
+  });
+
+  it('returns null when no provider can supply PnL (→ connected portfolio shows "—")', async () => {
+    const goldrush = fakePnlProvider('goldrush', null);
+    const moralis = fakePnlProvider('moralis', null);
+    const out = await fetchWalletPnl(VALID, ethChain, { bypassCache: true }, [goldrush, moralis]);
+    expect(out).toBeNull();
+  });
+
+  it('skips unconfigured / unsupported-chain providers', async () => {
+    const goldrush = fakePnlProvider('goldrush', pnlOf('goldrush'), { configured: false });
+    const moralis = fakePnlProvider('moralis', pnlOf('moralis'), { supports: false });
+    const out = await fetchWalletPnl(VALID, ethChain, { bypassCache: true }, [goldrush, moralis]);
+    expect(out).toBeNull();
+    expect(goldrush.getWalletPnl).not.toHaveBeenCalled();
+    expect(moralis.getWalletPnl).not.toHaveBeenCalled();
   });
 });

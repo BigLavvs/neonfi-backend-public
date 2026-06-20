@@ -488,20 +488,21 @@ it('r56: connectedValueHistory is [] when the user has only manual portfolios', 
 });
 
 // ---------------------------------------------------------------------------
-// retrofit-58 Part 2 — connected PnL is SNAPSHOT-based (not windowed cost basis)
+// retrofit-79 (§1c/§4) — connected PnL is the REAL cost-basis path (provider cost basis),
+// NOT the snapshot-delta retrofit-58 used (which conflated withdrawals with losses).
 // ---------------------------------------------------------------------------
 
-it('r58: connected portfolio PnL = snapshot deltas (all-time vs earliest, 24h vs ~1d ago); cost-basis ignored → no fake %', async () => {
+it('r79: connected portfolio WITH provider cost basis → cost-basis all-time (unrealized+realized), not snapshot deltas', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const connId = await createConnectedPortfolio(userId, 'Conn');
 
-  // Seed BTC 1.0 WITH a cost basis (avgCost 50000) — this is exactly the windowed-import
-  // garbage Part 2 must IGNORE for connected. BTC seeded price 93000 → totalValue 93000.
+  // Provider cost basis written into the Asset (as wallet-data/sync now does): avgCost 50000,
+  // costBasis 50000, realizedPnl 999. BTC seeded price 93000 → totalValue 93000.
   await seedAssetWithCost(connId, btcId, 1.0, { avgCost: 50000, costBasis: 50000, realizedPnl: 999 });
 
   const daysAgoYmd = (n: number) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
-  // Earliest recorded value (40d ago) = the all-time baseline; a ~1d-ago value = the 24h baseline.
+  // A ~1d-ago snapshot is the 24h baseline (short-term still comes from snapshots).
   await seedSnapshot(connId, userId, daysAgoYmd(40), 40000);
   await seedSnapshot(connId, userId, daysAgoYmd(2), 80000);
 
@@ -512,21 +513,47 @@ it('r58: connected portfolio PnL = snapshot deltas (all-time vs earliest, 24h vs
   const row = d.portfolios.find((p) => p.name === 'Conn')!;
   expect(row.type).toBe('connected');
   expect(row.totalValue).toBeCloseTo(93000, 2);
-  // All-time = current − EARLIEST snapshot (93000 − 40000), NOT cost-basis (which would be
-  // 93000 − 50000 = 43000). The honest "growth since tracking began".
-  expect(row.pnlAllTimeValue).toBeCloseTo(53000, 2);
-  expect(row.pnlAllTime).toBeCloseTo(132.5, 1); // 53000/40000*100 — sane, not +500%/+1314%
-  // 24h = current − the snapshot nearest ~1 day ago (93000 − 80000).
+  // Cost-basis PnL (the SAME path manual uses): unrealized = 1×(93000−50000)=43000; realized=999.
+  expect(row.unrealizedPnlValue).toBeCloseTo(43000, 2);
+  expect(row.realizedPnlValue).toBeCloseTo(999, 2);
+  expect(row.allTimePnlValue).toBeCloseTo(43999, 2);
+  // Canonical all-time = cost-basis (43999), NOT the snapshot-delta 53000 the old branch gave.
+  expect(row.pnlAllTimeValue).toBeCloseTo(43999, 2);
+  expect(row.pnlAllTime).toBeCloseTo(86, 1); // unrealizedPnlPct = 43000/50000*100
+  // 24h still comes from the snapshot nearest ~1 day ago (93000 − 80000).
   expect(row.pnl24hValue).toBeCloseTo(13000, 2);
-  // Cost-basis PnL is N/A for connected → 0 (the seeded avgCost/realizedPnl are ignored).
-  expect(row.unrealizedPnlValue).toBe(0);
-  expect(row.realizedPnlValue).toBe(0);
-  expect(row.allTimePnlValue).toBe(0);
 
-  // Totals propagate the same snapshot-based numbers (single connected portfolio).
-  expect(d.totals.unrealizedPnlValue).toBe(0);
-  expect(d.totals.pnlAllTimeValue).toBeCloseTo(53000, 2);
+  // Totals propagate the cost-basis numbers (single connected portfolio).
+  expect(d.totals.unrealizedPnlValue).toBeCloseTo(43000, 2);
+  expect(d.totals.realizedPnlValue).toBeCloseTo(999, 2);
+  expect(d.totals.pnlAllTimeValue).toBeCloseTo(43999, 2);
   expect(d.totals.pnl24hValue).toBeCloseTo(13000, 2);
+});
+
+it('r79-§4: connected portfolio WITHOUT cost basis → all-time null ("—"), excluded from totals', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const connId = await createConnectedPortfolio(userId, 'NoCost');
+
+  // Held BTC 1.0 but NO cost basis (avgCost null, realized 0) — a transfer-acquired / provider-
+  // miss wallet. BTC price 93000 → totalValue 93000.
+  await seedAssetWithCost(connId, btcId, 1.0, { avgCost: null, costBasis: 0, realizedPnl: 0 });
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const row = d.portfolios.find((p) => p.name === 'NoCost')!;
+  expect(row.totalValue).toBeCloseTo(93000, 2);
+  // §4: all-time is genuinely unknown → null, never a fabricated number.
+  expect(row.pnlAllTime).toBeNull();
+  expect(row.pnlAllTimeValue).toBeNull();
+  // No ~24h snapshot baseline → short-term is null too (§2/D1).
+  expect(row.pnl24h).toBeNull();
+  expect(row.pnl24hValue).toBeNull();
+  // The null-all-time portfolio is EXCLUDED from the totals all-time (not a phantom gain).
+  expect(d.totals.pnlAllTimeValue).toBe(0);
+  expect(d.totals.pnlAllTime).toBe(0);
 });
 
 // ---------------------------------------------------------------------------
@@ -604,6 +631,26 @@ it('r74-dedupe: the SAME wallet in two portfolios is not double-counted; distinc
   if (keys.length > 0) await redis.del(keys);
   const both = await getData(await overviewGet(cookies));
   expect(both.totals.transactionCount).toBe(130); // 100 (shared, once) + 30 (distinct wallet)
+});
+
+it('r79-§5: a connected portfolio with NULL externalTxCount does NOT contribute its windowed DB count', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  const manual = await createManualPortfolio(userId, 'M');
+  // Connected portfolio synced before externalTxCount existed (null). It has 3 imported DB rows,
+  // but those are a WINDOW — the windowed count would badly under-report, so it must NOT be used.
+  const connected = await createConnectedPortfolio(userId, 'C');
+  expect((await prisma.portfolio.findUniqueOrThrow({ where: { id: connected } })).externalTxCount).toBeNull();
+  await seedNativeTx(manual, '2026-01-01T00:00:00.000Z');
+  await seedNativeTx(manual, '2026-01-02T00:00:00.000Z');
+  await seedNativeTx(connected, '2026-01-03T00:00:00.000Z');
+  await seedNativeTx(connected, '2026-01-04T00:00:00.000Z');
+  await seedNativeTx(connected, '2026-01-05T00:00:00.000Z');
+
+  const d = await getData(await overviewGet(cookies));
+  // Only the manual DB rows (2) count; the connected portfolio's 3 windowed rows are excluded
+  // (its real total is unknown until a resync populates externalTxCount).
+  expect(d.totals.transactionCount).toBe(2);
 });
 
 // ---------------------------------------------------------------------------
@@ -1058,12 +1105,12 @@ it('r75-24h: a portfolio with no 24h snapshot does NOT spike totals 24h; totals 
   // pnl24h is over the included baseline only (80000), never diluted by M2's value.
   expect(d.totals.pnl24h).toBe(16.25); // 13000 / 80000 * 100
 
-  // And the headline equals the sum of the per-portfolio 24h rows (C1 connected = 13000,
-  // M2 manual = 0 — manual rows carry derive's 0). No portfolio is double-counted or invented.
-  const sumRows = d.portfolios.reduce((s, p) => s + p.pnl24hValue, 0);
+  // And the headline equals the sum of the per-portfolio 24h rows (C1 connected = 13000, M2
+  // manual = null — retrofit-79 §2, no baseline → "—"). The null row is excluded from the sum.
+  const sumRows = d.portfolios.reduce((s, p) => s + (p.pnl24hValue ?? 0), 0);
   expect(d.totals.pnl24hValue).toBe(sumRows);
   expect(d.portfolios.find((p) => p.name === 'C1')!.pnl24hValue).toBe(13000);
-  expect(d.portfolios.find((p) => p.name === 'M2')!.pnl24hValue).toBe(0);
+  expect(d.portfolios.find((p) => p.name === 'M2')!.pnl24hValue).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
@@ -1155,7 +1202,7 @@ it('r76-manual-24h: manual portfolio with a 24h-ago snapshot shows its 24h delta
 // to Σ of the per-portfolio rows.
 // ---------------------------------------------------------------------------
 
-it('r77-approx: connected portfolio whose only 24h-ago snapshot is approx shows 24h=0; a sibling with a real snapshot shows the delta; totals == Σ rows', async () => {
+it('r77-approx: connected portfolio whose only 24h-ago snapshot is approx shows 24h=— (null); a sibling with a real snapshot shows the delta; totals == Σ rows', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   // Cfresh: freshly synced — its only ~24h-old snapshot is a backfilled ESTIMATE (approx=true).
@@ -1177,14 +1224,15 @@ it('r77-approx: connected portfolio whose only 24h-ago snapshot is approx shows 
   const freshRow = d.portfolios.find((p) => p.name === 'Cfresh')!;
   const realRow = d.portfolios.find((p) => p.name === 'Creal')!;
 
-  // The approx-only portfolio reports NO 24h delta (—), not 3200 − 3000 = +200.
-  expect(freshRow.pnl24hValue).toBe(0);
-  expect(freshRow.pnl24h).toBe(0);
+  // retrofit-79 (§2/D1): the approx-only portfolio reports NO 24h delta → null ("—"), not 0
+  // (which would imply a real flat day) and not 3200 − 3000 = +200 off the inflated estimate.
+  expect(freshRow.pnl24hValue).toBeNull();
+  expect(freshRow.pnl24h).toBeNull();
   // The sibling with a real snapshot shows the true +200 delta off the identical baseline.
   expect(realRow.pnl24hValue).toBe(200); // 3200 − 3000
 
-  // Headline still reconciles with the rows (the 0 portfolio contributes 0 to both sides).
-  const sumRows = d.portfolios.reduce((s, p) => s + p.pnl24hValue, 0);
+  // Headline still reconciles with the rows (the null portfolio is excluded from both sides).
+  const sumRows = d.portfolios.reduce((s, p) => s + (p.pnl24hValue ?? 0), 0);
   expect(d.totals.pnl24hValue).toBe(200);
   expect(d.totals.pnl24hValue).toBe(sumRows);
 });

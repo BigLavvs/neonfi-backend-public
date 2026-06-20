@@ -79,11 +79,43 @@ export interface WalletNftHolding {
   possibleSpam: boolean; // retrofit-73 (H13): provider-flagged airdrop/scam NFT
 }
 
+// ---------------------------------------------------------------------------
+// Wallet PnL / cost basis (retrofit-79 §1)
+// ---------------------------------------------------------------------------
+
+// One token's PnL/cost-basis line as a provider reports it, normalized across providers.
+// A connected wallet has no on-chain cost basis from our windowed transfer import, so we
+// read it from a provider's turnkey wallet-PnL endpoint (GoldRush → Moralis) and feed the
+// EXISTING cost-basis PnL path (the one manual portfolios use). `avgCost` is the weighted-
+// average per-unit buy price of the currently-held units (null = genuinely cost-unknown,
+// e.g. a transfer-acquired token with no on-chain buy price → stays "—"). `realizedPnlUsd`
+// is the cumulative realized PnL for this token (present even for fully-sold tokens, so the
+// portfolio's realized total is honest). `unrealizedPnlUsd` is the PROVIDER's own unrealized
+// figure — a cross-check only; we recompute unrealized from OUR live price map so it's
+// consistent with the rest of the app (GoldRush's current_price is unreliable / often 0).
+export interface WalletTokenPnl {
+  symbol: string | null;            // contract ticker (for symbol-fallback resolution); null when absent
+  contractAddress: string | null;  // on-chain token address (lowercased); null for native
+  avgCost: number | null;           // per-unit weighted-avg cost basis; null = cost-unknown
+  realizedPnlUsd: number | null;    // cumulative realized PnL (USD)
+  unrealizedPnlUsd: number | null;  // provider unrealized (cross-check only — not stored)
+}
+
+export interface WalletPnl {
+  provider: string;                 // which provider produced this
+  tokens: WalletTokenPnl[];         // one entry per token the wallet has traded
+}
+
 export interface WalletDataProvider {
   name: string;
   isConfigured(): boolean;            // key present?
   supportsChain(chainSlug: string): boolean;
   getSummary(address: string, chainSlug: string): Promise<ProviderResult>;
+  // retrofit-79 (§1): optional turnkey wallet PnL / cost basis. A provider that can't supply
+  // it for a chain returns null and the orchestrator falls through (GoldRush first for THIS
+  // capability — a per-capability override of the global Moralis-first order — because it
+  // returns cost basis + realized + unrealized; Moralis is the realized-only fallback).
+  getWalletPnl?(address: string, chainSlug: string): Promise<WalletPnl | null>;
   // retrofit-49: optional real-history capability. A provider that can't supply history for
   // a chain returns null and the orchestrator falls through to the next (Moralis first).
   getTransferHistory?(

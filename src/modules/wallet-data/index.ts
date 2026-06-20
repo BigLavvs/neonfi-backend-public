@@ -9,11 +9,13 @@
 //   - 'invalid' — address fails format validation for the chain.
 
 import { config } from '../../lib/config.js';
+import { redis } from '../../lib/redis.js';
 import { validateWalletAddress } from '../portfolios/wallet-validator.js';
 import type {
   TransferPage,
   WalletDataProvider,
   WalletNftHolding,
+  WalletPnl,
   WalletSummary,
 } from './types.js';
 import { MoralisWalletProvider } from './providers/moralis.js';
@@ -159,6 +161,69 @@ export async function fetchValueHistory(
     if (!p.isConfigured() || !p.supportsChain(chain.slug) || !p.getValueHistory) continue;
     const vh = await p.getValueHistory(address, chain.slug, days);
     if (vh) return vh;
+  }
+  return null;
+}
+
+// retrofit-79 (§1): per-capability provider priority for wallet PnL — GoldRush FIRST (it
+// returns cost basis + realized + unrealized across its chains), Moralis the realized-only
+// fallback. This OVERRIDES the global Moralis-first PROVIDERS order; any provider not listed
+// here sorts last (defensive — only GoldRush/Moralis implement getWalletPnl today).
+const PNL_PROVIDER_ORDER: Record<string, number> = { goldrush: 0, moralis: 1 };
+
+// Cache the normalized PnL per wallet+chain — it only changes on new trades, and the GoldRush
+// query is a slow server-side computation, so we don't want to recompute it on every read.
+const PNL_CACHE_TTL_S = 6 * 60 * 60; // 6h
+const pnlCacheKey = (address: string, chainSlug: string): string =>
+  `wallet_pnl:${chainSlug}:${address.toLowerCase()}`;
+
+// retrofit-79 (§1): the wallet's per-token PnL / cost basis. Tries providers in the PnL-specific
+// priority (GoldRush → Moralis); the first USABLE response (non-null with ≥1 token) wins, and an
+// error / empty / unsupported-chain falls through — never throws, so a PnL miss can't fail a sync
+// (the caller degrades the connected portfolio to "—"). Cached for 6h unless `bypassCache` (resync
+// forces a fresh fetch). Returns null when no provider can supply it.
+export async function fetchWalletPnl(
+  address: string,
+  chain: { slug: string },
+  opts: { bypassCache?: boolean } = {},
+  providers: WalletDataProvider[] = PROVIDERS,
+): Promise<WalletPnl | null> {
+  const key = pnlCacheKey(address, chain.slug);
+  const readCache = async (): Promise<WalletPnl | null> => {
+    const cached = await redis.get(key).catch(() => null);
+    if (!cached) return null;
+    try {
+      return JSON.parse(cached) as WalletPnl;
+    } catch {
+      return null; // malformed payload
+    }
+  };
+
+  if (!opts.bypassCache) {
+    const cached = await readCache();
+    if (cached) return cached;
+  }
+
+  const ordered = providers
+    .filter((p) => p.getWalletPnl && p.isConfigured() && p.supportsChain(chain.slug))
+    .sort((a, b) => (PNL_PROVIDER_ORDER[a.name] ?? 99) - (PNL_PROVIDER_ORDER[b.name] ?? 99));
+  for (const p of ordered) {
+    const pnl = await p.getWalletPnl!(address, chain.slug);
+    if (pnl && pnl.tokens.length > 0) {
+      await redis
+        .set(key, JSON.stringify(pnl), 'EX', PNL_CACHE_TTL_S)
+        .catch((e: Error) => console.error('[wallet-data] pnl cache set failed', e.message));
+      return pnl;
+    }
+    // null / empty → fall through to the next provider.
+  }
+
+  // retrofit-79: a forced refresh (resync) that comes back empty (the Beta uPnL WS is slow and
+  // intermittently times out) falls back to the last cached PnL rather than regressing to null —
+  // so a flaky fetch never WIPES cost basis a prior sync established.
+  if (opts.bypassCache) {
+    const cached = await readCache();
+    if (cached) return cached;
   }
   return null;
 }

@@ -49,8 +49,9 @@ import {
   fetchNftHoldings,
   fetchTransactionCount,
   fetchValueHistory,
+  fetchWalletPnl,
 } from './index.js';
-import type { WalletNftHolding, WalletTransfer } from './types.js';
+import type { WalletNftHolding, WalletPnl, WalletTransfer } from './types.js';
 
 // How many transfers to pull per page (initial sync + resync + each "load more").
 // retrofit-74 (§2): 50 (was 100) — the initial sync seeds the latest 50 and each Pro "load more"
@@ -576,56 +577,168 @@ async function backfillConnectedSnapshots(
   }
 }
 
-// retrofit-58: set connected balances DIRECTLY from the provider summary — the authoritative
+// retrofit-79 (§1): per-token cost basis from the provider PnL, keyed by catalog tokenId.
+// `avgCost` is the per-unit weighted-avg buy price (null = cost-unknown / transfer-acquired);
+// `realized` is the cumulative realized PnL (USD, can be negative). Built by buildConnectedCostMap.
+export type ConnectedCostMap = Map<number, { avgCost: number | null; realized: number }>;
+
+const MAX_DECIMAL_20_8 = 999999999999.99999999;
+
+// Signed Decimal(20,8) string — unlike toDecimalString (which clamps negatives to 0 for
+// magnitudes), realizedPnl can be a real loss, so the sign must survive.
+function signedDec8(n: number): string {
+  if (!Number.isFinite(n)) return '0';
+  const clamped = Math.max(-MAX_DECIMAL_20_8, Math.min(MAX_DECIMAL_20_8, n));
+  let s = clamped.toFixed(8);
+  if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
+  return s;
+}
+
+// retrofit-79 (§1): resolve the provider PnL list to a tokenId → cost-basis map for THIS
+// portfolio. The PnL items are keyed by on-chain token_address, so we resolve each to a catalog
+// tokenId via, in order: (1) a HELD token's summary (on-chain) contract — covers catalog rows
+// whose stored contract drifted (e.g. a symbol-resolved auto-list); (2) an EXISTING portfolio
+// asset's token contract — covers tokens already imported then sold out; (3) the catalog by
+// contract — covers majors sold before the import window. A token that resolves to none (a
+// non-catalog token fully exited before the window — we have no symbol to auto-list it, since
+// the metadata subquery is too slow) is skipped. Items with neither a cost basis nor a non-zero
+// realized PnL carry no information and are skipped. Returns null when there's nothing usable.
+async function buildConnectedCostMap(
+  portfolioId: number,
+  held: HeldToken[],
+  pnl: WalletPnl,
+): Promise<ConnectedCostMap | null> {
+  // tier 1: held by on-chain contract.
+  const heldByContract = new Map<string, number>();
+  for (const h of held) if (h.contractAddress) heldByContract.set(h.contractAddress, h.tokenId);
+
+  // tier 2: existing portfolio assets by their catalog token contract.
+  const existing = await prisma.asset.findMany({
+    where: { portfolioId },
+    select: { tokenId: true, token: { select: { contractAddress: true } } },
+  });
+  const existingByContract = new Map<string, number>();
+  for (const a of existing) {
+    if (a.token.contractAddress) existingByContract.set(a.token.contractAddress.toLowerCase(), a.tokenId);
+  }
+
+  const map: ConnectedCostMap = new Map();
+  for (const t of pnl.tokens) {
+    const contract = t.contractAddress;
+    if (!contract) continue;
+    const hasInfo = t.avgCost != null || (t.realizedPnlUsd != null && Math.abs(t.realizedPnlUsd) > 1e-9);
+    if (!hasInfo) continue;
+    let tokenId = heldByContract.get(contract) ?? existingByContract.get(contract);
+    if (tokenId == null) {
+      // tier 3: catalog by contract (no auto-list — we have no symbol from the scalar query).
+      const tok = await prisma.token.findFirst({
+        where: { contractAddress: { equals: contract, mode: 'insensitive' } },
+        select: { id: true },
+      });
+      if (tok) tokenId = tok.id;
+    }
+    if (tokenId == null) continue;
+    map.set(tokenId, { avgCost: t.avgCost, realized: t.realizedPnlUsd ?? 0 });
+  }
+  return map.size > 0 ? map : null;
+}
+
+// retrofit-79 (§1): await the in-flight provider PnL fetch and resolve it to a cost map for this
+// portfolio. undefined when no provider returned PnL (the portfolio stays cost-unknown → "—").
+// Never throws — a PnL miss must not fail the sync.
+async function resolveConnectedCostMap(
+  portfolioId: number,
+  held: HeldToken[],
+  pnlPromise: Promise<WalletPnl | null>,
+): Promise<ConnectedCostMap | undefined> {
+  try {
+    const pnl = await pnlPromise;
+    if (!pnl) return undefined;
+    return (await buildConnectedCostMap(portfolioId, held, pnl)) ?? undefined;
+  } catch (e) {
+    console.error('[wallet-sync] cost-map build failed', (e as Error).message);
+    return undefined;
+  }
+}
+
+// retrofit-58/79: set connected balances DIRECTLY from the provider summary — the authoritative
 // current state. Each held token's Asset.balance becomes the provider's EXACT balance; any
-// existing asset NOT in the summary is zeroed (the wallet sold out of it). This replaces the
-// residual opening-lot reconcile, killing both failure modes retrofit-57 traced:
+// existing asset NOT in the summary (and not carrying provider PnL) is zeroed (sold out). This
+// replaces the residual opening-lot reconcile, killing both failure modes retrofit-57 traced:
 //   - NEGATIVE: a sold token (absent from the summary) is set to 0, never left negative.
 //   - INFLATED: an over-imported held token is set to the provider balance, not the windowed sum.
-// Cost-basis fields (avgCost/costBasis/realizedPnl/netDeposit) are cleared: a windowed transfer
-// import can't yield a trustworthy cost basis for a connected wallet, so connected PnL is derived
-// from recorded BalanceSnapshot deltas instead (Part 2). The imported transactions remain as the
-// activity feed; they simply no longer drive the balance. Idempotent (a resync re-sets the same
-// values). Returns the number of held tokens set (the resync "reconciled" count). Per-token
+//
+// retrofit-79 (§1): `cost` carries the provider's per-token cost basis (GoldRush → Moralis).
+//   - cost PRESENT: write avgCost/costBasis/realizedPnl per token (cost-unknown → null/0); a
+//     cost-map token that isn't currently held becomes a balance-0 row carrying its realized PnL
+//     (so the portfolio's all-time realized is honest). This REPLACES retrofit-58's blanket
+//     clearing — connected PnL now uses the real cost-basis path (derive.ts), not snapshot deltas.
+//   - cost ABSENT (webhook balance refresh / provider PnL miss): PRESERVE the existing cost fields
+//     (only the balance is touched) so a frequent balance refresh can't wipe the cost basis a
+//     prior sync wrote. netDeposit stays out of connected all-time, so it's left at 0.
+// Idempotent. Returns the number of held tokens set (the resync "reconciled" count). Per-token
 // best-effort — one failed upsert logs and continues.
 export async function setConnectedBalancesFromSummary(
   portfolioId: number,
   held: HeldToken[],
+  cost?: ConnectedCostMap,
 ): Promise<number> {
-  const heldTokenIds = new Set(held.map((h) => h.tokenId));
+  const heldById = new Map(held.map((h) => [h.tokenId, h]));
+  const ids = new Set<number>(heldById.keys());
+  if (cost) for (const id of cost.keys()) ids.add(id);
 
-  for (const h of held) {
+  for (const tokenId of ids) {
+    const h = heldById.get(tokenId);
+    const balance = h ? h.balance : 0;
     try {
-      await prisma.asset.upsert({
-        where: { portfolioId_tokenId: { portfolioId, tokenId: h.tokenId } },
-        update: {
-          balance: toDecimalString(h.balance),
-          avgCost: null,
-          costBasis: '0',
-          realizedPnl: '0',
-          netDeposit: '0',
-        },
-        create: {
-          portfolioId,
-          tokenId: h.tokenId,
-          balance: toDecimalString(h.balance),
-        },
-      });
+      if (cost) {
+        const c = cost.get(tokenId);
+        // avgCost only values currently-held units; a balance-0 (sold-out) row keeps null.
+        const avgCost = c?.avgCost != null && balance > 0 ? c.avgCost : null;
+        const costBasis = avgCost != null ? avgCost * balance : 0;
+        const realized = c?.realized ?? 0;
+        await prisma.asset.upsert({
+          where: { portfolioId_tokenId: { portfolioId, tokenId } },
+          update: {
+            balance: toDecimalString(balance),
+            avgCost: avgCost != null ? toDecimalString(avgCost) : null,
+            costBasis: toDecimalString(costBasis),
+            realizedPnl: signedDec8(realized),
+            netDeposit: '0',
+          },
+          create: {
+            portfolioId,
+            tokenId,
+            balance: toDecimalString(balance),
+            avgCost: avgCost != null ? toDecimalString(avgCost) : null,
+            costBasis: toDecimalString(costBasis),
+            realizedPnl: signedDec8(realized),
+          },
+        });
+      } else {
+        // Balance-only refresh — preserve cost fields.
+        await prisma.asset.upsert({
+          where: { portfolioId_tokenId: { portfolioId, tokenId } },
+          update: { balance: toDecimalString(balance) },
+          create: { portfolioId, tokenId, balance: toDecimalString(balance) },
+        });
+      }
     } catch (e) {
-      console.error('[wallet-sync] set-balance failed', { symbol: h.symbol }, (e as Error).message);
+      console.error('[wallet-sync] set-balance failed', { tokenId }, (e as Error).message);
     }
   }
 
-  // Zero any existing asset the wallet no longer holds (absent from the provider summary).
-  const existing = await prisma.asset.findMany({
-    where: { portfolioId },
-    select: { tokenId: true },
-  });
-  const toZero = existing.filter((a) => !heldTokenIds.has(a.tokenId)).map((a) => a.tokenId);
+  // Zero any existing asset the wallet no longer holds AND that carries no provider PnL.
+  const existing = await prisma.asset.findMany({ where: { portfolioId }, select: { tokenId: true } });
+  const toZero = existing.filter((a) => !ids.has(a.tokenId)).map((a) => a.tokenId);
   if (toZero.length > 0) {
+    // With a cost map we own the cost fields → clear the sold-out row outright. Without one
+    // (webhook), preserve cost fields and only zero the balance.
     await prisma.asset.updateMany({
       where: { portfolioId, tokenId: { in: toZero } },
-      data: { balance: '0', avgCost: null, costBasis: '0', realizedPnl: '0', netDeposit: '0' },
+      data: cost
+        ? { balance: '0', avgCost: null, costBasis: '0', realizedPnl: '0', netDeposit: '0' }
+        : { balance: '0' },
     });
   }
 
@@ -665,6 +778,10 @@ interface HeldToken {
   symbol: string;
   balance: number;
   usdPrice: number | null;
+  // retrofit-79 (§1): the SUMMARY (on-chain) contract, lowercased — used to match provider
+  // PnL items (keyed by on-chain token_address) back to this held token's catalog row, even
+  // when the catalog row's stored contract has drifted (e.g. a symbol-resolved auto-list).
+  contractAddress: string | null;
 }
 
 // Resolve/auto-list every held token from the provider summary (creating catalog rows with
@@ -684,7 +801,13 @@ export async function resolveHeldTokens(
         contractAddress: t.contractAddress,
         usdPrice: t.usdPrice,
       });
-      held.push({ tokenId: token.id, symbol: token.symbol, balance: t.balance, usdPrice: t.usdPrice });
+      held.push({
+        tokenId: token.id,
+        symbol: token.symbol,
+        balance: t.balance,
+        usdPrice: t.usdPrice,
+        contractAddress: t.contractAddress ? t.contractAddress.toLowerCase() : null,
+      });
     } catch (e) {
       console.error('[wallet-sync] token resolve failed', { symbol: t.symbol }, (e as Error).message);
     }
@@ -700,6 +823,11 @@ export async function syncConnectedHoldings(
   // Need the full portfolio (type + chain) for the webhook-style transaction writes.
   const portfolio = await findPortfolioById(portfolioId);
   if (!portfolio) return;
+
+  // retrofit-79 (§1): kick off the (slow, server-side-computed) provider PnL fetch up front so
+  // it overlaps the transfer/NFT imports below instead of serializing before them. Best-effort —
+  // a miss leaves the portfolio cost-unknown ("—"), never failing the sync.
+  const pnlPromise = fetchWalletPnl(address, chain).catch(() => null);
 
   // Current balances (for reconciliation) + the first page of real history, in parallel.
   const [summary, page] = await Promise.all([
@@ -719,10 +847,11 @@ export async function syncConnectedHoldings(
   const nftHoldings = await fetchNftHoldings(address, chain);
   if (nftHoldings && nftHoldings.length > 0) await importNftHoldings(portfolio, nftHoldings);
 
-  // Pass 4 (retrofit-58): set balances DIRECTLY from the provider summary — the authoritative
-  // current state (no reconstruction). Runs AFTER import so it overrides any balance the
-  // imported transactions' recalc left behind.
-  await setConnectedBalancesFromSummary(portfolioId, held);
+  // Pass 4 (retrofit-58/79): set balances DIRECTLY from the provider summary, and write the
+  // provider's per-token cost basis (so derive.ts uses the real cost-basis PnL path, not snapshot
+  // deltas). Runs AFTER import so it overrides any balance the imported transactions left behind.
+  const cost = await resolveConnectedCostMap(portfolioId, held, pnlPromise);
+  await setConnectedBalancesFromSummary(portfolioId, held, cost);
 
   // Pass 5 (retrofit-56): the REAL on-chain tx count (the fixed total the overview consumes)
   // + a daily value-history backfill into BalanceSnapshot (the connected portion of the chart).
@@ -763,6 +892,10 @@ export async function resyncConnectedHoldings(
   const portfolio = await findPortfolioById(portfolioId);
   if (!portfolio || !address || !chain) return { importedTransfers: 0, reconciled: 0 };
 
+  // retrofit-79 (§1): resync is a deliberate user action → force a FRESH provider PnL fetch
+  // (bypass the cache) so the cost basis reflects any new trades. Overlaps the imports below.
+  const pnlPromise = fetchWalletPnl(address, chain, { bypassCache: true }).catch(() => null);
+
   const [summary, page] = await Promise.all([
     fetchWalletSummary(address, chain),
     fetchTransferPage(address, chain, { limit: PAGE_LIMIT }),
@@ -779,8 +912,9 @@ export async function resyncConnectedHoldings(
   const nftHoldings = await fetchNftHoldings(address, chain);
   if (nftHoldings && nftHoldings.length > 0) await importNftHoldings(portfolio, nftHoldings);
 
-  // retrofit-58: re-set balances straight from the provider summary (idempotent, never drifts).
-  const reconciled = await setConnectedBalancesFromSummary(portfolioId, held);
+  // retrofit-58/79: re-set balances + provider cost basis (idempotent, never drifts).
+  const cost = await resolveConnectedCostMap(portfolioId, held, pnlPromise);
+  const reconciled = await setConnectedBalancesFromSummary(portfolioId, held, cost);
 
   // retrofit-56: refresh the REAL on-chain tx count. retrofit-60 C2: resync is INCREMENTAL —
   // only top up today's snapshot (the corrected current balance), never re-pull the multi-year

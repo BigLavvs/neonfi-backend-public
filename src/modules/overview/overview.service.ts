@@ -62,6 +62,12 @@ function round(n: number, dp = 2): number {
   return Math.round(n * f) / f;
 }
 
+// retrofit-79 (§2/§4): null-preserving round — a null PnL (no baseline / no cost basis) stays
+// null on the wire so the frontend renders "—" rather than a fabricated 0.
+function roundN(n: number | null, dp = 2): number | null {
+  return n == null ? null : round(n, dp);
+}
+
 /**
  * retrofit-75 (R39): the canonical all-time PnL for a portfolio. The two portfolio types
  * measure "all-time" differently and derive.ts already computes BOTH:
@@ -75,7 +81,11 @@ function round(n: number, dp = 2): number {
  * Surfaced as the canonical pnlAllTimeValue / pnlAllTime everywhere (per-portfolio DTO +
  * totals) — the fields the dashboard already reads — so no DTO shape change.
  */
-function canonicalAllTime(type: string, d: DerivedFields): { value: number; pct: number } {
+// retrofit-79 (§1c/§4): connected now ALSO resolves to a cost-basis all-time — derive.ts
+// repurposes pnlAllTime* to carry it (or null when the wallet has no provider cost basis, so a
+// connected portfolio shows "—" instead of the old snapshot-delta −96%). Manual is unchanged
+// (cost-basis all-time over Σ costBasis). Returns null value/pct when unknown.
+function canonicalAllTime(type: string, d: DerivedFields): { value: number | null; pct: number | null } {
   return type === 'connected'
     ? { value: d.pnlAllTimeValue, pct: d.pnlAllTime }
     : { value: d.allTimePnlValue, pct: d.unrealizedPnlPct };
@@ -280,7 +290,13 @@ async function buildOverview(
   let transactionCount = 0;
   const countedWallets = new Set<string>();
   for (const p of portfolios) {
-    if (p.type.name === 'connected' && p.externalTxCount != null) {
+    if (p.type.name === 'connected') {
+      // retrofit-79 (§5): a connected portfolio imports only a WINDOW of transactions, so the DB
+      // row count badly under-reports the wallet's real activity. Use the provider total
+      // (externalTxCount) only; if it's missing (synced before the field existed / a sync gap),
+      // contribute 0 rather than the misleading windowed count — a resync re-populates it. Dedupe
+      // by wallet so the same wallet in two portfolios isn't double-counted.
+      if (p.externalTxCount == null) continue;
       const walletKey = (p.walletAddress ?? '').toLowerCase();
       if (walletKey && countedWallets.has(walletKey)) continue; // same wallet already counted
       if (walletKey) countedWallets.add(walletKey);
@@ -299,6 +315,10 @@ async function buildOverview(
   // the recomputed pnlAllTime % is over the implied aggregate base (connected stays its
   // snapshot %, a stablecoin-only manual contributes ~0, the aggregate sits between).
   let pnlAllTimeValue = 0;
+  // retrofit-79 (§2/§4): a portfolio with an UNKNOWN all-time (connected w/o cost basis → null)
+  // is excluded from BOTH the summed value and the implied %-base (allTimeBaseValueNow), so its
+  // current value can't read as a phantom all-time gain (mirrors the 24h totals-exclusion).
+  let allTimeBaseValueNow = 0;
   // retrofit-27 average-cost aggregate. unrealized/realized sum the per-portfolio derived
   // values; the %-base Σ(costBasis) is accumulated in the allocation loop below (it already
   // iterates every asset, and each asset row carries costBasis).
@@ -306,12 +326,17 @@ async function buildOverview(
   let realizedPnlValue = 0;
   derivedList.forEach((d, i) => {
     totalValue += d.totalValue;
-    pnlAllTimeValue += canonicalAllTime(portfolios[i]!.type.name, d).value;
     unrealizedPnlValue += d.unrealizedPnlValue;
     realizedPnlValue += d.realizedPnlValue;
+    const canon = canonicalAllTime(portfolios[i]!.type.name, d);
+    if (canon.value != null) {
+      pnlAllTimeValue += canon.value;
+      allTimeBaseValueNow += d.totalValue;
+    }
   });
-  // Guard divide-by-zero → 0 (never NaN/Infinity), mirroring computePnlPeriod.
-  const costBasisAll = totalValue - pnlAllTimeValue;
+  // Guard divide-by-zero → 0 (never NaN/Infinity), mirroring computePnlPeriod. The base is the
+  // current value of only the portfolios that HAVE an all-time (Σ value − Σ all-time = Σ baseline).
+  const costBasisAll = allTimeBaseValueNow - pnlAllTimeValue;
   const pnlAllTime = costBasisAll === 0 ? 0 : (pnlAllTimeValue / costBasisAll) * 100;
   const allTimePnlValue = unrealizedPnlValue + realizedPnlValue;
 
@@ -417,10 +442,10 @@ async function buildOverview(
       inceptionDate: inception.toISOString(), // retrofit-66
       assetCount,
       totalValue: round(d.totalValue),
-      pnl24h: round(d.pnl24h),
-      pnl24hValue: round(d.pnl24hValue),
-      pnlAllTime: round(canon.pct),
-      pnlAllTimeValue: round(canon.value),
+      pnl24h: roundN(d.pnl24h),
+      pnl24hValue: roundN(d.pnl24hValue),
+      pnlAllTime: roundN(canon.pct),
+      pnlAllTimeValue: roundN(canon.value),
       unrealizedPnlValue: round(d.unrealizedPnlValue),
       unrealizedPnlPct: round(d.unrealizedPnlPct),
       realizedPnlValue: round(d.realizedPnlValue),

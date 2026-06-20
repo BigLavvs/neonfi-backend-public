@@ -20,7 +20,6 @@ import {
   listTransactions,
   countTransactions,
   listRecentTransactionsForUser,
-  countTransactionsForUser,
   countTransactionsByPortfolioForUser,
   findEarliestTransactionDate,
   type ListTransactionsFilter,
@@ -825,9 +824,9 @@ export async function listRecentUserTransactions(
   return rows.map((t) => toTransactionListDTO(t, logoFor(t, logoMap)));
 }
 
-export function countUserTransactions(userId: number): Promise<number> {
-  return countTransactionsForUser(userId);
-}
+// retrofit-79 (§5): countUserTransactions (a user-wide DB row count) was dead — defined here,
+// never called (the Overview uses countUserTransactionsByPortfolio + externalTxCount). Removed
+// along with its repository helper countTransactionsForUser.
 
 // retrofit-49 (#8): per-portfolio DB tx counts for the Overview's transactionCount, which
 // blends these with each connected portfolio's provider-reported externalTxCount.

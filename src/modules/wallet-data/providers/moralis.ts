@@ -11,13 +11,33 @@ import type {
   TransferPage,
   WalletDataProvider,
   WalletNftHolding,
+  WalletPnl,
   WalletToken,
+  WalletTokenPnl,
   WalletTransfer,
 } from '../types.js';
 import { buildSummary, NATIVE_SYMBOLS } from '../build-summary.js';
 
 // slug → Moralis chain identifier (hex for EVM, 'solana' for Solana).
 const CHAIN_ID = new Map(CHAINS.map((c) => [c.slug, c.moralisId]));
+
+// retrofit-79 (§1): the Moralis wallet-PnL endpoints (the GA fallback behind GoldRush) only
+// cover these EVM chains. Moralis is realized-only (weighted-average cost basis), so we read
+// avg_buy_price_usd as avgCost and leave unrealized for derive.ts to compute from live prices.
+const MORALIS_PNL_CHAINS = new Set(['eth', 'polygon', 'base']);
+
+// One token row from /wallets/{address}/profitability (per-token breakdown).
+interface MoralisProfitabilityToken {
+  token_address?: string | null;
+  symbol?: string | null;
+  name?: string | null;
+  avg_buy_price_usd?: number | string | null;
+  realized_profit_usd?: number | string | null;
+  total_usd_invested?: number | string | null;
+}
+interface MoralisProfitabilityResponse {
+  result?: MoralisProfitabilityToken[];
+}
 
 interface MoralisEvmToken {
   symbol?: string;
@@ -244,6 +264,43 @@ export class MoralisWalletProvider implements WalletDataProvider {
 
     if (kept.length === 0) return { status: 'empty' };
     return { status: 'ok', summary: buildSummary(this.name, kept, 'SOL') };
+  }
+
+  // --- Wallet PnL / cost basis (retrofit-79 §1, GA fallback behind GoldRush) ---
+  // /wallets/{address}/profitability returns a per-token breakdown with a weighted-average
+  // cost basis (avg_buy_price_usd) + realized PnL (realized_profit_usd). Moralis is realized-
+  // only, so unrealized is left null for derive.ts to compute from our live prices. Solana +
+  // chains outside MORALIS_PNL_CHAINS, non-ok, or parse failure → null (orchestrator already
+  // tried GoldRush first; a Moralis miss means the connected portfolio degrades to "—").
+  async getWalletPnl(address: string, chainSlug: string): Promise<WalletPnl | null> {
+    if (!MORALIS_PNL_CHAINS.has(chainSlug)) return null;
+    const hex = CHAIN_ID.get(chainSlug);
+    if (!hex) return null;
+    try {
+      const url = `${this.deepIndexBase}/wallets/${address}/profitability?chain=${hex}`;
+      const res = await fetch(url, { headers: this.headers() });
+      if (!res.ok) return null;
+      const json = (await res.json()) as MoralisProfitabilityResponse;
+      const items = Array.isArray(json.result) ? json.result : [];
+      const tokens: WalletTokenPnl[] = [];
+      for (const it of items) {
+        const contract = (it.token_address ?? '').toLowerCase();
+        const symbol = it.symbol ? it.symbol.toUpperCase() : null;
+        if (!contract && !symbol) continue;
+        const avg = toNum(it.avg_buy_price_usd);
+        tokens.push({
+          symbol,
+          contractAddress: contract || null,
+          avgCost: avg != null && avg > 0 ? avg : null,
+          realizedPnlUsd: toNum(it.realized_profit_usd),
+          unrealizedPnlUsd: null, // Moralis is realized-only; derive computes unrealized
+        });
+      }
+      return { provider: this.name, tokens };
+    } catch (e) {
+      console.error('[wallet-data] moralis getWalletPnl failed', (e as Error).message);
+      return null;
+    }
   }
 
   // --- Transfer history (retrofit-49) ----------------------------------------

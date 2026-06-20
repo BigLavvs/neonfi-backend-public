@@ -98,9 +98,8 @@ export async function listRecentTransactionsForUser(
   }) as Promise<TransactionWithListIncludes[]>;
 }
 
-export async function countTransactionsForUser(userId: number): Promise<number> {
-  return prisma.transaction.count({ where: { portfolio: { userId } } });
-}
+// retrofit-79 (§5): countTransactionsForUser removed — its only caller (the dead
+// countUserTransactions service fn) is gone; the Overview counts per portfolio below.
 
 // retrofit-49 (#8): DB transaction count grouped per portfolio for all the user's
 // portfolios, in one round-trip. The Overview uses this as the per-portfolio fallback for

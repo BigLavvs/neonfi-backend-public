@@ -308,6 +308,9 @@ it('321: derive.ts cache HIT — pre-populated portfolio_pnl:<id> is returned wi
     totalValue: 9999.99,
     pnlAllTime: 42,
     pnlAllTimeValue: 1234.56,
+    // retrofit-79: derive's cache validation requires these always-numeric fields.
+    unrealizedPnlValue: 0, unrealizedPnlPct: 0, realizedPnlValue: 0, allTimePnlValue: 1234.56,
+    costBasisTotal: 0,
     pnl24h: 0, pnl24hValue: 0, pnl7d: 0, pnl7dValue: 0, pnl30d: 0, pnl30dValue: 0,
   };
   await redis.set(`portfolio_pnl:${portfolioId}`, JSON.stringify(cachedPayload), 'EX', 300);

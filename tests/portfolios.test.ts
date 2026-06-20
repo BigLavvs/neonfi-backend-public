@@ -480,14 +480,18 @@ it('154: GET /portfolios with 2 portfolios → ordered createdAt asc, each has s
   expect(first!.slug).toBe('alpha');
   expect(second!.name).toBe('Beta');
 
-  // All derived fields should be 0 (incl. retrofit-27 average-cost fields, additive)
-  const derived = [
-    'totalValue', 'pnlAllTime', 'pnlAllTimeValue', 'pnl24h', 'pnl24hValue',
-    'pnl7d', 'pnl7dValue', 'pnl30d', 'pnl30dValue',
+  // Non-short-term derived fields are 0 for an empty manual portfolio (incl. retrofit-27
+  // average-cost fields). pnlAllTime* are the netDeposit-based path (manual) → 0 with no deposits.
+  const zeroFields = [
+    'totalValue', 'pnlAllTime', 'pnlAllTimeValue',
     'unrealizedPnlValue', 'unrealizedPnlPct', 'realizedPnlValue', 'allTimePnlValue',
   ];
-  for (const field of derived) {
+  for (const field of zeroFields) {
     expect(first![field]).toBe(0);
+  }
+  // retrofit-79 (§2/D1): the short-term windows are null ("—") with no snapshot baseline, not 0.
+  for (const field of ['pnl24h', 'pnl24hValue', 'pnl7d', 'pnl7dValue', 'pnl30d', 'pnl30dValue']) {
+    expect(first![field]).toBeNull();
   }
   // netDeposit is a stored column, should be 0 (default)
   expect(first!.netDeposit).toBe(0);

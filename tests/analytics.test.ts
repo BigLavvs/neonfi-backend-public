@@ -241,6 +241,8 @@ it('326: GET /summary happy path — all 9 fields populated with correct values'
       'allTimePnlValue',
       'totalDeposits',
       'totalWithdrawals',
+      'totalInvested', // retrofit-79 (§6)
+      'realizedPnl', // retrofit-79 (§6)
       'pnl7d',
       'pnl7dValue',
       'pnl30d',
@@ -258,7 +260,7 @@ it('326: GET /summary happy path — all 9 fields populated with correct values'
   expect(d.pnl30d).toBe(32.86); // (23000/70000)*100 = 32.85714… → 2dp (retrofit-4)
 });
 
-it('327: GET /summary with no historical snapshots → pnl7d/30d fields all 0, allTime still populated', async () => {
+it('327: GET /summary with no historical snapshots → pnl7d/30d null (retrofit-79 §2/D1), allTime still populated', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   await createProSub(userId);
@@ -267,12 +269,13 @@ it('327: GET /summary with no historical snapshots → pnl7d/30d fields all 0, a
 
   const res = await aGet(portfolioId, '/summary', cookies);
   expect(res.status).toBe(200);
-  const d = ((await res.json()) as { data: Record<string, number> }).data;
+  const d = ((await res.json()) as { data: Record<string, number | null> }).data;
 
-  expect(d.pnl7d).toBe(0);
-  expect(d.pnl7dValue).toBe(0);
-  expect(d.pnl30d).toBe(0);
-  expect(d.pnl30dValue).toBe(0);
+  // retrofit-79 (§2/D1): no baseline → null ("unknown"), not a real flat 0.
+  expect(d.pnl7d).toBeNull();
+  expect(d.pnl7dValue).toBeNull();
+  expect(d.pnl30d).toBeNull();
+  expect(d.pnl30dValue).toBeNull();
   expect(d.allTimePnlValue).toBeCloseTo(13000, 2);
   expect(d.allTimePnlPct).toBeCloseTo(16.25, 2);
 });
@@ -302,7 +305,7 @@ it('r72-connected: GET /summary on a connected portfolio → totalDeposits/total
   const p = await prisma.portfolio.create({
     data: { userId, name: 'Connected', typeId: type.id, walletAddress: '0xabc' },
   });
-  await seedAsset(p.id, btcId, 1.0);
+  await seedAsset(p.id, btcId, 1.0); // held, but NO provider cost basis (avgCost null)
   await seedNativeTx(p.id, 'buy', 100);
   await seedNativeTx(p.id, 'sell', 500); // one-directional import → $100 in vs $500 out
 
@@ -313,8 +316,46 @@ it('r72-connected: GET /summary on a connected portfolio → totalDeposits/total
   // retrofit-72 (H9/R37): connected → "—" deposits/withdrawals, never $100 vs $500.
   expect(d.totalDeposits).toBeNull();
   expect(d.totalWithdrawals).toBeNull();
-  // The all-time numbers are still present (snapshot-derived for connected).
-  expect(typeof d.allTimePnlValue).toBe('number');
+  // retrofit-79 (§4): no provider cost basis → all-time + invested/realized are all "—" (null),
+  // never a fabricated number.
+  expect(d.allTimePnlValue).toBeNull();
+  expect(d.allTimePnlPct).toBeNull();
+  expect(d.totalInvested).toBeNull();
+  expect(d.realizedPnl).toBeNull();
+});
+
+it('r79-§6: connected portfolio WITH provider cost basis → totalInvested + realizedPnl (not deposits/withdrawals)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSub(userId);
+
+  const type = await prisma.portfolioType.findUniqueOrThrow({ where: { name: 'connected' } });
+  const p = await prisma.portfolio.create({
+    data: { userId, name: 'Connected', typeId: type.id, walletAddress: '0xdef' },
+  });
+  // Provider cost basis written by the sync: BTC 1.0 @ avgCost 50000 (costBasis 50000), realized 999.
+  await prisma.asset.create({
+    data: {
+      portfolioId: p.id,
+      tokenId: btcId,
+      balance: '1.0',
+      avgCost: '50000',
+      costBasis: '50000',
+      realizedPnl: '999',
+    },
+  });
+
+  const res = await aGet(p.id, '/summary', cookies);
+  expect(res.status).toBe(200);
+  const d = ((await res.json()) as { data: Record<string, number | null> }).data;
+
+  // retrofit-79 (§6): connected surfaces invested/realized in place of the (null) deposits/withdrawals.
+  expect(d.totalDeposits).toBeNull();
+  expect(d.totalWithdrawals).toBeNull();
+  expect(d.totalInvested).toBeCloseTo(50000, 2); // Σ Asset.costBasis (the floor)
+  expect(d.realizedPnl).toBeCloseTo(999, 2);
+  // All-time = cost-basis (unrealized 43000 + realized 999), the same path manual uses.
+  expect(d.allTimePnlValue).toBeCloseTo(43999, 2);
 });
 
 it('r72-tolerance: a snapshot far older than the window is NOT used as that window\'s baseline', async () => {
@@ -335,8 +376,8 @@ it('r72-tolerance: a snapshot far older than the window is NOT used as that wind
   expect(res.status).toBe(200);
   const d = ((await res.json()) as { data: Record<string, number> }).data;
 
-  expect(d.pnl7d).toBe(0); // 12-day-old baseline rejected for the 7d window
-  expect(d.pnl7dValue).toBe(0);
+  expect(d.pnl7d).toBeNull(); // 12-day-old baseline rejected for the 7d window → "—" (retrofit-79 §2)
+  expect(d.pnl7dValue).toBeNull();
   expect(d.pnl30dValue).toBeCloseTo(23000, 2); // 93000 − 70000 (30d snapshot accepted)
   expect(d.pnl30d).toBe(32.86);
 });
@@ -361,8 +402,8 @@ it('r77-approx: a backfilled (approx) snapshot is NOT used as the short-term bas
   expect(res.status).toBe(200);
   const d = ((await res.json()) as { data: Record<string, number> }).data;
 
-  expect(d.pnl7d).toBe(0); // approx baseline ignored
-  expect(d.pnl7dValue).toBe(0);
+  expect(d.pnl7d).toBeNull(); // approx baseline ignored → "—" (retrofit-79 §2)
+  expect(d.pnl7dValue).toBeNull();
   expect(d.pnl30dValue).toBeCloseTo(23000, 2); // 93000 − 70000 (real 30d snapshot accepted)
   expect(d.pnl30d).toBe(32.86);
 });
@@ -396,6 +437,22 @@ it('329: GET /performance happy path — snapshots ASC by date, each { date, val
     expect(typeof s.value).toBe('number');
     expect(s.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   }
+});
+
+it('r79-§3: GET /performance OMITS approx (estimate) snapshots — only real observed points', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSub(userId);
+  const portfolioId = await createManualPortfolio(userId);
+  // A real observed point and a backfilled ESTIMATE (approx) on the same chart. §3: the estimate
+  // (which charted the fake cliff for connected wallets) must be omitted — real points only.
+  await seedSnapshot(portfolioId, userId, '2026-06-10', 100); // real
+  await seedSnapshot(portfolioId, userId, '2026-06-11', 999, { approx: true }); // estimate
+
+  const res = await aGet(portfolioId, '/performance', cookies);
+  expect(res.status).toBe(200);
+  const json = (await res.json()) as { data: { snapshots: Array<{ date: string; value: number }> } };
+  expect(json.data.snapshots).toEqual([{ date: '2026-06-10', value: 100 }]);
 });
 
 it('330: GET /performance on portfolio with no snapshots → 200, empty snapshots array', async () => {

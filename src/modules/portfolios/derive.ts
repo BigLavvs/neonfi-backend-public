@@ -14,14 +14,14 @@
 // per-portfolio 24h rows, and lets a manual portfolio display its own 24h/7d/30d once it has a
 // day of history.
 //
-// retrofit-58 Part 2: CONNECTED portfolios are different. Their balances are set directly
-// from the provider summary (Part 1), so a windowed transfer import gives them no trustworthy
-// cost basis — cost-basis PnL would be fictional (the +518%/+1314% retrofit-57 saw). For
-// `type === 'connected'` we instead compute PnL from recorded BalanceSnapshot deltas: all-time
-// = currentValue − the EARLIEST recorded snapshot ("growth since tracking began"), and
-// 24h/7d/30d = currentValue − the snapshot nearest N days ago. Unrealized/realized/cost-basis
-// are N/A → 0. Manual portfolios keep the exact existing cost-basis all-time path (branch on
-// type); only their short-term windows now share the snapshot-delta read (retrofit-76).
+// retrofit-79 (§1c/§4): CONNECTED portfolios now get REAL cost basis from a provider PnL
+// endpoint (GoldRush → Moralis, written into Asset.avgCost/costBasis/realizedPnl by
+// wallet-data/sync.ts), so they use the SAME cost-basis all-time path manual uses
+// (allTimePnlValue = unrealized + realized). This SUPERSEDES retrofit-58's snapshot-delta
+// all-time, which conflated withdrawals with losses (the fake −96%). A connected wallet with NO
+// cost basis (provider denied / unsupported chain / no trades) returns all-time = null → the UI
+// shows "—", never a fabricated number. Short-term 24h/7d/30d still come from BalanceSnapshot
+// deltas for both types — now null when there's no approx=false baseline (§2/D1).
 //
 // Redis cache (retrofit-3 §1.5): key `portfolio_pnl:<portfolioId>`, 5-min TTL.
 // Invalidated on transaction CUD (retrofit-2, transactions.service.ts) and on
@@ -31,10 +31,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
 import { getLivePriceMap } from '../../lib/live-price.js';
-import {
-  findSnapshotNearDaysAgo,
-  findEarliestSnapshotByPortfolio,
-} from '../snapshots/snapshots.service.js';
+import { findSnapshotNearDaysAgo } from '../snapshots/snapshots.service.js';
 
 // retrofit-15: this cache is price-dependent (totalValue tracks live price), so it's
 // dropped from 5 min to 60s to match the `price:<SYMBOL>` TTL — "latest at page-load"
@@ -44,11 +41,16 @@ const CACHE_TTL_S = 60;
 
 export interface DerivedFields {
   totalValue: number;
-  // Legacy netDeposit-based all-time PnL (retrofit-2). KEPT and unchanged (retrofit-27
-  // Augment): pnlAllTimeValue = totalValue − Portfolio.netDeposit. The analytics summary
-  // still maps allTimePnl* from these.
-  pnlAllTime: number;
-  pnlAllTimeValue: number;
+  // All-time PnL (the canonical headline number the dashboard + analytics read).
+  //   - MANUAL: legacy netDeposit-based (retrofit-2/27 Augment): pnlAllTimeValue = totalValue −
+  //     Portfolio.netDeposit. (overview maps its OWN canonical from the cost-basis fields below;
+  //     analytics still reads these.)
+  //   - CONNECTED with provider cost basis (retrofit-79 §1): the cost-basis all-time
+  //     (allTimePnlValue / unrealizedPnlPct) — the SAME path manual uses, not snapshot deltas.
+  //   - CONNECTED without cost basis (retrofit-79 §4): null → the UI shows "—", never a
+  //     fabricated snapshot-delta number.
+  pnlAllTime: number | null;
+  pnlAllTimeValue: number | null;
   // retrofit-27: average-cost PnL (the new model). unrealizedPnlValue = Σ over cost-tracked
   // assets of heldQty × (livePrice − avgCost); unrealizedPnlPct = that / Σ(costBasis) × 100
   // (0 with no cost basis); realizedPnlValue = Σ Asset.realizedPnl; allTimePnlValue =
@@ -57,12 +59,17 @@ export interface DerivedFields {
   unrealizedPnlPct: number;
   realizedPnlValue: number;
   allTimePnlValue: number;
-  pnl24h: number;
-  pnl24hValue: number;
-  pnl7d: number;
-  pnl7dValue: number;
-  pnl30d: number;
-  pnl30dValue: number;
+  // retrofit-79 (§6): Σ Asset.costBasis over cost-tracked assets — the connected "Total invested"
+  // floor (it excludes since-sold lots). 0 when nothing is cost-tracked.
+  costBasisTotal: number;
+  // retrofit-79 (§2/D1): short-term windows are null (not 0) when there's no in-tolerance
+  // approx=false snapshot baseline → the UI shows "—" ("unknown"), distinct from a real flat 0.
+  pnl24h: number | null;
+  pnl24hValue: number | null;
+  pnl7d: number | null;
+  pnl7dValue: number | null;
+  pnl30d: number | null;
+  pnl30dValue: number | null;
 }
 
 export async function computeDerived(portfolioId: number): Promise<DerivedFields> {
@@ -71,7 +78,14 @@ export async function computeDerived(portfolioId: number): Promise<DerivedFields
   if (cached) {
     try {
       const parsed = JSON.parse(cached) as DerivedFields;
-      if (typeof parsed.totalValue === 'number' && typeof parsed.pnlAllTime === 'number') {
+      // pnlAllTime can legitimately be null (connected w/o cost basis, retrofit-79 §4), so
+      // validate on always-numeric fields instead. A pre-retrofit-79 payload lacking
+      // costBasisTotal falls through to a one-time recompute (TTL is only 60s).
+      if (
+        typeof parsed.totalValue === 'number' &&
+        typeof parsed.allTimePnlValue === 'number' &&
+        typeof parsed.costBasisTotal === 'number'
+      ) {
         return parsed;
       }
     } catch {
@@ -131,30 +145,51 @@ async function computeFromDb(portfolioId: number): Promise<DerivedFields> {
     }
   }
 
-  // retrofit-58 Part 2: connected portfolios derive PnL from recorded snapshot deltas, not
-  // cost basis (which a windowed import can't trust). Manual portfolios fall through to the
-  // existing cost-basis path below, BYTE-for-byte unchanged.
-  if (portfolio?.type?.name === 'connected') {
-    return computeConnectedDerived(portfolioId, totalValue);
-  }
-
-  // All-time PnL (retrofit-3 §1.6): now that Portfolio.netDeposit is maintained
-  // (retrofit-2), pnlAllTimeValue = totalValue − netDeposit. Percentage is the
-  // relative change vs cost basis; guard divide-by-zero for portfolios with no
-  // deposits (return 0 rather than NaN/Infinity). KEPT unchanged by retrofit-27.
-  const netDeposit = portfolio ? Number(portfolio.netDeposit.toString()) : 0;
-  const pnlAllTimeValue = totalValue - netDeposit;
-  const pnlAllTime = netDeposit !== 0 ? (pnlAllTimeValue / netDeposit) * 100 : 0;
-
   // retrofit-27 average-cost headline: unrealized % over Σ cost basis (guarded), and
   // all-time = unrealized + realized.
   const unrealizedPnlPct = costBasisSum !== 0 ? (unrealizedPnlValue / costBasisSum) * 100 : 0;
   const allTimePnlValue = unrealizedPnlValue + realizedPnlValue;
 
-  // retrofit-76: 24h/7d/30d from BalanceSnapshot deltas, the SAME windowed-delta read the
-  // connected path uses (computeShortTermDeltas). The cost-basis all-time numbers above are
-  // unchanged — only the short-term windows come from history. No ~N-day snapshot → 0/0.
+  // retrofit-76/79: 24h/7d/30d from BalanceSnapshot deltas (now NULL when there's no
+  // approx=false baseline — §2/D1). Shared by both portfolio types.
   const shortTerm = await computeShortTermDeltas(portfolioId, totalValue);
+
+  const isConnected = portfolio?.type?.name === 'connected';
+  // retrofit-79 (§1): a connected wallet has cost basis when the provider PnL populated any
+  // avgCost OR any realized PnL (a fully-sold token has realized but no held units). That's the
+  // signal to use the cost-basis path instead of the §4 "—" fallback.
+  const hasCostBasis = assets.some((a) => a.avgCost !== null) || realizedPnlValue !== 0;
+
+  if (isConnected && !hasCostBasis) {
+    // retrofit-79 (§4): no provider cost basis → all-time is genuinely unknown, NOT a fabricated
+    // snapshot-delta. Short-term still comes from snapshots (null when no real baseline).
+    return {
+      totalValue,
+      pnlAllTime: null,
+      pnlAllTimeValue: null,
+      unrealizedPnlValue: 0,
+      unrealizedPnlPct: 0,
+      realizedPnlValue: 0,
+      allTimePnlValue: 0,
+      costBasisTotal: 0,
+      ...shortTerm,
+    };
+  }
+
+  // retrofit-79 (§1c): CONNECTED with cost basis uses the SAME cost-basis all-time manual uses
+  // (allTimePnlValue / unrealizedPnlPct), repurposing the legacy pnlAllTime* fields so the
+  // overview canonical + analytics summary both read the honest cost-basis number. MANUAL keeps
+  // the legacy netDeposit-based all-time (retrofit-2/27 Augment), byte-for-byte unchanged.
+  let pnlAllTime: number;
+  let pnlAllTimeValue: number;
+  if (isConnected) {
+    pnlAllTimeValue = allTimePnlValue;
+    pnlAllTime = unrealizedPnlPct;
+  } else {
+    const netDeposit = portfolio ? Number(portfolio.netDeposit.toString()) : 0;
+    pnlAllTimeValue = totalValue - netDeposit;
+    pnlAllTime = netDeposit !== 0 ? (pnlAllTimeValue / netDeposit) * 100 : 0;
+  }
 
   return {
     totalValue,
@@ -164,27 +199,27 @@ async function computeFromDb(portfolioId: number): Promise<DerivedFields> {
     unrealizedPnlPct,
     realizedPnlValue,
     allTimePnlValue,
+    costBasisTotal: costBasisSum,
     ...shortTerm,
   };
 }
 
-// currentValue − a snapshot baseline; % over the baseline (guard divide-by-zero → 0). Null
-// baseline (no snapshot in the window) → 0/0, never NaN/Infinity. Shared by the connected
-// all-time read and the short-term-window read below (retrofit-76).
+// currentValue − a snapshot baseline; % over the baseline (guard divide-by-zero → 0). retrofit-79
+// (§2/D1): a NULL baseline (no in-tolerance approx=false snapshot in the window) now yields
+// null/null — "unknown", distinct from a real flat 0 — never NaN/Infinity.
 function snapshotDelta(
   totalValue: number,
   base: { value: { toString(): string } } | null,
-): { value: number; pct: number } {
-  if (!base) return { value: 0, pct: 0 };
+): { value: number | null; pct: number | null } {
+  if (!base) return { value: null, pct: null };
   const b = Number(base.value.toString());
   const value = totalValue - b;
   return { value, pct: b !== 0 ? (value / b) * 100 : 0 };
 }
 
-// retrofit-76: the 24h/7d/30d PnL fields, computed from recorded BalanceSnapshot deltas —
-// currentValue − the snapshot nearest N days ago (retrofit-72 H5 tolerance baked into
-// findSnapshotNearDaysAgo; no snapshot in the window → 0/0). Shared by BOTH the connected and
-// the manual paths so the windowed-delta logic lives in one place.
+// retrofit-76/79: the 24h/7d/30d PnL fields, from recorded BalanceSnapshot deltas —
+// currentValue − the snapshot nearest N days ago (findSnapshotNearDaysAgo already filters to
+// approx=false + the H5 tolerance; no usable baseline → null/null, §2/D1). Shared by both types.
 type ShortTermPnl = Pick<
   DerivedFields,
   'pnl24h' | 'pnl24hValue' | 'pnl7d' | 'pnl7dValue' | 'pnl30d' | 'pnl30dValue'
@@ -209,36 +244,5 @@ async function computeShortTermDeltas(
     pnl7dValue: d7.value,
     pnl30d: d30.pct,
     pnl30dValue: d30.value,
-  };
-}
-
-// retrofit-58 Part 2: PnL for a CONNECTED portfolio, derived from recorded BalanceSnapshot
-// deltas (never cost basis). all-time = currentValue − the earliest recorded snapshot; 24h/7d/
-// 30d = currentValue − the snapshot nearest N days ago. The legacy pnlAllTime* fields are
-// repurposed to carry this honest "growth since tracking began" number (so the overview totals,
-// which sum pnlAllTimeValue and recompute the % over the implied baseline, stay consistent).
-// Unrealized/realized/avg-cost are N/A for connected → 0. No snapshot in a window → 0/0 (a
-// freshly connected wallet shows +$0.00 until history accrues), never NaN/Infinity.
-async function computeConnectedDerived(
-  portfolioId: number,
-  totalValue: number,
-): Promise<DerivedFields> {
-  // all-time (earliest snapshot) in parallel with the 24h/7d/30d windows.
-  const [earliest, shortTerm] = await Promise.all([
-    findEarliestSnapshotByPortfolio(portfolioId),
-    computeShortTermDeltas(portfolioId, totalValue),
-  ]);
-  const all = snapshotDelta(totalValue, earliest);
-
-  return {
-    totalValue,
-    pnlAllTime: all.pct,
-    pnlAllTimeValue: all.value,
-    // Cost-basis PnL is N/A for connected (no trustworthy avgCost from a windowed import).
-    unrealizedPnlValue: 0,
-    unrealizedPnlPct: 0,
-    realizedPnlValue: 0,
-    allTimePnlValue: 0,
-    ...shortTerm,
   };
 }

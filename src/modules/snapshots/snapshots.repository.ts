@@ -59,14 +59,20 @@ export async function findEarliestSnapshotByPortfolio(
   });
 }
 
-// Stage 14 (§1.7): all snapshots ASC by date — for the performance chart. The
-// AreaChart consumes points left-to-right, so ascending order is the natural fit
-// (the paginated DESC list above serves a different, table-style consumer).
+// Stage 14 (§1.7): all snapshots ASC by date — for the performance + overview value charts.
+// The AreaChart consumes points left-to-right, so ascending order is the natural fit (the
+// paginated DESC list above serves a different, table-style consumer).
+//
+// retrofit-79 (§3): filters to approx=false — the connected initial-sync backfill writes
+// ESTIMATE points (historical balance × ~today's price) marked approx=true, which charted as a
+// fabricated cliff ($223→$169→$12). PnL endpoints give a figure, not a daily series, so there's
+// no accurate history to substitute → we omit the estimate and serve only REAL observed points
+// (it grows daily). Manual snapshots are approx=false by default, so they're unaffected.
 export async function findAllSnapshotsAscByPortfolio(
   portfolioId: number,
 ): Promise<Array<{ snapshotDate: Date; value: Prisma.Decimal }>> {
   return prisma.balanceSnapshot.findMany({
-    where: { portfolioId },
+    where: { portfolioId, approx: false },
     orderBy: { snapshotDate: 'asc' },
     select: { snapshotDate: true, value: true },
   });

@@ -15,18 +15,27 @@
 
 export interface SummaryDTO {
   portfolioId: number;
-  allTimePnlPct: number;
-  allTimePnlValue: number;
+  // retrofit-79 (§1c/§4): null for a CONNECTED wallet with no provider cost basis (the UI shows
+  // "—", never the old snapshot-delta number). Manual + connected-with-cost-basis are numbers.
+  allTimePnlPct: number | null;
+  allTimePnlValue: number | null;
   // retrofit-72 (H9/R37): null for CONNECTED portfolios. The on-chain transfer import is
   // windowed and effectively one-directional, so summing it into deposits/withdrawals produces
   // impossible figures (e.g. $0.41 in vs $516 out). We have no reliable deposit/withdrawal ledger
   // for a connected wallet, so the UI shows "—" rather than a number that implies a complete one.
   totalDeposits: number | null;
   totalWithdrawals: number | null;
-  pnl7d: number;
-  pnl7dValue: number;
-  pnl30d: number;
-  pnl30dValue: number;
+  // retrofit-79 (§6): the CONNECTED equivalent of deposits/withdrawals, from the provider PnL.
+  // totalInvested = Σ current Asset.costBasis (the floor — excludes since-sold lots); realizedPnl
+  // = Σ per-token realized PnL. Both null for MANUAL (which keeps Deposits/Withdrawals) and for a
+  // connected wallet with no provider cost basis (§4).
+  totalInvested: number | null;
+  realizedPnl: number | null;
+  // retrofit-79 (§2/D1): null when there's no approx=false snapshot baseline for the window.
+  pnl7d: number | null;
+  pnl7dValue: number | null;
+  pnl30d: number | null;
+  pnl30dValue: number | null;
 }
 
 export interface PerformanceDTO {

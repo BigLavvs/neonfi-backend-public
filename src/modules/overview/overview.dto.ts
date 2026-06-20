@@ -55,13 +55,15 @@ export interface OverviewDTO {
     inceptionDate: string;
     assetCount: number; // # assets with balance > 0
     totalValue: number;
-    pnl24h: number;
-    pnl24hValue: number;
-    // retrofit-75 (R39): canonical per-type all-time — connected → snapshot-vs-earliest,
-    // manual → cost-basis (unrealized+realized / unrealizedPnlPct), which excludes
-    // cost-unknown holdings so a stablecoin manual portfolio reads ~0% not a netDeposit phantom.
-    pnlAllTime: number;
-    pnlAllTimeValue: number;
+    // retrofit-79 (§2/D1): null when there's no approx=false snapshot baseline for the window
+    // (frontend renders "—" = unknown, distinct from a real flat 0).
+    pnl24h: number | null;
+    pnl24hValue: number | null;
+    // retrofit-75 (R39) + retrofit-79 (§1c/§4): canonical per-type all-time — manual → cost-basis
+    // (unrealized+realized / unrealizedPnlPct); connected → cost-basis from provider PnL, or null
+    // ("—") when the wallet has no provider cost basis (never the old snapshot-delta number).
+    pnlAllTime: number | null;
+    pnlAllTimeValue: number | null;
     // retrofit-27: average-cost PnL per portfolio (additive).
     unrealizedPnlValue: number;
     unrealizedPnlPct: number;
