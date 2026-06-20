@@ -494,6 +494,50 @@ it('154: GET /portfolios with 2 portfolios → ordered createdAt asc, each has s
 });
 
 // ---------------------------------------------------------------------------
+// retrofit-76 — a MANUAL portfolio now derives 24h/7d/30d PnL from BalanceSnapshot
+// deltas (was hardcoded 0). Surfaced on the GET /portfolios derived fields; the
+// cost-basis all-time path is unchanged.
+// ---------------------------------------------------------------------------
+
+it('r76: manual portfolio 24h/7d/30d = current value − the snapshot nearest N days ago (all-time path unchanged)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  await createProSubForUser(userId);
+  const btc = await prisma.token.findUniqueOrThrow({ where: { symbol: 'BTC' } });
+  const type = await prisma.portfolioType.findUniqueOrThrow({ where: { name: 'manual' } });
+
+  // Manual portfolio holding BTC 1.0 → current value = the seeded BTC price (93000). No avgCost
+  // seeded (cost-unknown), so the cost-basis all-time stays 0 — only the windows come from history.
+  const p = await prisma.portfolio.create({ data: { userId, name: 'Hist', typeId: type.id } });
+  await prisma.asset.create({ data: { portfolioId: p.id, tokenId: btc.id, balance: '1' } });
+
+  // Snapshots nearest ~1d / ~7d / ~30d ago, each within findSnapshotNearDaysAgo's tolerance.
+  const ymdAgo = (n: number): string => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const seedSnap = (n: number, value: number): Promise<unknown> =>
+    prisma.balanceSnapshot.create({
+      data: { portfolioId: p.id, userId, snapshotDate: new Date(`${ymdAgo(n)}T00:00:00.000Z`), value: value.toString() },
+    });
+  await seedSnap(2, 80000); // ~24h baseline
+  await seedSnap(7, 70000);
+  await seedSnap(30, 60000);
+
+  const res = await portGet('', cookies);
+  expect(res.status).toBe(200);
+  const json = (await res.json()) as { data: { portfolios: Array<Record<string, unknown>> } };
+  const row = json.data.portfolios.find((r) => r.name === 'Hist')!;
+
+  // retrofit-76: each window = current (93000) − the snapshot nearest N days ago. The DTO does
+  // NOT round derived fields, so the value deltas are exact integers.
+  expect(row.totalValue).toBeCloseTo(93000, 2);
+  expect(row.pnl24hValue).toBe(13000); // 93000 − 80000
+  expect(row.pnl24h).toBe(16.25); // 13000 / 80000 * 100
+  expect(row.pnl7dValue).toBe(23000); // 93000 − 70000
+  expect(row.pnl30dValue).toBe(33000); // 93000 − 60000
+  // The cost-basis all-time path is untouched: no cost tracked → 0.
+  expect(row.allTimePnlValue).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
 // 155. GET /portfolios with ?limit=1 → 1 item, meta reflects all
 // ---------------------------------------------------------------------------
 

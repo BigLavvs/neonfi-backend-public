@@ -3,9 +3,16 @@
 //
 // What derive.ts OWNS: totalValue, pnlAllTime, pnlAllTimeValue (cost-basis PnL
 // against Portfolio.netDeposit, maintained by retrofit-2).
-// What it does NOT own (for MANUAL portfolios): 24h/7d/30d PnL — those need historical
-// BalanceSnapshot rows, a cross-module read that belongs in the Stage 14 analytics module
-// (architecture line 1194-1212). They stay 0 here for manual.
+//
+// retrofit-76: derive.ts ALSO owns 24h/7d/30d PnL for MANUAL portfolios now. The old
+// "snapshots belong to analytics, stay 0 here" rule is superseded — derive already reads
+// BalanceSnapshot for connected (retrofit-58), so we extend the same windowed-delta read to
+// manual: pnl24h/7d/30d = currentValue − findSnapshotNearDaysAgo(id, N) (retrofit-72 H5
+// tolerance; no snapshot in window → 0/0). The cost-basis ALL-TIME path is unchanged — only
+// the short-term windows are added. This makes the overview TOTALS 24h (which already sums the
+// snapshot delta for every portfolio with a ~24h-old snapshot, manual included) equal Σ of the
+// per-portfolio 24h rows, and lets a manual portfolio display its own 24h/7d/30d once it has a
+// day of history.
 //
 // retrofit-58 Part 2: CONNECTED portfolios are different. Their balances are set directly
 // from the provider summary (Part 1), so a windowed transfer import gives them no trustworthy
@@ -13,7 +20,8 @@
 // `type === 'connected'` we instead compute PnL from recorded BalanceSnapshot deltas: all-time
 // = currentValue − the EARLIEST recorded snapshot ("growth since tracking began"), and
 // 24h/7d/30d = currentValue − the snapshot nearest N days ago. Unrealized/realized/cost-basis
-// are N/A → 0. Manual portfolios keep the exact existing cost-basis path (branch on type).
+// are N/A → 0. Manual portfolios keep the exact existing cost-basis all-time path (branch on
+// type); only their short-term windows now share the snapshot-delta read (retrofit-76).
 //
 // Redis cache (retrofit-3 §1.5): key `portfolio_pnl:<portfolioId>`, 5-min TTL.
 // Invalidated on transaction CUD (retrofit-2, transactions.service.ts) and on
@@ -143,6 +151,11 @@ async function computeFromDb(portfolioId: number): Promise<DerivedFields> {
   const unrealizedPnlPct = costBasisSum !== 0 ? (unrealizedPnlValue / costBasisSum) * 100 : 0;
   const allTimePnlValue = unrealizedPnlValue + realizedPnlValue;
 
+  // retrofit-76: 24h/7d/30d from BalanceSnapshot deltas, the SAME windowed-delta read the
+  // connected path uses (computeShortTermDeltas). The cost-basis all-time numbers above are
+  // unchanged — only the short-term windows come from history. No ~N-day snapshot → 0/0.
+  const shortTerm = await computeShortTermDeltas(portfolioId, totalValue);
+
   return {
     totalValue,
     pnlAllTime,
@@ -151,14 +164,51 @@ async function computeFromDb(portfolioId: number): Promise<DerivedFields> {
     unrealizedPnlPct,
     realizedPnlValue,
     allTimePnlValue,
-    // 24h/7d/30d PnL needs historical snapshot data — owned by Stage 14 analytics
-    // (cross-module read of BalanceSnapshot belongs there, not here).
-    pnl24h: 0,
-    pnl24hValue: 0,
-    pnl7d: 0,
-    pnl7dValue: 0,
-    pnl30d: 0,
-    pnl30dValue: 0,
+    ...shortTerm,
+  };
+}
+
+// currentValue − a snapshot baseline; % over the baseline (guard divide-by-zero → 0). Null
+// baseline (no snapshot in the window) → 0/0, never NaN/Infinity. Shared by the connected
+// all-time read and the short-term-window read below (retrofit-76).
+function snapshotDelta(
+  totalValue: number,
+  base: { value: { toString(): string } } | null,
+): { value: number; pct: number } {
+  if (!base) return { value: 0, pct: 0 };
+  const b = Number(base.value.toString());
+  const value = totalValue - b;
+  return { value, pct: b !== 0 ? (value / b) * 100 : 0 };
+}
+
+// retrofit-76: the 24h/7d/30d PnL fields, computed from recorded BalanceSnapshot deltas —
+// currentValue − the snapshot nearest N days ago (retrofit-72 H5 tolerance baked into
+// findSnapshotNearDaysAgo; no snapshot in the window → 0/0). Shared by BOTH the connected and
+// the manual paths so the windowed-delta logic lives in one place.
+type ShortTermPnl = Pick<
+  DerivedFields,
+  'pnl24h' | 'pnl24hValue' | 'pnl7d' | 'pnl7dValue' | 'pnl30d' | 'pnl30dValue'
+>;
+
+async function computeShortTermDeltas(
+  portfolioId: number,
+  totalValue: number,
+): Promise<ShortTermPnl> {
+  const [snap1, snap7, snap30] = await Promise.all([
+    findSnapshotNearDaysAgo(portfolioId, 1),
+    findSnapshotNearDaysAgo(portfolioId, 7),
+    findSnapshotNearDaysAgo(portfolioId, 30),
+  ]);
+  const d1 = snapshotDelta(totalValue, snap1);
+  const d7 = snapshotDelta(totalValue, snap7);
+  const d30 = snapshotDelta(totalValue, snap30);
+  return {
+    pnl24h: d1.pct,
+    pnl24hValue: d1.value,
+    pnl7d: d7.pct,
+    pnl7dValue: d7.value,
+    pnl30d: d30.pct,
+    pnl30dValue: d30.value,
   };
 }
 
@@ -173,25 +223,12 @@ async function computeConnectedDerived(
   portfolioId: number,
   totalValue: number,
 ): Promise<DerivedFields> {
-  const [earliest, snap1, snap7, snap30] = await Promise.all([
+  // all-time (earliest snapshot) in parallel with the 24h/7d/30d windows.
+  const [earliest, shortTerm] = await Promise.all([
     findEarliestSnapshotByPortfolio(portfolioId),
-    findSnapshotNearDaysAgo(portfolioId, 1),
-    findSnapshotNearDaysAgo(portfolioId, 7),
-    findSnapshotNearDaysAgo(portfolioId, 30),
+    computeShortTermDeltas(portfolioId, totalValue),
   ]);
-
-  // currentValue − baseline; % over the baseline (guard divide-by-zero → 0).
-  const delta = (base: { value: { toString(): string } } | null): { value: number; pct: number } => {
-    if (!base) return { value: 0, pct: 0 };
-    const b = Number(base.value.toString());
-    const value = totalValue - b;
-    return { value, pct: b !== 0 ? (value / b) * 100 : 0 };
-  };
-
-  const all = delta(earliest);
-  const d1 = delta(snap1);
-  const d7 = delta(snap7);
-  const d30 = delta(snap30);
+  const all = snapshotDelta(totalValue, earliest);
 
   return {
     totalValue,
@@ -202,11 +239,6 @@ async function computeConnectedDerived(
     unrealizedPnlPct: 0,
     realizedPnlValue: 0,
     allTimePnlValue: 0,
-    pnl24h: d1.pct,
-    pnl24hValue: d1.value,
-    pnl7d: d7.pct,
-    pnl7dValue: d7.value,
-    pnl30d: d30.pct,
-    pnl30dValue: d30.value,
+    ...shortTerm,
   };
 }

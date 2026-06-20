@@ -1101,3 +1101,45 @@ it('r75-alltime: USDT-only cost-unknown manual → ~0 all-time (not +33%); cost-
   expect(d.totals.pnlAllTimeValue).toBe(3000);
   expect(d.totals.pnlAllTime).toBe(3.33); // 3000 / (93004 − 3000) * 100 = 3.3332… → 2dp
 });
+
+// ---------------------------------------------------------------------------
+// retrofit-76 — a MANUAL portfolio now shows its OWN 24h delta on its row (was
+// hardcoded 0 pre-76), and totals.pnl24hValue == Σ per-portfolio rows across a
+// manual+connected mix (the headline can no longer disagree with the rows).
+// ---------------------------------------------------------------------------
+
+it('r76-manual-24h: manual portfolio with a 24h-ago snapshot shows its 24h delta on its row; totals == Σ rows (manual+connected)', async () => {
+  const cookies = await registerAndLogin();
+  const userId = await getUserId();
+  // M manual: BTC 1.0 (current 93000) WITH a ~24h-old snapshot (80000) → own 24h delta +13000.
+  // C connected: ETH 1.0 (current 3200) WITH a ~24h-old snapshot (3000) → own 24h delta +200.
+  const m = await createManualPortfolio(userId, 'M', 50000);
+  const c = await createConnectedPortfolio(userId, 'C');
+  await seedAsset(m, btcId, 1.0);
+  await seedAsset(c, ethId, 1.0);
+  const ymd2dAgo = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+  await seedSnapshot(m, userId, ymd2dAgo, 80000);
+  await seedSnapshot(c, userId, ymd2dAgo, 3000);
+
+  const res = await overviewGet(cookies);
+  expect(res.status).toBe(200);
+  const d = await getData(res);
+
+  const mRow = d.portfolios.find((p) => p.name === 'M')!;
+  const cRow = d.portfolios.find((p) => p.name === 'C')!;
+
+  // retrofit-76: the MANUAL row carries its own 24h delta now (was the hardcoded 0 pre-76).
+  expect(mRow.type).toBe('manual');
+  expect(mRow.totalValue).toBeCloseTo(93000, 2);
+  expect(mRow.pnl24hValue).toBe(13000); // 93000 − 80000
+  expect(mRow.pnl24h).toBe(16.25); // 13000 / 80000 * 100
+
+  // Connected row keeps its snapshot-delta 24h (the pre-existing path, unchanged).
+  expect(cRow.pnl24hValue).toBe(200); // 3200 − 3000
+
+  // The headline 24h equals the sum of the per-portfolio 24h rows (manual + connected): no
+  // portfolio's change is in the totals but missing from its row, and none is invented.
+  const sumRows = d.portfolios.reduce((s, p) => s + p.pnl24hValue, 0);
+  expect(d.totals.pnl24hValue).toBe(13200); // 13000 + 200
+  expect(d.totals.pnl24hValue).toBe(sumRows);
+});
