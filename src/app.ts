@@ -13,6 +13,8 @@ import { config } from './lib/config.js';
 import { checkHealth } from './lib/health.js';
 import { err, ok } from './lib/envelope.js';
 import { rateLimit } from './lib/rate-limit.js';
+import { securityHeaders } from './lib/security-headers.js';
+import { csrfProtection } from './lib/csrf.js';
 import { authRouter } from './modules/auth/auth.controller.js';
 import { usersRouter } from './modules/users/users.controller.js';
 import { subscriptionsRouter } from './modules/subscriptions/subscriptions.controller.js';
@@ -33,6 +35,9 @@ import { wsHealthHandler } from './ws/health.js';
 export function createApp(): Hono {
   const app = new Hono();
 
+  // Security response headers on every response (audit SEC, decision 7).
+  app.use('*', securityHeaders());
+
   // Health check (not under /api/v1 — Coolify polls it directly)
   app.get('/health', async (c) => {
     const health = await checkHealth();
@@ -44,6 +49,12 @@ export function createApp(): Hono {
 
   // API v1
   const api = new Hono();
+
+  // CSRF protection on cookie-authed state-changing requests (audit SEC, decision 7). Webhooks
+  // are signature-verified and arrive without a browser Origin — skip them. No-ops in tests.
+  api.use('*', csrfProtection({
+    skip: (c) => c.req.path.startsWith('/api/v1/webhooks'),
+  }));
 
   // Global IP rate limiting (audit SEC #27). Registered before the routes so it runs first.
   // No-ops when NODE_ENV=test or RATE_LIMIT_ENABLED=false. Webhooks are excluded (signature-

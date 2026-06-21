@@ -175,6 +175,16 @@ const schema = z
     RATE_LIMIT_AUTH_MAX: z.coerce.number().int().min(1).default(30),
     RATE_LIMIT_SENSITIVE_MAX: z.coerce.number().int().min(1).default(12),
 
+    // --- CSRF protection (audit SEC, decision 7) ---
+    // Origin/Referer allowlist on cookie-authed state-changing requests. Gated off when
+    // NODE_ENV=test. CSRF_ALLOWED_ORIGINS is an optional comma-separated list ADDED to the
+    // implicit allowlist (APP_BASE_URL + API_BASE_URL origins). Explicit-transform boolean.
+    CSRF_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    CSRF_ALLOWED_ORIGINS: z.string().optional(),
+
     // --- Error verbosity (audit SEC error lockdown) ---
     // When true, the global error handler returns the real error message — DEBUGGING ONLY.
     // Default false so production never leaks internal error text. Deliberately NOT keyed on
