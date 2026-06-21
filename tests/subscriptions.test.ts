@@ -6,6 +6,7 @@
 import { it, beforeEach, expect, vi } from 'vitest';
 import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { redis } from '../src/lib/redis.js';
 import { cookieValue, clearRedisAuthKeys, seedPayment, truncateAllUserData } from './helpers.js';
 import { config } from '../src/lib/config.js';
 
@@ -862,7 +863,7 @@ async function createProSubDirectly(email: string): Promise<{ userId: number; su
 // 109. POST /subscriptions/refund — eligible succeeded payment within 3 days
 // ---------------------------------------------------------------------------
 
-it('109: POST /subscriptions/refund — eligible payment within 3 days → 200, Stripe called correctly, Payment not mutated', async () => {
+it('109: POST /subscriptions/refund — eligible payment → 200, Stripe refund (idempotency key), refundAvailable flipped false, Pro revoked at period end (audit decision 2)', async () => {
   await registerUser();
   const cookies = await loginUser();
   const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
@@ -881,22 +882,79 @@ it('109: POST /subscriptions/refund — eligible payment within 3 days → 200, 
   expect(json.data.refundRequested).toBe(true);
   expect(json.data.paymentId).toBe(payment.id);
 
-  // Stripe called with correct args
+  // Stripe refund called with the per-payment idempotency key (no double-refund on retry).
   expect(mockRefundsCreate).toHaveBeenCalledWith(
     expect.objectContaining({
       payment_intent: payment.stripePaymentIntentId,
       reason: 'requested_by_customer',
       metadata: { user_reason: 'I changed my mind' },
     }),
+    expect.objectContaining({ idempotencyKey: `refund:${payment.id}` }),
   );
 
-  // Payment row NOT mutated — status still succeeded, refundAvailable still true
+  // refundAvailable flipped to false (set BEFORE the Stripe call). Status stays 'succeeded' in
+  // this unit context — the real charge.refunded webhook flips it to 'refunded'.
   const dbPayment = await prisma.payment.findUniqueOrThrow({
     where: { id: payment.id },
     include: { status: true },
   });
   expect(dbPayment.status.name).toBe('succeeded');
+  expect(dbPayment.refundAvailable).toBe(false);
+
+  // Pro revoked AT PERIOD END: Stripe sub set to cancel_at_period_end + local downgrade to Free
+  // scheduled (the user keeps Pro until the period ends).
+  expect(mockSubscriptionsUpdate).toHaveBeenCalledWith('sub_test_refund', { cancel_at_period_end: true });
+  const freePlan = await prisma.plan.findUniqueOrThrow({ where: { name: 'free' } });
+  const dbSub = await prisma.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+  expect(dbSub.scheduledPlanId).toBe(freePlan.id);
+});
+
+// ---------------------------------------------------------------------------
+// 109b. Concurrency: a refund already in progress (lock held) → 409 REFUND_IN_PROGRESS
+// ---------------------------------------------------------------------------
+
+it('109b: POST /subscriptions/refund — refund already in progress (Redis lock held) → 409 REFUND_IN_PROGRESS; Stripe NOT called', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
+  const payment = await seedPayment({ userId, subscriptionId, status: 'succeeded', refundAvailable: true });
+
+  // Simulate a concurrent refund holding the per-payment lock.
+  await redis.set(`refund:${payment.id}`, '1', 'EX', 120, 'NX');
+
+  const res = await post('/refund', {}, cookies);
+  expect(res.status).toBe(409);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('REFUND_IN_PROGRESS');
+  expect(mockRefundsCreate).not.toHaveBeenCalled();
+  // refundAvailable untouched (still true) since we never started.
+  const dbPayment = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
   expect(dbPayment.refundAvailable).toBe(true);
+
+  await redis.del(`refund:${payment.id}`);
+});
+
+// ---------------------------------------------------------------------------
+// 109c. Stripe refund fails → 400 REFUND_FAILED; refundAvailable RESTORED; lock released
+// ---------------------------------------------------------------------------
+
+it('109c: POST /subscriptions/refund — Stripe refund fails → 400 REFUND_FAILED, refundAvailable restored, lock released (retry-safe)', async () => {
+  await registerUser();
+  const cookies = await loginUser();
+  const { userId, subscriptionId } = await createProSubDirectly(TEST_EMAIL);
+  const payment = await seedPayment({ userId, subscriptionId, status: 'succeeded', refundAvailable: true });
+
+  mockRefundsCreate.mockRejectedValueOnce(Object.assign(new Error('card_error'), { code: 'charge_already_refunded' }));
+
+  const res = await post('/refund', {}, cookies);
+  expect(res.status).toBe(400);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('REFUND_FAILED');
+
+  // Flag restored so a legitimate retry can succeed; lock released.
+  const dbPayment = await prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+  expect(dbPayment.refundAvailable).toBe(true);
+  expect(await redis.get(`refund:${payment.id}`)).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
@@ -916,9 +974,10 @@ it('110: POST /subscriptions/refund — no reason → 200, Stripe called without
   const json = await res.json() as { data: { refundRequested: boolean } };
   expect(json.data.refundRequested).toBe(true);
 
-  // Called without reason and without metadata.user_reason
+  // Called without reason and without metadata.user_reason (second arg is the idempotency key).
   expect(mockRefundsCreate).toHaveBeenCalledWith(
     expect.not.objectContaining({ reason: expect.anything() }),
+    expect.anything(),
   );
   const callArg = mockRefundsCreate.mock.calls[0]![0] as Record<string, unknown>;
   expect(callArg.reason).toBeUndefined();

@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client';
+import { REFUND_WINDOW_MS } from '../../lib/constants.js';
 
 export type PaymentWithStatus = Prisma.PaymentGetPayload<{
   include: { status: true };
@@ -18,13 +19,11 @@ export interface PaymentDTO {
   createdAt: Date;
 }
 
-const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-
 export function toPaymentDTO(payment: PaymentWithStatus): PaymentDTO {
   const refundAvailable =
     payment.refundAvailable &&
     payment.status.name === 'succeeded' &&
-    Date.now() - payment.createdAt.getTime() <= THREE_DAYS_MS;
+    Date.now() - payment.createdAt.getTime() <= REFUND_WINDOW_MS;
 
   return {
     id: payment.id,

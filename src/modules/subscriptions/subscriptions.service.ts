@@ -11,7 +11,9 @@
 
 import { prisma } from '../../lib/prisma.js';
 import { stripe } from '../../lib/stripe.js';
+import { redis } from '../../lib/redis.js';
 import { config } from '../../lib/config.js';
+import { REFUND_WINDOW_MS } from '../../lib/constants.js';
 import {
   createFreeSubscription,
   findSubscriptionByUserId,
@@ -379,8 +381,6 @@ export async function cancelSubscription(
 // refundSubscription — POST /subscriptions/refund
 // ---------------------------------------------------------------------------
 
-const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-
 export async function refundSubscription(
   user: UserWithRelations,
   body: RefundSubscriptionBody,
@@ -403,26 +403,74 @@ export async function refundSubscription(
   const eligible =
     payment.refundAvailable &&
     payment.status.name === 'succeeded' &&
-    Date.now() - payment.createdAt.getTime() <= THREE_DAYS_MS;
+    Date.now() - payment.createdAt.getTime() <= REFUND_WINDOW_MS;
 
   if (!eligible) {
     throw new SubscriptionError(400, 'REFUND_NOT_ELIGIBLE', 'This payment is not eligible for refund');
   }
 
-  const refundParams: Parameters<typeof stripe.refunds.create>[0] = {
-    payment_intent: payment.stripePaymentIntentId,
-  };
-  if (body.reason) {
-    refundParams.reason = 'requested_by_customer';
-    refundParams.metadata = { user_reason: body.reason.slice(0, 500) };
+  // --- Concurrency safety (audit decision 2) ---
+  // 1) Redis SET NX cooldown so two in-flight requests can't both reach Stripe.
+  const lockKey = `refund:${payment.id}`;
+  const acquired = await redis.set(lockKey, '1', 'EX', 120, 'NX');
+  if (acquired !== 'OK') {
+    throw new SubscriptionError(409, 'REFUND_IN_PROGRESS', 'A refund for this payment is already being processed');
   }
 
   try {
-    await stripe.refunds.create(refundParams);
-  } catch (e: unknown) {
-    const code = (e as { code?: string }).code ?? 'unknown';
-    throw new SubscriptionError(400, 'REFUND_FAILED', 'Refund request failed', { stripeCode: code });
-  }
+    // 2) Flip refundAvailable=false BEFORE the Stripe call, atomically (compare-and-set on the
+    //    refundAvailable:true guard) so a racing request that slipped past the eligibility read
+    //    can't double-refund.
+    const flipped = await prisma.payment.updateMany({
+      where: { id: payment.id, refundAvailable: true },
+      data: { refundAvailable: false },
+    });
+    if (flipped.count === 0) {
+      throw new SubscriptionError(409, 'REFUND_IN_PROGRESS', 'A refund for this payment is already being processed');
+    }
 
-  return { refundRequested: true, paymentId: payment.id };
+    // 3) Create the Stripe refund with a per-payment idempotency key so a retry of THIS request
+    //    never issues a second refund.
+    const refundParams: Parameters<typeof stripe.refunds.create>[0] = {
+      payment_intent: payment.stripePaymentIntentId,
+    };
+    if (body.reason) {
+      refundParams.reason = 'requested_by_customer';
+      refundParams.metadata = { user_reason: body.reason.slice(0, 500) };
+    }
+
+    try {
+      await stripe.refunds.create(refundParams, { idempotencyKey: `refund:${payment.id}` });
+    } catch (e: unknown) {
+      // Stripe failed — RESTORE the flag so a transient failure doesn't permanently block a legit
+      // refund, then surface the error.
+      await prisma.payment
+        .update({ where: { id: payment.id }, data: { refundAvailable: true } })
+        .catch(() => undefined);
+      const code = (e as { code?: string }).code ?? 'unknown';
+      throw new SubscriptionError(400, 'REFUND_FAILED', 'Refund request failed', { stripeCode: code });
+    }
+
+    // 4) Revoke Pro AT PERIOD END (audit decision 2): cancel the Stripe subscription at period end
+    //    and schedule the local downgrade to Free. The user keeps Pro until the paid period
+    //    expires, then the existing customer.subscription.deleted webhook applies the downgrade.
+    //    The refund already succeeded, so a failure here must NOT 500 the request — log + continue
+    //    (the charge.refunded webhook still marks the payment refunded; reconcile out-of-band).
+    if (sub.stripeSubscriptionId && sub.plan.name !== 'free') {
+      try {
+        await stripe.subscriptions.update(sub.stripeSubscriptionId, { cancel_at_period_end: true });
+        const freePlan = await prisma.plan.findUniqueOrThrow({ where: { name: 'free' } });
+        await updateSubscriptionById(sub.id, { scheduledPlanId: freePlan.id, scheduledBillingCycleId: null });
+      } catch (e) {
+        console.error(
+          '[subscriptions] refund succeeded but scheduling period-end downgrade failed',
+          e instanceof Error ? e.message : e,
+        );
+      }
+    }
+
+    return { refundRequested: true, paymentId: payment.id };
+  } finally {
+    await redis.del(lockKey).catch(() => undefined);
+  }
 }
