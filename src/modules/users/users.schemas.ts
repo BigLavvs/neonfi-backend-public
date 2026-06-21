@@ -5,6 +5,8 @@
 // must NOT be accepted from clients:
 //   email             — change requires re-verification + session re-issue (doc-fix item)
 //   password          — change is deferred (see stage-2.md §1.1)
+//   avatarUrl         — server-managed via POST/DELETE /users/me/avatar only (retrofit-90);
+//                       a client must never set an arbitrary avatar URL here (audit SEC #4/#23)
 //   plan/billingCycle — server-managed via Subscription (Stage 3)
 //   onboardingStatus  — server-managed lifecycle
 //   authProvider      — immutable after registration
@@ -21,15 +23,9 @@ export const PatchMeSchema = z
       .max(100)
       .nullable()
       .optional(),
-    avatarUrl: z
-      .string()
-      .url('avatarUrl must be a valid URL')
-      .max(2048)
-      .nullable()
-      .optional(),
     newsletterSubscribed: z.boolean().optional(),
   })
-  .strict(); // unknown fields → 400 VALIDATION_ERROR
+  .strict(); // unknown fields (incl. avatarUrl) → 400 VALIDATION_ERROR
 
 export type PatchMeBody = z.infer<typeof PatchMeSchema>;
 

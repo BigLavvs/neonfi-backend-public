@@ -293,42 +293,35 @@ it('39: PATCH /users/me updates fullName in response and DB', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// 40. PATCH /users/me — update avatarUrl
+// 40. PATCH /users/me — avatarUrl is rejected (managed via POST /me/avatar only)
 // ---------------------------------------------------------------------------
 
-it('40: PATCH /users/me updates avatarUrl in response and DB', async () => {
+it('40: PATCH /users/me rejects avatarUrl (avatars are set via POST /me/avatar, audit SEC #4/#23)', async () => {
   const sessionCookie = await registerAndLogin();
-  const url = 'https://example.com/avatar.png';
 
-  const res = await patch('/me', { avatarUrl: url }, sessionCookie);
-  expect(res.status).toBe(200);
+  const res = await patch('/me', { avatarUrl: 'https://example.com/avatar.png' }, sessionCookie);
+  expect(res.status).toBe(400);
 
-  const json = await res.json() as { data: { user: Record<string, unknown> } };
-  expect(json.data.user.avatarUrl).toBe(url);
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('VALIDATION_ERROR');
 
+  // The avatar was NOT set via this path.
   const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
-  expect(dbUser.avatarUrl).toBe(url);
+  expect(dbUser.avatarUrl).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
-// 41. PATCH /users/me — avatarUrl: null clears the field
+// 41. PATCH /users/me — avatarUrl:null also rejected (clear via DELETE /me/avatar)
 // ---------------------------------------------------------------------------
 
-it('41: PATCH /users/me with avatarUrl:null clears the field', async () => {
+it('41: PATCH /users/me rejects avatarUrl:null too (clearing is via DELETE /me/avatar)', async () => {
   const sessionCookie = await registerAndLogin();
 
-  // Set it first
-  await patch('/me', { avatarUrl: 'https://example.com/avatar.png' }, sessionCookie);
-
-  // Now clear it
   const res = await patch('/me', { avatarUrl: null }, sessionCookie);
-  expect(res.status).toBe(200);
+  expect(res.status).toBe(400);
 
-  const json = await res.json() as { data: { user: Record<string, unknown> } };
-  expect(json.data.user.avatarUrl).toBeNull();
-
-  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
-  expect(dbUser.avatarUrl).toBeNull();
+  const json = await res.json() as { error: { code: string } };
+  expect(json.error.code).toBe('VALIDATION_ERROR');
 });
 
 // ---------------------------------------------------------------------------

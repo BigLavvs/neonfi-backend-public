@@ -44,7 +44,10 @@ export interface VerifyResult {
 export async function verifyAccessToken(
   token: string,
 ): Promise<AccessTokenPayload> {
-  const { payload } = await jwtVerify<AccessTokenPayload>(token, secret);
+  // Pin the accepted algorithm (audit SEC, JWT alg pinning). Without `algorithms`, jose accepts
+  // whatever symmetric alg the token header claims — never let a token dictate its own verification
+  // algorithm. We only ever sign HS256, so verification must only accept HS256.
+  const { payload } = await jwtVerify<AccessTokenPayload>(token, secret, { algorithms: ['HS256'] });
   return payload;
 }
 

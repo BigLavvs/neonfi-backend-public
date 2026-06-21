@@ -9,7 +9,7 @@
 //   POST /api/v1/auth/*   — Stage 1A email auth flows
 
 import { Hono } from 'hono';
-import { config, isProduction } from './lib/config.js';
+import { config } from './lib/config.js';
 import { checkHealth } from './lib/health.js';
 import { err, ok } from './lib/envelope.js';
 import { rateLimit } from './lib/rate-limit.js';
@@ -97,7 +97,9 @@ export function createApp(): Hono {
   app.notFound((c) => c.json(err('NOT_FOUND', 'Resource not found'), 404));
   app.onError((e, c) => {
     console.error('[error]', e);
-    const message = isProduction ? 'Internal server error' : e.message;
+    // Never leak internal error text by default. Verbose messages only with an explicit
+    // DEBUG_ERRORS=true opt-in — NOT keyed on NODE_ENV (audit SEC error lockdown).
+    const message = config.DEBUG_ERRORS ? e.message : 'Internal server error';
     return c.json(err('INTERNAL_ERROR', message), 500);
   });
 

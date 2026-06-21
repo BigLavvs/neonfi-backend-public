@@ -175,6 +175,16 @@ const schema = z
     RATE_LIMIT_AUTH_MAX: z.coerce.number().int().min(1).default(30),
     RATE_LIMIT_SENSITIVE_MAX: z.coerce.number().int().min(1).default(12),
 
+    // --- Error verbosity (audit SEC error lockdown) ---
+    // When true, the global error handler returns the real error message — DEBUGGING ONLY.
+    // Default false so production never leaks internal error text. Deliberately NOT keyed on
+    // NODE_ENV: a mis-set NODE_ENV must not be able to expose internals. Explicit-transform
+    // boolean (Boolean("false") === true would never disable).
+    DEBUG_ERRORS: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('false'),
+
     // --- Token metadata sync (Stage 9B) ---
     // NOTE: deliberately NOT z.coerce.boolean() — Boolean("false") === true in JS,
     // so "false" would NOT disable. Stage 13 caught the same bug for SNAPSHOT_ENABLED;
