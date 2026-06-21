@@ -156,12 +156,14 @@ function convertTokenAmount(valueStr: string, decimalsStr: string): string {
 // Event ID extraction — idempotency key derivation
 // ---------------------------------------------------------------------------
 
-function extractEventId(payload: MoralisPayload, rawBody: string): string {
-  if (payload.streamId && payload.chainId && payload.tag !== undefined) {
-    return `${payload.streamId}_${payload.chainId}_${payload.tag}`;
-  }
-  // Fallback: hash of the raw body (guaranteed unique per distinct payload)
-  return keccak256(rawBody);
+function extractEventId(rawBody: string): string {
+  // Per-DELIVERY idempotency: keccak256 of the exact raw body. (audit SEC #17)
+  // streamId/chainId/tag are immutable for a stream's lifetime, so keying on
+  // `${streamId}_${chainId}_${tag}` returned the SAME string for every delivery and pinned
+  // the dedupe key for 30 days — every webhook after the first was silently dropped. The raw
+  // body differs per delivery (distinct block/tx/log data + the confirmed flag), so the hash
+  // is unique per delivery while a genuine replay of the identical body still dedupes.
+  return `kc:${keccak256(rawBody)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -500,8 +502,18 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
     return c.json(err('MALFORMED_PAYLOAD', 'Request body is not valid JSON'), 400);
   }
 
+  // 3a. Confirmed-only ingestion (audit SEC #18). Moralis sends an UNCONFIRMED delivery on
+  //     block inclusion and a CONFIRMED one after enough confirmations. Ingesting the
+  //     unconfirmed copy records reorg-able state that is never reconciled. Ack 200 so Moralis
+  //     stops retrying, but do NOT ingest and do NOT set a dedupe key — the confirmed delivery
+  //     carries `confirmed:true`, so its raw body (and thus its hash key) differs and is still
+  //     ingested.
+  if (payload.confirmed !== true) {
+    return c.json(ok({ received: true, confirmed: false, ignored: true }), 200);
+  }
+
   // 4. Idempotency check
-  const eventId = extractEventId(payload, rawBody);
+  const eventId = extractEventId(rawBody);
   const seen = await redis.get(`moralis_event:${eventId}`);
   if (seen) {
     return c.json(ok({ received: true, duplicate: true }), 200);

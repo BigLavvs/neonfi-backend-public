@@ -528,9 +528,74 @@ it('280: multiple transfers in single payload (native + erc20) → 200, counts r
   });
   expect(Number(usdcAsset!.balance.toString())).toBeCloseTo(3, 4);
 
-  // Idempotency key set exactly once
-  const key = await redis.get(`moralis_event:stream-280_${ETH_MORALIS_ID}_test`);
+  // Idempotency key set exactly once (per-delivery hash key — audit SEC #17)
+  const key = await redis.get(`moralis_event:kc:${keccak256(JSON.stringify(payload))}`);
   expect(key).toBe('1');
+});
+
+// ---------------------------------------------------------------------------
+// Per-delivery idempotency + confirmed-only (audit SEC #17 / #18) — tests 294–296
+// ---------------------------------------------------------------------------
+
+it('294: two DISTINCT deliveries sharing streamId/chainId/tag are BOTH processed; an identical replay dedupes (audit SEC #17)', async () => {
+  // Provider balance is irrelevant here; just keep the post-write refresh deterministic.
+  fetchWalletSummaryMock.mockResolvedValue(summaryOf([{ symbol: 'ETH', balance: 3, isNative: true }]));
+  const STREAM = 'stream-prod-constant'; // same stream identity for every delivery (production reality)
+
+  // Two genuinely different on-chain deliveries (distinct tx hashes + blocks) on the SAME stream.
+  const p1 = makePayload(
+    { txs: [{ hash: '0xdeliv294a', from: OTHER_ADDRESS, to: WALLET_ADDRESS, value: '1000000000000000000' }], block: { timestamp: '1704067200', number: '19000001', hash: '0xblk294a' } },
+    STREAM,
+  );
+  const p2 = makePayload(
+    { txs: [{ hash: '0xdeliv294b', from: OTHER_ADDRESS, to: WALLET_ADDRESS, value: '1000000000000000000' }], block: { timestamp: '1704067260', number: '19000002', hash: '0xblk294b' } },
+    STREAM,
+  );
+
+  const r1 = await postWebhook(p1, sign(p1));
+  expect(r1.status).toBe(200);
+  expect((await r1.json()).data.processed).toBe(1);
+
+  // Under the old per-stream key this SECOND delivery would short-circuit as duplicate and 0xdeliv294b
+  // would be lost forever. With per-delivery hashing it must process.
+  const r2 = await postWebhook(p2, sign(p2));
+  expect(r2.status).toBe(200);
+  const j2 = await r2.json();
+  expect(j2.data.duplicate).toBeUndefined();
+  expect(j2.data.processed).toBe(1);
+
+  // Both transfers persisted.
+  expect(await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xdeliv294a' } })).toBe(1);
+  expect(await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xdeliv294b' } })).toBe(1);
+
+  // A true replay of the identical body STILL dedupes.
+  const replay = await postWebhook(p2, sign(p2));
+  expect(replay.status).toBe(200);
+  expect((await replay.json()).data.duplicate).toBe(true);
+  expect(await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xdeliv294b' } })).toBe(1);
+});
+
+it('296: unconfirmed delivery (confirmed=false) is ack-and-ignored, not ingested, no dedupe key (audit SEC #18)', async () => {
+  const payload = makePayload(
+    {
+      confirmed: false,
+      txs: [{ hash: '0xunconfirmed296', from: OTHER_ADDRESS, to: WALLET_ADDRESS, value: '1000000000000000000' }],
+    },
+    'stream-296',
+  );
+  const res = await postWebhook(payload, sign(payload));
+  expect(res.status).toBe(200);
+  const json = await res.json();
+  expect(json.data.received).toBe(true);
+  expect(json.data.confirmed).toBe(false);
+  expect(json.data.ignored).toBe(true);
+
+  // Nothing ingested.
+  expect(await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xunconfirmed296' } })).toBe(0);
+
+  // No dedupe key set → the later CONFIRMED delivery (different body/hash) can still be ingested.
+  const key = await redis.get(`moralis_event:kc:${keccak256(JSON.stringify(payload))}`);
+  expect(key).toBeNull();
 });
 
 // ---------------------------------------------------------------------------

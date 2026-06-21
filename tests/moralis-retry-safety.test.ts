@@ -11,6 +11,7 @@
 //   • DUPLICATE hash → idempotent success (200, counted processed, dedupe set).
 
 import { it, expect, describe, beforeEach, vi } from 'vitest';
+import { keccak256 } from 'js-sha3';
 import type { Context } from 'hono';
 
 const WALLET = '0xabcdef1234567890abcdef1234567890abcdef12';
@@ -73,8 +74,10 @@ function makeCtx(payload: object): Context {
   } as unknown as Context;
 }
 
-function dedupeKey(streamId: string, chainId: string, tag: string): string {
-  return `moralis_event:${streamId}_${chainId}_${tag}`;
+// Per-delivery hash key (audit SEC #17). The handler now keys idempotency off keccak256 of the
+// exact raw body, which here is JSON.stringify(payload) (see makeCtx).
+function dedupeKey(payload: object): string {
+  return `moralis_event:kc:${keccak256(JSON.stringify(payload))}`;
 }
 
 beforeEach(() => {
@@ -100,6 +103,7 @@ const nativePayload = (extra: object = {}) => ({
   chainId: '0x1',
   streamId: 'stream-retry',
   tag: 'test',
+  confirmed: true, // confirmed-only ingestion (audit SEC #18)
   ...extra,
 });
 
@@ -108,7 +112,8 @@ describe('Moralis webhook retry safety (retrofit-17 §3)', () => {
     const transient = Object.assign(new Error('server closed the connection'), { code: 'P1017' });
     mocks.createTransactionFromWebhook.mockRejectedValueOnce(transient);
 
-    const res = await handleMoralisWebhook(makeCtx(nativePayload()));
+    const payload = nativePayload();
+    const res = await handleMoralisWebhook(makeCtx(payload));
 
     expect(res.status).toBe(500);
     const json = await res.json();
@@ -118,7 +123,7 @@ describe('Moralis webhook retry safety (retrofit-17 §3)', () => {
     expect(mocks.createTransactionFromWebhook).toHaveBeenCalledTimes(1);
     // ...but the dedupe key must NOT be set, so Moralis can retry.
     expect(redis.set).not.toHaveBeenCalled();
-    expect(mocks.redisStore.has(dedupeKey('stream-retry', '0x1', 'test'))).toBe(false);
+    expect(mocks.redisStore.has(dedupeKey(payload))).toBe(false);
   });
 
   it('TRANSIENT erc20 error (generic throw) → 500 and NO dedupe key set', async () => {
@@ -139,6 +144,7 @@ describe('Moralis webhook retry safety (retrofit-17 §3)', () => {
       chainId: '0x1',
       streamId: 'stream-erc20',
       tag: 'test',
+      confirmed: true,
     };
     mocks.createTransactionFromWebhook.mockRejectedValueOnce(new Error('unexpected boom'));
 
@@ -146,7 +152,7 @@ describe('Moralis webhook retry safety (retrofit-17 §3)', () => {
 
     expect(res.status).toBe(500);
     expect(redis.set).not.toHaveBeenCalled();
-    expect(mocks.redisStore.has(dedupeKey('stream-erc20', '0x1', 'test'))).toBe(false);
+    expect(mocks.redisStore.has(dedupeKey(payload))).toBe(false);
   });
 
   it('GENUINE business skip (unknown token) → 200, skipped, dedupe key IS set', async () => {
@@ -168,6 +174,7 @@ describe('Moralis webhook retry safety (retrofit-17 §3)', () => {
       chainId: '0x1',
       streamId: 'stream-biz',
       tag: 'test',
+      confirmed: true,
     };
 
     const res = await handleMoralisWebhook(makeCtx(payload));
@@ -178,7 +185,7 @@ describe('Moralis webhook retry safety (retrofit-17 §3)', () => {
     expect(json.data.processed).toBe(0);
     // A deterministic business skip is acked + deduped.
     expect(redis.set).toHaveBeenCalledTimes(1);
-    expect(mocks.redisStore.get(dedupeKey('stream-biz', '0x1', 'test'))).toBe('1');
+    expect(mocks.redisStore.get(dedupeKey(payload))).toBe('1');
     // Never even attempted to write a transaction.
     expect(mocks.createTransactionFromWebhook).not.toHaveBeenCalled();
   });
@@ -187,22 +194,24 @@ describe('Moralis webhook retry safety (retrofit-17 §3)', () => {
     const dup = Object.assign(new Error('dup'), { code: 'TRANSACTION_HASH_DUPLICATE' });
     mocks.createTransactionFromWebhook.mockRejectedValueOnce(dup);
 
-    const res = await handleMoralisWebhook(makeCtx(nativePayload({ streamId: 'stream-dup' })));
+    const payload = nativePayload({ streamId: 'stream-dup' });
+    const res = await handleMoralisWebhook(makeCtx(payload));
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.data.processed).toBe(1); // counted as processed — already ingested
     expect(redis.set).toHaveBeenCalledTimes(1);
-    expect(mocks.redisStore.get(dedupeKey('stream-dup', '0x1', 'test'))).toBe('1');
+    expect(mocks.redisStore.get(dedupeKey(payload))).toBe('1');
   });
 
   it('happy path native IN → 200 processed=1 and dedupe key set', async () => {
-    const res = await handleMoralisWebhook(makeCtx(nativePayload({ streamId: 'stream-ok' })));
+    const payload = nativePayload({ streamId: 'stream-ok' });
+    const res = await handleMoralisWebhook(makeCtx(payload));
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.data.processed).toBe(1);
     expect(json.data.skipped).toBe(0);
-    expect(mocks.redisStore.get(dedupeKey('stream-ok', '0x1', 'test'))).toBe('1');
+    expect(mocks.redisStore.get(dedupeKey(payload))).toBe('1');
   });
 });
