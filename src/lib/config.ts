@@ -160,6 +160,21 @@ const schema = z
     AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
     AUTH_LOGIN_LOCKOUT_MS: z.coerce.number().int().min(1000).default(900000),
 
+    // --- Global IP rate limiting (audit SEC #27) ---
+    // Redis sliding-window per trusted client IP, mounted in app.ts. Gated off automatically
+    // when NODE_ENV=test so the integration suite (which fires many rapid requests) is
+    // unaffected. NOTE: explicit-transform boolean (Boolean("false")===true would never
+    // disable). Buckets: GLOBAL on all API routes (except signature-verified webhooks), a
+    // tighter AUTH bucket on /auth/*, and a SENSITIVE bucket on provider-fanout + refund.
+    RATE_LIMIT_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+    RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(60000),
+    RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().min(1).default(240),
+    RATE_LIMIT_AUTH_MAX: z.coerce.number().int().min(1).default(30),
+    RATE_LIMIT_SENSITIVE_MAX: z.coerce.number().int().min(1).default(12),
+
     // --- Token metadata sync (Stage 9B) ---
     // NOTE: deliberately NOT z.coerce.boolean() — Boolean("false") === true in JS,
     // so "false" would NOT disable. Stage 13 caught the same bug for SNAPSHOT_ENABLED;

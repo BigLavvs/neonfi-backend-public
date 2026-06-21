@@ -9,9 +9,10 @@
 //   POST /api/v1/auth/*   — Stage 1A email auth flows
 
 import { Hono } from 'hono';
-import { isProduction } from './lib/config.js';
+import { config, isProduction } from './lib/config.js';
 import { checkHealth } from './lib/health.js';
 import { err, ok } from './lib/envelope.js';
+import { rateLimit } from './lib/rate-limit.js';
 import { authRouter } from './modules/auth/auth.controller.js';
 import { usersRouter } from './modules/users/users.controller.js';
 import { subscriptionsRouter } from './modules/subscriptions/subscriptions.controller.js';
@@ -43,6 +44,34 @@ export function createApp(): Hono {
 
   // API v1
   const api = new Hono();
+
+  // Global IP rate limiting (audit SEC #27). Registered before the routes so it runs first.
+  // No-ops when NODE_ENV=test or RATE_LIMIT_ENABLED=false. Webhooks are excluded (signature-
+  // verified + idempotent; they arrive from provider IPs in bursts).
+  api.use('*', rateLimit({
+    id: 'global',
+    limit: config.RATE_LIMIT_GLOBAL_MAX,
+    windowMs: config.RATE_LIMIT_WINDOW_MS,
+    skip: (c) => c.req.path.startsWith('/api/v1/webhooks'),
+  }));
+  // Tighter bucket on auth flows (brute force / credential stuffing / enumeration).
+  api.use('/auth/*', rateLimit({
+    id: 'auth',
+    limit: config.RATE_LIMIT_AUTH_MAX,
+    windowMs: config.RATE_LIMIT_WINDOW_MS,
+  }));
+  // Tightest bucket on expensive provider-fanout + the refund endpoint.
+  api.use('/portfolios/wallet/preview', rateLimit({
+    id: 'wallet-preview',
+    limit: config.RATE_LIMIT_SENSITIVE_MAX,
+    windowMs: config.RATE_LIMIT_WINDOW_MS,
+  }));
+  api.use('/subscriptions/refund', rateLimit({
+    id: 'refund',
+    limit: config.RATE_LIMIT_SENSITIVE_MAX,
+    windowMs: config.RATE_LIMIT_WINDOW_MS,
+  }));
+
   api.get('/_ping', (c) => c.json(ok({ ok: true }), 200));
   api.route('/auth', authRouter);
   api.route('/users', usersRouter);

@@ -13,6 +13,9 @@ export interface ErrorEnvelope {
   error: {
     code: string;
     message: string;
+    // Optional structured detail the frontend can read (e.g. { retryAfter }). lib/api.ts
+    // reads retry hints from error.details.retryAfter.
+    details?: Record<string, unknown>;
   };
 }
 
@@ -20,6 +23,6 @@ export function ok<T>(data: T, meta?: Record<string, unknown>): SuccessEnvelope<
   return meta === undefined ? { data } : { data, meta };
 }
 
-export function err(code: string, message: string): ErrorEnvelope {
-  return { error: { code, message } };
+export function err(code: string, message: string, details?: Record<string, unknown>): ErrorEnvelope {
+  return { error: details === undefined ? { code, message } : { code, message, details } };
 }
