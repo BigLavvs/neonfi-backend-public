@@ -7,13 +7,15 @@
 
 import { it, expect, describe, vi, beforeEach } from 'vitest';
 
-const { tokenFindUnique, tokenUpsert } = vi.hoisted(() => ({
-  tokenFindUnique: vi.fn(),
+const { tokenFindMany, tokenUpsert } = vi.hoisted(() => ({
+  tokenFindMany: vi.fn(),
   tokenUpsert: vi.fn(),
 }));
 
 vi.mock('../src/lib/prisma.js', () => ({
-  prisma: { token: { findUnique: tokenFindUnique, upsert: tokenUpsert } },
+  // perf #24: ingest now reads the existing-symbol set via ONE findMany (not a per-token
+  // findUnique) and upserts in bounded-concurrency chunks.
+  prisma: { token: { findMany: tokenFindMany, upsert: tokenUpsert } },
 }));
 
 import { CoinMarketCapTokenMetadataProvider } from '../src/modules/tokens/sync/coinmarketcap-provider.js';
@@ -119,16 +121,15 @@ describe('fetchTopTokens (CMC listings) parsing', () => {
 
 describe('runTokenCatalogIngest', () => {
   beforeEach(() => {
-    tokenFindUnique.mockReset();
+    tokenFindMany.mockReset();
+    tokenFindMany.mockResolvedValue([]);
     tokenUpsert.mockReset();
     tokenUpsert.mockResolvedValue({});
   });
 
   it('inserts new symbols and updates existing ones (2 new + 1 existing → inserted=2, updated=1)', async () => {
-    // AAA + BBB are new (findUnique → null); CCC already exists (findUnique → {id}).
-    tokenFindUnique.mockImplementation(async ({ where }: { where: { symbol: string } }) =>
-      (where.symbol === 'CCC' ? { id: 42 } : null),
-    );
+    // AAA + BBB are new (absent from the existing-symbol set); CCC already exists.
+    tokenFindMany.mockResolvedValue([{ symbol: 'CCC' }]);
 
     const fakeProvider: TopTokenProvider = {
       fetchTopTokens: async () => [

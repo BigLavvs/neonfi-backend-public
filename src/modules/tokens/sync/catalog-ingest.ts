@@ -33,36 +33,54 @@ export async function runTokenCatalogIngest(
   const p = provider ?? getDefaultProvider();
   const top = await p.fetchTopTokens(limit);
 
+  // perf #24: one findMany for the existing-symbol set instead of a per-token findUnique
+  // (was 2N round trips). The upsert does its own existence check; this set is only for the
+  // inserted/updated bookkeeping, and reflects pre-ingest state since we read it before writing.
+  const existingSymbols = new Set(
+    (
+      await prisma.token.findMany({
+        where: { symbol: { in: top.map((t) => t.symbol) } },
+        select: { symbol: true },
+      })
+    ).map((r) => r.symbol),
+  );
+
+  // Chunked bounded-concurrency upserts instead of fully sequential — cuts wall-clock on the
+  // ~500-1000-row 6-hourly ingest without overwhelming the connection pool.
+  const CHUNK = 20;
+  for (let i = 0; i < top.length; i += CHUNK) {
+    await Promise.all(
+      top.slice(i, i + CHUNK).map((t) =>
+        prisma.token.upsert({
+          where: { symbol: t.symbol },
+          create: {
+            symbol: t.symbol,
+            name: t.name,
+            currentPrice: t.currentPrice,
+            marketCap: t.marketCap,
+            rank: t.rank,
+            logoUrl: t.logoUrl,
+            change24h: t.change24h, // retrofit-39: cold-cache badge fallback
+          },
+          // Don't overwrite an existing logoUrl with null, and keep rank only when provided.
+          update: {
+            name: t.name,
+            currentPrice: t.currentPrice,
+            marketCap: t.marketCap,
+            ...(t.rank != null ? { rank: t.rank } : {}),
+            ...(t.logoUrl ? { logoUrl: t.logoUrl } : {}),
+            // retrofit-39: refresh the persisted change when provided; never null out a prior.
+            ...(t.change24h != null ? { change24h: t.change24h } : {}),
+          },
+        }),
+      ),
+    );
+  }
+
   let inserted = 0;
   let updated = 0;
   for (const t of top) {
-    const existing = await prisma.token.findUnique({
-      where: { symbol: t.symbol },
-      select: { id: true },
-    });
-    await prisma.token.upsert({
-      where: { symbol: t.symbol },
-      create: {
-        symbol: t.symbol,
-        name: t.name,
-        currentPrice: t.currentPrice,
-        marketCap: t.marketCap,
-        rank: t.rank,
-        logoUrl: t.logoUrl,
-        change24h: t.change24h, // retrofit-39: cold-cache badge fallback
-      },
-      // Don't overwrite an existing logoUrl with null, and keep rank only when provided.
-      update: {
-        name: t.name,
-        currentPrice: t.currentPrice,
-        marketCap: t.marketCap,
-        ...(t.rank != null ? { rank: t.rank } : {}),
-        ...(t.logoUrl ? { logoUrl: t.logoUrl } : {}),
-        // retrofit-39: refresh the persisted change when provided; never null out a prior.
-        ...(t.change24h != null ? { change24h: t.change24h } : {}),
-      },
-    });
-    if (existing) updated++;
+    if (existingSymbols.has(t.symbol)) updated++;
     else inserted++;
   }
 
