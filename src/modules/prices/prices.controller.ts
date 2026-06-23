@@ -9,6 +9,7 @@ import { requireAuth } from '../auth/middleware.js';
 import type { AuthEnv } from '../auth/middleware.js';
 import { refreshBodySchema, historyQuerySchema, type HistoryQuery } from './prices.schemas.js';
 import { resolveSymbolsForUser, refreshPrices, getPriceDebug, getPriceHistory } from './prices.service.js';
+import { isSubscriptionEffectivelyActive } from '../subscriptions/subscription-status.js';
 
 const RATE_LIMIT_TTL_S = 30;
 
@@ -32,14 +33,7 @@ pricesRouter.post('/refresh', requireAuth, async (c) => {
   });
 
   if (subscription) {
-    const now = new Date();
-    const effectivelyActive =
-      subscription.status.name === 'active' ||
-      (subscription.status.name === 'cancelled' &&
-        subscription.currentPeriodEnd !== null &&
-        subscription.currentPeriodEnd > now);
-
-    if (effectivelyActive && subscription.plan.name === 'pro') {
+    if (isSubscriptionEffectivelyActive(subscription) && subscription.plan.name === 'pro') {
       return c.json(err('PRO_USES_WEBSOCKET', 'Pro users receive live prices via WebSocket'), 403);
     }
   }

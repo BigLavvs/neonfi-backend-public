@@ -36,11 +36,6 @@ export async function signAccessToken(payload: {
     .sign(secret);
 }
 
-export interface VerifyResult {
-  payload: AccessTokenPayload;
-  expired: boolean;
-}
-
 export async function verifyAccessToken(
   token: string,
 ): Promise<AccessTokenPayload> {

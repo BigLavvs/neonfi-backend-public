@@ -29,6 +29,7 @@ import {
 } from '../email/email.service.js';
 import type { UserWithRelations } from '../users/users.repository.js';
 import type { CreateSubscriptionBody, UpgradeSubscriptionBody, DowngradeSubscriptionBody, RefundSubscriptionBody } from './subscriptions.schemas.js';
+import { isSubscriptionEffectivelyActive } from './subscription-status.js';
 
 // ---------------------------------------------------------------------------
 // Shared error type
@@ -56,13 +57,7 @@ export async function getEffectivePlan(userId: number): Promise<'free' | 'pro'> 
     include: { plan: true, status: true },
   });
   if (!subscription) return 'free';
-  const now = new Date();
-  const effectivelyActive =
-    subscription.status.name === 'active' ||
-    (subscription.status.name === 'cancelled' &&
-      subscription.currentPeriodEnd !== null &&
-      subscription.currentPeriodEnd > now);
-  if (!effectivelyActive) return 'free';
+  if (!isSubscriptionEffectivelyActive(subscription)) return 'free';
   return subscription.plan.name as 'free' | 'pro';
 }
 

@@ -45,14 +45,13 @@ export async function checkHealth(): Promise<HealthResult> {
   // Coinbase check is a cheap state read — no network round-trip
   const coinbaseStatus: 'up' | 'down' = coinbase.isConnected() ? 'up' : 'down';
 
-  const ok = db === 'up' && redisStatus === 'up' && coinbaseStatus === 'up';
+  // Coinbase is informational — a transient WS reconnect must not 503 the whole app.
+  const ok = db === 'up' && redisStatus === 'up';
   let failure: string | undefined;
   if (!ok) {
-    const down = [
-      db === 'down' && 'database',
-      redisStatus === 'down' && 'redis',
-      coinbaseStatus === 'down' && 'coinbase',
-    ].filter(Boolean) as string[];
+    const down = [db === 'down' && 'database', redisStatus === 'down' && 'redis'].filter(
+      Boolean,
+    ) as string[];
     failure = `${down.join(' and ')} unavailable`;
   }
 

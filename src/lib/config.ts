@@ -125,7 +125,6 @@ const schema = z
     // authoritative token-catalog source; booting without the key silently disables
     // price refreshes in a way that's hard to notice in production.
     COINMARKETCAP_API_KEY: z.string().min(1),
-    COINRANKING_API_KEY: z.string().optional(),
 
     // --- Real historical prices for chart backfill (retrofit-42) ---
     // CoinGecko is the historical-price source for `npm run backfill:snapshots`. The key is
@@ -151,6 +150,9 @@ const schema = z
     // --- Email ---
     RESEND_API_KEY: z.string().min(1),
     EMAIL_FROM_ADDRESS: z.string().min(1),
+
+    // --- Server ---
+    PORT: z.coerce.number().int().min(1).max(65535).default(3000),
 
     // --- Logging ---
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),

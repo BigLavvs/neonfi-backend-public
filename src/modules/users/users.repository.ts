@@ -8,6 +8,7 @@
 
 import { type Prisma, type Session } from '@prisma/client';
 import { prisma, type PrismaTransactionClient } from '../../lib/prisma.js';
+import { isSubscriptionEffectivelyActive } from '../subscriptions/subscription-status.js';
 
 // ---------------------------------------------------------------------------
 // User with relations
@@ -48,13 +49,8 @@ export async function toUserDTO(user: UserWithRelations): Promise<UserDTO> {
     include: { plan: true, billingCycle: true, status: true },
   });
 
-  const now = new Date();
   const effectivelyActive =
-    subscription !== null &&
-    (subscription.status.name === 'active' ||
-      (subscription.status.name === 'cancelled' &&
-        subscription.currentPeriodEnd !== null &&
-        subscription.currentPeriodEnd > now));
+    subscription !== null && isSubscriptionEffectivelyActive(subscription);
 
   const plan = effectivelyActive ? (subscription!.plan.name as 'free' | 'pro') : null;
   const billingCycle = effectivelyActive ? (subscription!.billingCycle?.name ?? null) : null;

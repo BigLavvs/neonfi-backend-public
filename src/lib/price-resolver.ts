@@ -105,7 +105,7 @@ export async function recordTick(
   now: number = Date.now(),
 ): Promise<void> {
   const sym = symbol.toUpperCase();
-  if (!Number.isFinite(price)) return;
+  if (!Number.isFinite(price) || price <= 0) return;
 
   const tick: ExchangeTick = {
     price,

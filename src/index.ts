@@ -53,8 +53,7 @@ import { loadCatalogSymbols, getCatalogSymbols, getKrakenCoverage } from './lib/
 import { startWsServer } from './ws/server.js';
 
 // --- Start ------------------------------------------------------------------
-const port = 3000;
-const server = serve({ fetch: app.fetch, port }, (info) => {
+const server = serve({ fetch: app.fetch, port: config.PORT }, (info) => {
   // eslint-disable-next-line no-console
   console.log(`[neonfi-backend] listening on http://localhost:${info.port} (NODE_ENV=${config.NODE_ENV})`);
 }) as unknown as HttpServer;

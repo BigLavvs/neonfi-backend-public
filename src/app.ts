@@ -5,7 +5,7 @@
 //
 // Route tree:
 //   GET  /health          — DB + Redis liveness (Coolify probe)
-//   GET  /api/v1/_ping    — sanity check, delete in Stage 2
+//   GET  /api/v1/prices   — price refresh + debug + history
 //   POST /api/v1/auth/*   — Stage 1A email auth flows
 
 import { Hono } from 'hono';
@@ -83,7 +83,6 @@ export function createApp(): Hono {
     windowMs: config.RATE_LIMIT_WINDOW_MS,
   }));
 
-  api.get('/_ping', (c) => c.json(ok({ ok: true }), 200));
   api.route('/auth', authRouter);
   api.route('/users', usersRouter);
   api.route('/subscriptions', subscriptionsRouter);

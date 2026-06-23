@@ -50,6 +50,17 @@ interface CmcEntry {
   quote: { USD: CmcQuoteUsd };
 }
 
+// Shared dedup: lowest cmc_rank wins; market_cap is only a tiebreak.
+// Used by both fetchMetadata and fetchPrices so duplicate-ticker resolution is consistent.
+function pickBestEntry<T extends CmcEntry>(entries: T[]): T {
+  return entries.reduce((best, cur) => {
+    const br = best.cmc_rank ?? Number.MAX_SAFE_INTEGER;
+    const cr = cur.cmc_rank ?? Number.MAX_SAFE_INTEGER;
+    if (cr !== br) return cr < br ? cur : best;
+    return (cur.quote.USD.market_cap ?? 0) > (best.quote.USD.market_cap ?? 0) ? cur : best;
+  });
+}
+
 interface CmcResponse {
   data: Record<string, CmcEntry[]>;
 }
@@ -111,16 +122,8 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
     for (const symbol of symbols) {
       const entries = body.data[symbol];
       if (!entries?.length) continue;
-      // retrofit-40: CMC reuses tickers across coins, so a symbol can return multiple
-      // listings. Prefer the most prominent one by LOWEST cmc_rank (reliably populated),
-      // with market_cap only as a tiebreak — picking by market_cap alone lets a junk coin
-      // win whenever the canonical coin's cap is null (a common CMC gap).
-      const entry = entries.reduce((best, cur) => {
-        const br = best.cmc_rank ?? Number.MAX_SAFE_INTEGER;
-        const cr = cur.cmc_rank ?? Number.MAX_SAFE_INTEGER;
-        if (cr !== br) return cr < br ? cur : best;
-        return (cur.quote.USD.market_cap ?? 0) > (best.quote.USD.market_cap ?? 0) ? cur : best;
-      });
+      // retrofit-40: CMC reuses tickers across coins — pick the most prominent one.
+      const entry = pickBestEntry(entries);
       const usd = entry.quote.USD;
       if (usd?.price == null) continue; // CMC returned no price for this symbol — skip, don't crash the batch
       out.set(symbol, {
@@ -203,9 +206,7 @@ export class CoinMarketCapTokenMetadataProvider implements TokenMetadataProvider
     for (const symbol of symbols) {
       const entries = body.data[symbol];
       if (!entries?.length) continue;
-      const entry = entries.reduce((best, cur) =>
-        (cur.quote.USD.market_cap ?? 0) > (best.quote.USD.market_cap ?? 0) ? cur : best,
-      );
+      const entry = pickBestEntry(entries);
       const usd = entry.quote.USD;
       if (usd?.price == null) continue; // CMC returned no price for this symbol — skip, don't emit a null price
       out.set(symbol, { price: usd.price, change24h: usd.percent_change_24h });

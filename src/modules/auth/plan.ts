@@ -11,6 +11,7 @@ import type { Context, Next, MiddlewareHandler } from 'hono';
 import { prisma } from '../../lib/prisma.js';
 import { err } from '../../lib/envelope.js';
 import type { AuthEnv } from './middleware.js';
+import { isSubscriptionEffectivelyActive } from '../subscriptions/subscription-status.js';
 
 export const requirePlan =
   (allowed: Array<'free' | 'pro'>): MiddlewareHandler<AuthEnv> =>
@@ -32,12 +33,7 @@ export const requirePlan =
       return c.json(err('SUBSCRIPTION_REQUIRED', 'Activate a subscription to access this resource'), 403);
     }
 
-    const now = new Date();
-    const effectivelyActive =
-      subscription.status.name === 'active' ||
-      (subscription.status.name === 'cancelled' &&
-        subscription.currentPeriodEnd !== null &&
-        subscription.currentPeriodEnd > now);
+    const effectivelyActive = isSubscriptionEffectivelyActive(subscription);
 
     if (!effectivelyActive) {
       return c.json(err('SUBSCRIPTION_EXPIRED', 'Subscription is no longer active'), 403);

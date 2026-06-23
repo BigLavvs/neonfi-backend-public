@@ -140,7 +140,7 @@ const CHAIN_NATIVE_SYMBOL: Record<string, string> = {
   '0xfa': 'FTM',     // Fantom
   '0xe708': 'ETH',   // Linea
   '0x144': 'ETH',    // zkSync Era
-  '0x44d': 'MATIC',  // Polygon zkEVM
+  '0x44d': 'ETH',    // Polygon zkEVM (gas token is ETH, not MATIC)
   '0x19': 'CRO',     // Cronos
   '0x64': 'XDAI',    // Gnosis
   '0x1388': 'MNT',   // Mantle
