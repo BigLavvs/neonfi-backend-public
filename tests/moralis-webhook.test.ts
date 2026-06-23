@@ -689,6 +689,52 @@ it('292: NFT transfer IN with no marketplace fields → Nft row has null marketp
   expect(nft!.traits).toBeNull();
 });
 
+// ---------------------------------------------------------------------------
+// Hardening: malformed value / payload / oversized body (audit SEC #8/#19/#22)
+// ---------------------------------------------------------------------------
+
+it('297: native transfer with a non-numeric value → deterministic skip (200, skipped, no DB write, dedupes)', async () => {
+  const payload = makePayload(
+    {
+      txs: [{ hash: '0xhash297', from: OTHER_ADDRESS, to: WALLET_ADDRESS, value: 'not-a-number' }],
+    },
+    'stream-297',
+  );
+  const res = await postWebhook(payload, sign(payload));
+  expect(res.status).toBe(200);
+  const json = await res.json();
+  // Malformed amount → deterministic skip, NOT a 500/retry (BigINT() would otherwise throw).
+  expect(json.data.skipped).toBeGreaterThan(0);
+  expect(await prisma.transaction.count({ where: { portfolioId, transactionHash: '0xhash297' } })).toBe(0);
+  // Acked + deduped (deterministic), so a replay short-circuits.
+  const key = await redis.get(`moralis_event:kc:${keccak256(JSON.stringify(payload))}`);
+  expect(key).toBe('1');
+});
+
+it('298: structurally invalid payload (txs not an array) → 400 MALFORMED_PAYLOAD, no dedupe key', async () => {
+  // Signature-valid but the shape is wrong — Zod rejects with a deterministic 400 (no retry loop).
+  const payload = makePayload({ txs: 'this-should-be-an-array' as unknown as [] }, 'stream-298');
+  const res = await postWebhook(payload, sign(payload));
+  expect(res.status).toBe(400);
+  const json = await res.json();
+  expect(json.error.code).toBe('MALFORMED_PAYLOAD');
+  const key = await redis.get(`moralis_event:kc:${keccak256(JSON.stringify(payload))}`);
+  expect(key).toBeNull();
+});
+
+it('299: body over the size cap → 413 PAYLOAD_TOO_LARGE, rejected before signature check', async () => {
+  // 2 MiB body (> 1 MiB default cap). No valid signature needed — bodyLimit runs first.
+  const huge = JSON.stringify({ junk: 'x'.repeat(2 * 1024 * 1024) });
+  const res = await app.request(WEBHOOK_BASE, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-signature': 'irrelevant' },
+    body: huge,
+  });
+  expect(res.status).toBe(413);
+  const json = await res.json();
+  expect(json.error.code).toBe('PAYLOAD_TOO_LARGE');
+});
+
 it('293: NFT transfer IN sent twice (idempotency) → exactly one Nft row', async () => {
   const nftTransfer = {
     transactionHash: '0xhash293',

@@ -18,6 +18,7 @@
 // Moralis stops retrying; Stage 12 will implement the Nft table writes.
 
 import type { Context } from 'hono';
+import { z } from 'zod';
 import jsSha3 from 'js-sha3';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
@@ -101,6 +102,28 @@ interface MoralisPayload {
   block?: MoralisBlock;
 }
 
+// Structural validation of the (signature-verified) payload (audit SEC #22). This guards the
+// SHAPE only — that the transfer fields are arrays of objects, confirmed is a boolean, etc. —
+// so a malformed structure can't make `for...of` iterate a string or coerce surprising types.
+// It deliberately does NOT enforce numeric format on per-transfer value/decimals strings:
+// rejecting the whole payload for one bad transfer would 400 a batch that mostly ingests fine,
+// so per-transfer numeric validity is handled downstream as a deterministic skip (safeBigInt).
+// `.passthrough()` keeps any extra Moralis fields we don't model. A signature-valid body that
+// still fails this is a provider/transport defect → 400 (deterministic, so Moralis won't loop).
+const transferObject = z.object({}).passthrough();
+const MoralisPayloadSchema = z
+  .object({
+    txs: z.array(transferObject).optional(),
+    erc20Transfers: z.array(transferObject).optional(),
+    nftTransfers: z.array(transferObject).optional(),
+    chainId: z.string().optional(),
+    streamId: z.string().optional(),
+    tag: z.string().optional(),
+    confirmed: z.boolean().optional(),
+    block: z.object({}).passthrough().optional(),
+  })
+  .passthrough();
+
 // ---------------------------------------------------------------------------
 // Native token symbol per Moralis chain ID (for native transfer handling)
 // ---------------------------------------------------------------------------
@@ -127,10 +150,31 @@ const CHAIN_NATIVE_SYMBOL: Record<string, string> = {
 // Unit conversion helpers
 // ---------------------------------------------------------------------------
 
-// Converts wei (10^18 units) to a decimal string (e.g., '1000000000000000000' → '1')
-function convertWeiToEther(weiStr: string): string {
+// Max token decimals we'll honor. Bounds 10n ** BigInt(decimals) so a hostile/garbled
+// `tokenDecimals` (e.g. "1000000000") can't allocate a gigantic BigInt → CPU/memory DoS
+// (audit SEC #22). 36 clears every real ERC-20 (the largest in practice is 18) with margin.
+const MAX_TOKEN_DECIMALS = 36;
+
+// Parse an untrusted smallest-unit amount string to a non-negative BigInt, or null if it
+// isn't a plain non-negative integer (audit SEC #8/#22). Moralis sends decimal integer
+// strings; anything else (empty after the zero-guard, signs, hex, decimals, letters) is
+// malformed on-chain data we can never ingest, so the caller treats null as a DETERMINISTIC
+// skip (ack + dedupe) rather than letting BigInt() throw and force an infinite retry loop.
+function safeBigInt(str: string): bigint | null {
+  if (!/^[0-9]+$/.test(str)) return null;
+  try {
+    return BigInt(str);
+  } catch {
+    return null;
+  }
+}
+
+// Converts wei (10^18 units) to a decimal string (e.g., '1000000000000000000' → '1').
+// Returns null on a malformed value string (deterministic skip — see safeBigInt).
+function convertWeiToEther(weiStr: string): string | null {
   if (!weiStr || weiStr === '0') return '0';
-  const wei = BigInt(weiStr);
+  const wei = safeBigInt(weiStr);
+  if (wei === null) return null;
   const divisor = 10n ** 18n;
   const whole = wei / divisor;
   const remainder = wei % divisor;
@@ -139,12 +183,15 @@ function convertWeiToEther(weiStr: string): string {
   return `${whole}.${decStr}`;
 }
 
-// Converts token smallest-unit value to decimal string using tokenDecimals
-function convertTokenAmount(valueStr: string, decimalsStr: string): string {
+// Converts token smallest-unit value to decimal string using tokenDecimals.
+// Returns null on a malformed value or out-of-range decimals (deterministic skip).
+function convertTokenAmount(valueStr: string, decimalsStr: string): string | null {
   if (!valueStr || valueStr === '0') return '0';
   const decimals = parseInt(decimalsStr || '18', 10);
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_TOKEN_DECIMALS) return null;
+  const raw = safeBigInt(valueStr);
+  if (raw === null) return null;
   const divisor = 10n ** BigInt(decimals);
-  const raw = BigInt(valueStr);
   const whole = raw / divisor;
   const remainder = raw % divisor;
   if (remainder === 0n) return whole.toString();
@@ -243,6 +290,14 @@ async function processNativeTx(
   let processed = 0;
   let skipped = 0;
 
+  // Parse the amount once. A malformed value (audit SEC #8/#22) is a DETERMINISTIC skip:
+  // ack + dedupe rather than throwing BigInt() into the handler's 500/retry path forever.
+  const amount = convertWeiToEther(nativeTx.value ?? '0');
+  if (amount === null) {
+    console.log('[moralis]', JSON.stringify({ event: 'moralis_malformed_value', kind: 'native', hash: txHash }));
+    return { processed: 0, skipped: 1 };
+  }
+
   // Direction mapping: IN (to=wallet) → buy, OUT (from=wallet) → sell
   // Connected portfolios reflect on-chain truth — opposite of Stage 9A manual-portfolio
   // transfer=no-op simplification.
@@ -254,8 +309,6 @@ async function processNativeTx(
     const portfolio = await findConnectedPortfolio(addr, chainId);
     if (!portfolio) continue; // graceful no-op — wallet we don't track
     affected.set(portfolio.id, portfolio); // retrofit-59 §2: refresh its balances after the feed write
-
-    const amount = convertWeiToEther(nativeTx.value ?? '0');
 
     try {
       await createTransactionFromWebhook({
@@ -318,6 +371,14 @@ async function processErc20Transfer(
     return 'skipped';
   }
 
+  // Parse the amount once. A malformed value or out-of-range decimals (audit SEC #8/#22) is a
+  // DETERMINISTIC skip: ack + dedupe rather than throwing BigInt() into the 500/retry path.
+  const amount = convertTokenAmount(transfer.value ?? '0', transfer.tokenDecimals ?? '18');
+  if (amount === null) {
+    console.log('[moralis]', JSON.stringify({ event: 'moralis_malformed_value', kind: 'erc20', hash: txHash, contract: transfer.contract }));
+    return 'skipped';
+  }
+
   // Find matching portfolio (to=buy, from=sell)
   const candidates: Array<{ addr: string; direction: 'buy' | 'sell' }> = [];
   if (toAddr) candidates.push({ addr: toAddr, direction: 'buy' });
@@ -328,8 +389,6 @@ async function processErc20Transfer(
     const portfolio = await findConnectedPortfolio(addr, chainId);
     if (!portfolio) continue;
     affected.set(portfolio.id, portfolio); // retrofit-59 §2: refresh its balances after the feed write
-
-    const amount = convertTokenAmount(transfer.value ?? '0', transfer.tokenDecimals ?? '18');
 
     try {
       await createTransactionFromWebhook({
@@ -494,13 +553,20 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
     return c.json(err('INVALID_SIGNATURE', 'Webhook signature verification failed'), 401);
   }
 
-  // 3. Parse JSON
-  let payload: MoralisPayload;
+  // 3. Parse + structurally validate JSON (audit SEC #22). A 400 here is deterministic, so a
+  //    signature-valid-but-malformed body won't trigger an infinite Moralis retry loop.
+  let parsed: unknown;
   try {
-    payload = JSON.parse(rawBody) as MoralisPayload;
+    parsed = JSON.parse(rawBody);
   } catch {
     return c.json(err('MALFORMED_PAYLOAD', 'Request body is not valid JSON'), 400);
   }
+  const validation = MoralisPayloadSchema.safeParse(parsed);
+  if (!validation.success) {
+    console.log('[moralis]', JSON.stringify({ event: 'moralis_invalid_payload' }));
+    return c.json(err('MALFORMED_PAYLOAD', 'Request body failed schema validation'), 400);
+  }
+  const payload = validation.data as MoralisPayload;
 
   // 3a. Confirmed-only ingestion (audit SEC #18). Moralis sends an UNCONFIRMED delivery on
   //     block inclusion and a CONFIRMED one after enough confirmations. Ingesting the
@@ -539,10 +605,12 @@ export async function handleMoralisWebhook(c: Context): Promise<Response> {
     return c.json(ok({ received: true, processed: 0, skipped: skippedCount }), 200);
   }
 
-  // Block timestamp (fallback to now if not present)
+  // Block timestamp (fallback to now if absent or non-numeric). Guard Number() → NaN, which
+  // would make new Date(NaN).toISOString() throw "Invalid time value" on garbage input.
   const blockTs = payload.block?.timestamp;
-  const blockTimestamp = blockTs
-    ? new Date(Number(blockTs) * 1000).toISOString()
+  const blockTsSeconds = blockTs != null ? Number(blockTs) : NaN;
+  const blockTimestamp = Number.isFinite(blockTsSeconds)
+    ? new Date(blockTsSeconds * 1000).toISOString()
     : new Date().toISOString();
 
   let processed = 0;

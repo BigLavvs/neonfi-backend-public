@@ -198,6 +198,13 @@ const schema = z
       .transform((v) => v === 'true')
       .default('false'),
 
+    // --- Webhook body size cap (audit SEC #19) ---
+    // Hono bodyLimit on /webhooks/*: an unauthenticated caller can otherwise stream an
+    // unbounded body that c.req.text() buffers fully BEFORE the signature check, a memory
+    // DoS. 1 MiB clears a single block's batched Moralis transfers and any Stripe event
+    // with wide margin; anything larger is rejected with 413 before we read it.
+    WEBHOOK_MAX_BODY_BYTES: z.coerce.number().int().min(1024).default(1048576),
+
     // --- Token metadata sync (Stage 9B) ---
     // NOTE: deliberately NOT z.coerce.boolean() — Boolean("false") === true in JS,
     // so "false" would NOT disable. Stage 13 caught the same bug for SNAPSHOT_ENABLED;
