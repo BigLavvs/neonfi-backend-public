@@ -74,6 +74,21 @@ const lastPublishedPrice = new Map<string, number>();
 // rationale (single feed-owning process).
 const lastHistSampleAt = new Map<string, number>();
 
+// perf #55: cap these per-symbol bookkeeping Maps so a long-running process can't grow them
+// unbounded as junk tickers stream in (each distinct symbol ever seen otherwise stays forever).
+// Maps iterate in insertion order, so evicting from the front drops the oldest. Evicting an
+// entry is harmless: the symbol's next tick just re-publishes once / re-samples history once.
+const MAX_TRACKED_SYMBOLS = 10_000;
+function capMap(map: Map<string, number>): void {
+  if (map.size <= MAX_TRACKED_SYMBOLS) return;
+  const evict = map.size - MAX_TRACKED_SYMBOLS;
+  let i = 0;
+  for (const k of map.keys()) {
+    if (i++ >= evict) break;
+    map.delete(k);
+  }
+}
+
 /**
  * Record a tick from one exchange. Writes the per-exchange key unconditionally,
  * then recomputes the canonical price (republished only when it actually changed).
@@ -227,6 +242,7 @@ async function resolveCanonical(sym: string, now: number, raws: (string | null)[
   // concurrent identical ticks collapse to a single publish.
   if (lastPublishedPrice.get(sym) !== winner.tick.price) {
     lastPublishedPrice.set(sym, winner.tick.price);
+    capMap(lastPublishedPrice); // perf #55: bound unbounded per-symbol growth
     writePipe.publish(`price:${sym}`, payload);
   }
 
@@ -238,6 +254,7 @@ async function resolveCanonical(sym: string, now: number, raws: (string | null)[
   const lastHist = lastHistSampleAt.get(sym) ?? 0;
   if (now - lastHist >= HIST_SAMPLE_MS) {
     lastHistSampleAt.set(sym, now);
+    capMap(lastHistSampleAt); // perf #55: bound unbounded per-symbol growth
     writePipe
       .lpush(`price_hist:${sym}`, `${now}|${winner.tick.price}`)
       .ltrim(`price_hist:${sym}`, 0, HIST_MAX_POINTS - 1)

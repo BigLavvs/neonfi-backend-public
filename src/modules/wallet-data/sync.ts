@@ -327,11 +327,15 @@ async function importNftHoldings(
   // (GoldRush balances_nft.is_spam — the signal that actually fires on our plan). Both best-effort:
   // they never throw and return empty when no provider supports them, so the verdict degrades
   // cleanly to blocklist/bulk/heuristic.
-  const spamContracts = await fetchSpamContracts({ slug: chainSlug });
-  if (portfolio.walletAddress) {
-    const walletSpam = await fetchWalletSpamContracts(portfolio.walletAddress, { slug: chainSlug });
-    for (const c of walletSpam) spamContracts.add(c);
-  }
+  // perf #31: the chain-global (Alchemy) and per-wallet (GoldRush) spam-set fetches are
+  // independent and best-effort — run them concurrently instead of sequentially.
+  const [spamContracts, walletSpam] = await Promise.all([
+    fetchSpamContracts({ slug: chainSlug }),
+    portfolio.walletAddress
+      ? fetchWalletSpamContracts(portfolio.walletAddress, { slug: chainSlug })
+      : Promise.resolve(new Set<string>()),
+  ]);
+  for (const c of walletSpam) spamContracts.add(c);
   // retrofit-86 (H13.1): per-contract held count in THIS wallet drives the bulk-airdrop signal
   // (e.g. "Hefty Presents" ×17). Counted from the current holdings list itself.
   const heldByContract = new Map<string, number>();
