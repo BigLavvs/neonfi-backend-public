@@ -23,6 +23,28 @@ vi.mock('../src/lib/redis.js', () => ({
     get: vi.fn(async (key: string) => store.get(key) ?? null),
     mget: vi.fn(async (...keys: string[]) => keys.map((k) => store.get(k) ?? null)),
     publish: vi.fn(async () => 1),
+    // recordTick now batches its Redis ops via pipeline() (perf #6-8). These parse tests only
+    // assert the per-exchange `price:<SYM>:<exchange>` writes, so the pipeline's set mirrors
+    // `store`; the history (lpush/ltrim/expire) and publish are no-ops here.
+    pipeline() {
+      const results: Array<[null, unknown]> = [];
+      const api: Record<string, unknown> = {};
+      api.set = (key: string, val: string) => {
+        store.set(key, val);
+        results.push([null, 'OK']);
+        return api;
+      };
+      api.mget = (...keys: string[]) => {
+        results.push([null, keys.map((k) => store.get(k) ?? null)]);
+        return api;
+      };
+      api.publish = () => { results.push([null, 1]); return api; };
+      api.lpush = () => { results.push([null, 1]); return api; };
+      api.ltrim = () => { results.push([null, 'OK']); return api; };
+      api.expire = () => { results.push([null, 1]); return api; };
+      api.exec = async () => results;
+      return api;
+    },
   },
 }));
 

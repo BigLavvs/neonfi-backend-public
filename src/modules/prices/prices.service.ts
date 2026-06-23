@@ -5,7 +5,7 @@
 // failure, surfacing partialFailure:true.
 
 import { prisma } from '../../lib/prisma.js';
-import { redis } from '../../lib/redis.js';
+import { redis, scanKeys } from '../../lib/redis.js';
 import { config } from '../../lib/config.js';
 import { portfolioDerivedCacheKeys } from '../../lib/portfolio-cache-keys.js';
 import { __internals as resolverInternals } from '../../lib/price-resolver.js';
@@ -152,7 +152,8 @@ async function invalidateUserReadCaches(userId: number): Promise<void> {
   const keys = portfolios.flatMap((p) => portfolioDerivedCacheKeys(p.id));
   if (keys.length > 0) await redis.del(...keys);
 
-  const overviewKeys = await redis.keys(`overview:${userId}:*`);
+  // SCAN (not KEYS) so this never blocks the single-threaded server mid-firehose (perf #5).
+  const overviewKeys = await scanKeys(`overview:${userId}:*`);
   if (overviewKeys.length > 0) await redis.del(...overviewKeys);
 }
 

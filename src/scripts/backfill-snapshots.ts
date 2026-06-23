@@ -36,7 +36,7 @@
 import { pathToFileURL } from 'node:url';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
-import { redis } from '../lib/redis.js';
+import { redis, scanKeys } from '../lib/redis.js';
 import { config } from '../lib/config.js';
 import { portfolioDerivedCacheKeys } from '../lib/portfolio-cache-keys.js';
 
@@ -371,7 +371,7 @@ export async function runSnapshotsBackfill(opts: BackfillSnapshotsOpts = {}): Pr
     if (derivedKeys.length > 0) await redis.del(...derivedKeys);
     const userIds = [...new Set(portfolios.map((p) => p.userId))];
     for (const uid of userIds) {
-      const overviewKeys = await redis.keys(`overview:${uid}:*`);
+      const overviewKeys = await scanKeys(`overview:${uid}:*`);
       if (overviewKeys.length > 0) await redis.del(...overviewKeys);
     }
   } catch (e) {

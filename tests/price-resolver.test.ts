@@ -57,6 +57,48 @@ vi.mock('../src/lib/redis.js', () => ({
       expireCalls.push({ key, ttl });
       return 1;
     }),
+    // recordTick/resolveCanonical now batch their Redis ops via pipeline() (perf #6-8). The
+    // pipeline mirrors the standalone-command side effects into the same in-memory stores so
+    // the existing assertions (canonical store, published, ltrimCalls, expireCalls) still hold.
+    pipeline() {
+      const results: Array<[null, unknown]> = [];
+      const api: Record<string, unknown> = {};
+      api.set = (key: string, val: string) => {
+        store.set(key, val);
+        results.push([null, 'OK']);
+        return api;
+      };
+      api.mget = (...keys: string[]) => {
+        results.push([null, keys.map((k) => store.get(k) ?? null)]);
+        return api;
+      };
+      api.publish = (channel: string, message: string) => {
+        published.push({ channel, message });
+        results.push([null, 1]);
+        return api;
+      };
+      api.lpush = (key: string, ...vals: string[]) => {
+        const cur = lists.get(key) ?? [];
+        cur.unshift(...[...vals].reverse());
+        lists.set(key, cur);
+        results.push([null, cur.length]);
+        return api;
+      };
+      api.ltrim = (key: string, start: number, stop: number) => {
+        ltrimCalls.push({ key, start, stop });
+        const cur = lists.get(key) ?? [];
+        lists.set(key, cur.slice(start, resolveStop(cur.length, stop) + 1));
+        results.push([null, 'OK']);
+        return api;
+      };
+      api.expire = (key: string, ttl: number) => {
+        expireCalls.push({ key, ttl });
+        results.push([null, 1]);
+        return api;
+      };
+      api.exec = async () => results;
+      return api;
+    },
   },
 }));
 

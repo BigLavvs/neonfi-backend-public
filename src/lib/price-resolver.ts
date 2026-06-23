@@ -98,9 +98,20 @@ export async function recordTick(
     quote,
     ts: now,
   };
-  await redis.set(`price:${sym}:${exchange}`, JSON.stringify(tick), 'EX', PRICE_TTL_S);
 
-  await resolveCanonical(sym, now);
+  // Read phase in ONE round trip (perf #6-8): write this exchange's tick AND read back every
+  // exchange's tick in a single pipeline. Pipeline order is preserved server-side, so the MGET
+  // observes the SET we just queued. resolveCanonical then works from the returned snapshot
+  // instead of issuing its own (previously un-pipelined) MGET.
+  const keys = EXCHANGES.map((e) => `price:${sym}:${e}`);
+  const readPipe = redis.pipeline();
+  readPipe.set(`price:${sym}:${exchange}`, JSON.stringify(tick), 'EX', PRICE_TTL_S);
+  readPipe.mget(...keys);
+  const readResults = await readPipe.exec();
+  // pipeline().exec() → [[err, setResult], [err, mgetResult]]; the MGET is the 2nd command.
+  const raws = (readResults?.[1]?.[1] ?? EXCHANGES.map(() => null)) as (string | null)[];
+
+  await resolveCanonical(sym, now, raws);
 }
 
 /**
@@ -108,9 +119,9 @@ export async function recordTick(
  * the canonical read cache, and (only when the resolved price actually moved) publish
  * the new tick to the firehose.
  */
-async function resolveCanonical(sym: string, now: number): Promise<void> {
-  const keys = EXCHANGES.map((e) => `price:${sym}:${e}`);
-  const raws = await redis.mget(...keys);
+async function resolveCanonical(sym: string, now: number, raws: (string | null)[]): Promise<void> {
+  // `raws` is the per-exchange snapshot read in recordTick's pipeline (perf #6-8), aligned to
+  // EXCHANGES order — no second MGET here.
 
   // Read each per-exchange entry, applying the staleness filter, into a by-exchange map.
   const fresh = new Map<string, ExchangeTick>();
@@ -200,39 +211,44 @@ async function resolveCanonical(sym: string, now: number): Promise<void> {
     ts: now,
   });
 
+  // Write phase in ONE pipeline (perf #6-8): refresh the canonical read cache, publish only when
+  // the price moved, and (≥3-min gate) append the sampled history point — replaces the 2-5
+  // sequential awaited Redis ops this used to do per tick.
+  const writePipe = redis.pipeline();
+
   // Always refresh the canonical read cache (60s TTL) so the live-price read overlay
   // (lib/live-price.ts) stays warm even across flat-price stretches.
-  await redis.set(`price:${sym}`, payload, 'EX', PRICE_TTL_S);
+  writePipe.set(`price:${sym}`, payload, 'EX', PRICE_TTL_S);
 
-  // Change-dedupe (retrofit-29) — replaces the old time throttle. Publish to the
-  // firehose ONLY when the resolved price actually moved from the last value we
-  // published for this symbol. Identical re-resolutions (e.g. a non-winning exchange
-  // ticks while the winner is unchanged) are dropped so per-tick streaming never spams
-  // clients with no-op frames. Stamp the new value BEFORE the await so concurrent
-  // identical ticks collapse to a single publish.
+  // Change-dedupe (retrofit-29) — replaces the old time throttle. Publish to the firehose ONLY
+  // when the resolved price actually moved from the last value we published for this symbol.
+  // Identical re-resolutions (a non-winning exchange ticks while the winner is unchanged) are
+  // dropped so per-tick streaming never spams clients. Stamp the new value BEFORE exec so
+  // concurrent identical ticks collapse to a single publish.
   if (lastPublishedPrice.get(sym) !== winner.tick.price) {
     lastPublishedPrice.set(sym, winner.tick.price);
-    await redis.publish(`price:${sym}`, payload);
+    writePipe.publish(`price:${sym}`, payload);
   }
 
   // retrofit-20/43: append the winning price to a capped per-symbol history list, sampled at
   // ≥3 min (a separate, coarser gate than the per-tick canonical writes) so 480 points span
   // ~24h. Each entry is "<tsMs>|<price>" (retrofit-43) so the intraday chart can place samples
-  // on a real time axis rather than assuming even spacing. Stamp the sample time BEFORE the
-  // await (same collapse-concurrent-ticks reasoning as the publish dedupe). Best-effort: a
-  // history failure must never break the canonical price path, so the chain is fully
-  // `.catch`-swallowed.
+  // on a real time axis. Stamp the sample time BEFORE exec (same collapse-concurrent-ticks
+  // reasoning as the publish dedupe).
   const lastHist = lastHistSampleAt.get(sym) ?? 0;
   if (now - lastHist >= HIST_SAMPLE_MS) {
     lastHistSampleAt.set(sym, now);
-    await redis
+    writePipe
       .lpush(`price_hist:${sym}`, `${now}|${winner.tick.price}`)
-      .then(() => redis.ltrim(`price_hist:${sym}`, 0, HIST_MAX_POINTS - 1))
-      .then(() => redis.expire(`price_hist:${sym}`, HIST_TTL_S))
-      .catch(() => {
-        /* intraday history is best-effort */
-      });
+      .ltrim(`price_hist:${sym}`, 0, HIST_MAX_POINTS - 1)
+      .expire(`price_hist:${sym}`, HIST_TTL_S);
   }
+
+  // Best-effort: a write-back failure (including the best-effort intraday history) must never
+  // break the canonical price feed — exec() only rejects on a connection-level fault.
+  await writePipe.exec().catch(() => {
+    /* feed continues; the read cache just stays as-is until the next tick */
+  });
 }
 
 /** Test-only: reset the change-dedupe + history-sample bookkeeping between cases. */

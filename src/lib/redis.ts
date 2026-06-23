@@ -37,3 +37,20 @@ redis.on('error', (err: Error) => {
 if (config.NODE_ENV !== 'production') {
   globalForRedis.redis = redis;
 }
+
+// Non-blocking key enumeration (audit SEC/perf #5). `KEYS` is O(keyspace) and blocks the
+// single-threaded Redis server for the whole scan — on a hot instance that stalls the price
+// firehose, ws-auth and derive reads. SCAN walks the keyspace in bounded cursor steps so other
+// commands interleave. Use this everywhere instead of `redis.keys(pattern)`.
+// NOTE: SCAN may return duplicates across cursor steps — callers that delete are fine (idempotent),
+// and we de-dupe via a Set so the returned list is unique.
+export async function scanKeys(pattern: string, count = 250): Promise<string[]> {
+  const found = new Set<string>();
+  let cursor = '0';
+  do {
+    const [next, batch] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', count);
+    cursor = next;
+    for (const k of batch) found.add(k);
+  } while (cursor !== '0');
+  return [...found];
+}
