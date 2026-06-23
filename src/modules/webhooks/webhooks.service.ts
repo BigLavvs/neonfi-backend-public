@@ -69,8 +69,14 @@ export async function processWebhookEvent(
     return { status: 401, body: err('INVALID_SIGNATURE', 'Webhook signature verification failed') };
   }
 
-  const seen = await redis.get(`stripe_event:${event.id}`);
-  if (seen) {
+  // Atomic idempotency claim (audit SEC #21/#47): SET NX both checks and claims in one op,
+  // BEFORE dispatch — so two concurrent deliveries of the same event can never both run the
+  // side effects (emails, plan_changed publishes). A null return means the key already exists
+  // → duplicate. Was previously a non-atomic get-then-(dispatch)-then-set, which let racing
+  // duplicates both dispatch.
+  const eventKey = `stripe_event:${event.id}`;
+  const claimed = await redis.set(eventKey, '1', 'EX', REDIS_TTL_30_DAYS, 'NX');
+  if (!claimed) {
     return { status: 200, body: ok({ received: true, duplicate: true }) };
   }
 
@@ -80,6 +86,10 @@ export async function processWebhookEvent(
     try {
       await dispatch(event);
     } catch (e) {
+      // Release the claim so Stripe's retry can re-dispatch — a partial/transient failure must
+      // not be permanently deduped. The handlers are idempotent on their DB unique keys, so a
+      // genuine re-delivery after a successful run still won't double-write.
+      await redis.del(eventKey).catch(() => {});
       console.error(
         '[webhooks]',
         JSON.stringify({ event: 'handler_error', eventId: event.id, eventType: event.type }),
@@ -93,8 +103,6 @@ export async function processWebhookEvent(
       JSON.stringify({ event: 'event_unhandled', type: event.type, eventId: event.id }),
     );
   }
-
-  await redis.set(`stripe_event:${event.id}`, '1', 'EX', REDIS_TTL_30_DAYS);
 
   if (!isHandled) {
     return { status: 200, body: ok({ received: true, unhandled: true }) };

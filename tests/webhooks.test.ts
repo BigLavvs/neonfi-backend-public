@@ -487,6 +487,44 @@ it('93: invoice.payment_failed → Payment row created with status=failed; Subsc
 });
 
 // ---------------------------------------------------------------------------
+// 93b. A SECOND invoice.payment_failed for the SAME PI (distinct event id) must
+//      upsert (no P2002 → no 500 → no infinite Stripe retry) and not duplicate (audit SEC #48)
+// ---------------------------------------------------------------------------
+
+it('93b: second invoice.payment_failed for the same PI → 200, exactly one Payment row', async () => {
+  const userId = await createUser('complete');
+  const subId = await createProSubscription(userId);
+
+  const failedEvent = (eventId: string) => {
+    mockInvoicesRetrieve.mockResolvedValueOnce({
+      payments: { data: [{ payment: { payment_intent: 'pi_failed_dup_93b' } }] },
+    });
+    const event = makeEvent('invoice.payment_failed', {
+      id: 'in_failed_93b',
+      parent: { subscription_details: { subscription: STRIPE_SUB_ID } },
+      amount_due: 999,
+      currency: 'usd',
+      next_payment_attempt: 1751443200,
+    }, eventId);
+    mockConstructEvent.mockReturnValueOnce(event);
+    return event;
+  };
+
+  // First failure event.
+  const r1 = await webhookPost(failedEvent('evt_invoice_failed_93b_a'));
+  expect(r1.status).toBe(200);
+
+  // A distinct event resolving to the SAME PI — must NOT 500 (upsert no-op), no duplicate row.
+  const r2 = await webhookPost(failedEvent('evt_invoice_failed_93b_b'));
+  expect(r2.status).toBe(200);
+
+  const payments = await prisma.payment.findMany({
+    where: { subscriptionId: subId, stripePaymentIntentId: 'pi_failed_dup_93b' },
+  });
+  expect(payments.length).toBe(1);
+});
+
+// ---------------------------------------------------------------------------
 // 94. customer.subscription.updated (cancel_at_period_end=true) → local status=cancelled
 // ---------------------------------------------------------------------------
 

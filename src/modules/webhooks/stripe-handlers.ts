@@ -286,8 +286,13 @@ export async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<v
 
   const failedStatus = await prisma.paymentStatus.findUniqueOrThrow({ where: { name: 'failed' } });
 
-  await prisma.payment.create({
-    data: {
+  // audit SEC #48: UPSERT (not create) keyed on the unique stripePaymentIntentId. A second
+  // event for the same PI (Stripe retry of the failure, or a sibling event resolving to the
+  // same intent) would otherwise throw P2002 → 500 → infinite Stripe retry, never deduped.
+  // Mirrors handleInvoicePaymentSucceeded; update:{} makes a re-delivery a no-op.
+  await prisma.payment.upsert({
+    where: { stripePaymentIntentId: intentId },
+    create: {
       userId: localSub.userId,
       subscriptionId: localSub.id,
       stripePaymentIntentId: intentId,
@@ -296,6 +301,7 @@ export async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<v
       statusId: failedStatus.id,
       refundAvailable: false,
     },
+    update: {},
   });
 
   if (localSub.user) {
