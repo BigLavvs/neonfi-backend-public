@@ -421,6 +421,11 @@ model Transaction {
   // hash-less rows per portfolio are still allowed.
   @@unique([portfolioId, transactionHash])
   @@index([portfolioId])
+  // audit perf #23: dashboard/overview reads filter by portfolio + sort by timestamp; without
+  // this composite, Postgres full-sorts the user's whole tx set on every load (and on each
+  // per-portfolio earliest-date lookup). Leading portfolioId keeps the existing single-column
+  // lookups covered too.
+  @@index([portfolioId, timestamp])
   @@index([typeId])
   @@index([directionId])
   @@index([transferGroupId])
@@ -461,6 +466,9 @@ model NativeTransactionDetail {
   // (current price). Reverses the retrofit-2 "current price" simplification for manual txns.
   priceAtTime   Decimal?    @db.Decimal(20, 8)
 
+  // audit perf #3/#4: recalcAssetBalance filters this table by `symbol` on every tx write
+  // (amplified K× in bulk import loops); un-indexed it forces a full scan per call.
+  @@index([symbol])
   @@map("native_transaction_detail")
 }
 
@@ -485,6 +493,9 @@ model Erc20TransactionDetail {
   // (current price). Reverses the retrofit-2 "current price" simplification for manual txns.
   priceAtTime          Decimal?    @db.Decimal(20, 8)
 
+  // audit perf #3/#4: recalcAssetBalance filters this table by `symbol` on every tx write
+  // (amplified K× in bulk import loops); un-indexed it forces a full scan per call.
+  @@index([symbol])
   @@map("erc20_transaction_detail")
 }
 
