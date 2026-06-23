@@ -12,6 +12,14 @@ interface SendResult {
   error?: string;
 }
 
+// audit SEC #12: don't write full email PII to logs. Keep the first char + domain
+// (e.g. "j***@gmail.com") — enough to correlate while not exposing the address.
+function redactEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '***';
+  return `${email[0]}***${email.slice(at)}`;
+}
+
 async function send(opts: {
   to: string;
   subject: string;
@@ -47,21 +55,21 @@ async function send(opts: {
       const error = `HTTP ${res.status}: ${body}`;
       console.error(
         '[email]',
-        JSON.stringify({ event: 'email_sent', template: opts.template, to: opts.to, outcome: 'failed', error }),
+        JSON.stringify({ event: 'email_sent', template: opts.template, to: redactEmail(opts.to), outcome: 'failed', error }),
       );
       return { outcome: 'failed', error };
     }
 
     console.log(
       '[email]',
-      JSON.stringify({ event: 'email_sent', template: opts.template, to: opts.to, outcome: 'success' }),
+      JSON.stringify({ event: 'email_sent', template: opts.template, to: redactEmail(opts.to), outcome: 'success' }),
     );
     return { outcome: 'success' };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     console.error(
       '[email]',
-      JSON.stringify({ event: 'email_sent', template: opts.template, to: opts.to, outcome: 'failed', error }),
+      JSON.stringify({ event: 'email_sent', template: opts.template, to: redactEmail(opts.to), outcome: 'failed', error }),
     );
     return { outcome: 'failed', error };
   }

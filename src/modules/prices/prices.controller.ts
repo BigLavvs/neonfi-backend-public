@@ -3,6 +3,7 @@
 import { Hono } from 'hono';
 import { prisma } from '../../lib/prisma.js';
 import { redis } from '../../lib/redis.js';
+import { config } from '../../lib/config.js';
 import { ok, err } from '../../lib/envelope.js';
 import { requireAuth } from '../auth/middleware.js';
 import type { AuthEnv } from '../auth/middleware.js';
@@ -96,6 +97,10 @@ pricesRouter.get('/history', requireAuth, async (c) => {
 // Behind requireAuth (diagnostic, not public). With a symbol → that symbol's canonical price
 // + every per-exchange source (ageMs/stale). Without one → the first N catalog symbols.
 pricesRouter.get('/debug', requireAuth, async (c) => {
+  // audit SEC #15: operator off-switch — set PRICE_DEBUG_ENABLED=false in prod to remove it.
+  if (!config.PRICE_DEBUG_ENABLED) {
+    return c.json(err('NOT_FOUND', 'Resource not found'), 404);
+  }
   const symbol = c.req.query('symbol');
   const data = await getPriceDebug(symbol);
   return c.json(ok(data), 200);

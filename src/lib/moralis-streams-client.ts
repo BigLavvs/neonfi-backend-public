@@ -49,8 +49,12 @@ export async function createStream(opts: CreateStreamOpts): Promise<{ id: string
   });
 
   if (!res.ok) {
+    // audit SEC #11: keep the upstream body to the server logs only — never let it ride out
+    // on the thrown Error (which can surface to the client via the 500 handler when
+    // DEBUG_ERRORS is on). Throw a fixed internal message instead.
     const text = await res.text().catch(() => '');
-    throw new Error(`Moralis Streams create failed: ${res.status} ${text}`);
+    console.error('[moralis-streams] create failed', { status: res.status, body: text });
+    throw new Error(`Moralis Streams create failed: ${res.status}`);
   }
 
   const data = await res.json() as { id: string };
@@ -75,7 +79,9 @@ export async function deleteStream(streamId: string): Promise<void> {
   });
 
   if (!res.ok) {
+    // audit SEC #11: upstream body to server logs only; throw a fixed internal message.
     const text = await res.text().catch(() => '');
-    throw new Error(`Moralis Streams delete failed: ${res.status} ${text}`);
+    console.error('[moralis-streams] delete failed', { status: res.status, body: text });
+    throw new Error(`Moralis Streams delete failed: ${res.status}`);
   }
 }

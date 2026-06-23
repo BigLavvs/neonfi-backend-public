@@ -198,6 +198,27 @@ const schema = z
       .transform((v) => v === 'true')
       .default('false'),
 
+    // --- Price-source debug endpoint (audit SEC #15) ---
+    // GET /prices/debug exposes the internal price-feed source topology (which exchanges feed
+    // each symbol) to any authenticated user. Throttling is handled by the global IP limiter;
+    // this flag is the operator off-switch the finding asks for. Default true preserves current
+    // behavior; set false in production to remove the endpoint (404). Explicit-transform boolean.
+    PRICE_DEBUG_ENABLED: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('true'),
+
+    // --- Auth-URL debug logging (audit SEC #13) ---
+    // When true, the verification / password-reset / OAuth URLs (which carry single-use
+    // tokens) are logged to the console so a dev can test without real email delivery.
+    // DELIBERATELY gated on this explicit opt-in, NOT on NODE_ENV: a mis-set NODE_ENV on an
+    // internet-reachable staging box must never leak a token URL into the logs. Default false.
+    // Explicit-transform boolean (Boolean("false") === true would never disable).
+    DEBUG_AUTH_URLS: z
+      .string()
+      .transform((v) => v === 'true')
+      .default('false'),
+
     // --- Webhook body size cap (audit SEC #19) ---
     // Hono bodyLimit on /webhooks/*: an unauthenticated caller can otherwise stream an
     // unbounded body that c.req.text() buffers fully BEFORE the signature check, a memory
