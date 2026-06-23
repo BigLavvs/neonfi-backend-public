@@ -22,6 +22,7 @@ import {
   listRecentTransactionsForUser,
   countTransactionsByPortfolioForUser,
   findEarliestTransactionDate,
+  findEarliestTransactionDatesByPortfolioForUser,
   type ListTransactionsFilter,
 } from './transactions.repository.js';
 import {
@@ -840,6 +841,12 @@ export function countUserTransactionsByPortfolio(userId: number): Promise<Map<nu
 // this service surface (module isolation).
 export function earliestUserTransactionDate(portfolioId: number): Promise<Date | null> {
   return findEarliestTransactionDate(portfolioId);
+}
+
+// perf #43: batched variant — earliest tx date for ALL the user's portfolios in one groupBy.
+// The Overview uses this instead of one earliestUserTransactionDate call per portfolio.
+export function earliestUserTransactionDatesByPortfolio(userId: number): Promise<Map<number, Date>> {
+  return findEarliestTransactionDatesByPortfolioForUser(userId);
 }
 
 // ---------------------------------------------------------------------------

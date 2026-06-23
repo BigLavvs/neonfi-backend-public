@@ -128,6 +128,24 @@ export async function findEarliestTransactionDate(portfolioId: number): Promise<
   return row?.timestamp ?? null;
 }
 
+// perf #43: earliest transaction timestamp per portfolio for ALL the user's portfolios in ONE
+// groupBy (the Overview previously fanned out one findFirst per portfolio). Mirrors
+// countTransactionsByPortfolioForUser. Only portfolios with ≥1 transaction appear in the map.
+export async function findEarliestTransactionDatesByPortfolioForUser(
+  userId: number,
+): Promise<Map<number, Date>> {
+  const grouped = await prisma.transaction.groupBy({
+    by: ['portfolioId'],
+    where: { portfolio: { userId } },
+    _min: { timestamp: true },
+  });
+  const map = new Map<number, Date>();
+  for (const g of grouped) {
+    if (g._min.timestamp) map.set(g.portfolioId, g._min.timestamp);
+  }
+  return map;
+}
+
 interface CreateTransactionData {
   portfolioId: number;
   typeId: number;

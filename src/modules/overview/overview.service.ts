@@ -22,14 +22,11 @@ import { computeDerived, type DerivedFields } from '../portfolios/derive.js';
 import { findPortfoliosByUserId } from '../portfolios/portfolios.repository.js';
 import { slugify } from '../portfolios/slug.js';
 import { findAllAssetsByPortfolioId } from '../assets/assets.repository.js';
-import {
-  findAllSnapshotsAscByPortfolio,
-  findSnapshotNearDaysAgo,
-} from '../snapshots/snapshots.service.js';
+import { findAllSnapshotsAscByPortfolio } from '../snapshots/snapshots.service.js';
 import {
   listRecentUserTransactions,
   countUserTransactionsByPortfolio,
-  earliestUserTransactionDate,
+  earliestUserTransactionDatesByPortfolio,
 } from '../transactions/transactions.service.js';
 import type { OverviewDTO } from './overview.dto.js';
 
@@ -268,8 +265,7 @@ async function buildOverview(
     snapshotsList,
     recentTransactions,
     dbTxCountByPortfolio,
-    snaps24hAgo,
-    earliestTxDates,
+    earliestTxDateByPortfolio,
   ] = await Promise.all([
     Promise.all(portfolios.map((p) => computeDerived(p.id))),
     Promise.all(portfolios.map((p) => findAllAssetsByPortfolioId(p.id))),
@@ -280,12 +276,11 @@ async function buildOverview(
     // on-chain total (externalTxCount) even though only ~100 rows are imported; manual +
     // connected-without-a-provider-total fall back to the imported DB row count.
     countUserTransactionsByPortfolio(userId),
-    // retrofit-20: the most recent snapshot per portfolio dated ≤ now−24h (daysAgo=1,
-    // i.e. the last daily close) — the same source/read the Stage-14 analytics summary
-    // uses (findSnapshotNearDaysAgo), so the 24h baseline stays module-isolated.
-    Promise.all(portfolios.map((p) => findSnapshotNearDaysAgo(p.id, 1))),
-    // retrofit-66: earliest logged-tx timestamp per portfolio → inceptionDate (below).
-    Promise.all(portfolios.map((p) => earliestUserTransactionDate(p.id))),
+    // perf #43: earliest logged-tx timestamp for every portfolio in ONE groupBy (was a
+    // findFirst per portfolio) → inceptionDate (below). The 24h-ago snapshot read that used to
+    // sit here is gone (perf #18/#21) — derive already reads it, so the totals below reuse
+    // derivedList[i].pnl24hValue instead of re-querying findSnapshotNearDaysAgo per portfolio.
+    earliestUserTransactionDatesByPortfolio(userId),
   ]);
 
   // retrofit-70 (C2/C3/M20): value allocation off the SAME live price as totalValue. derive.ts
@@ -380,11 +375,16 @@ async function buildOverview(
   let value24hAgo = 0;
   let valueNowWithBaseline = 0;
   let has24hBaseline = false;
-  snaps24hAgo.forEach((s, i) => {
-    if (!s) return; // no ~24h-old snapshot → exclude this portfolio from BOTH sides
+  derivedList.forEach((d) => {
+    // perf #18/#21: derive already read the ~24h snapshot to compute pnl24hValue (same
+    // findSnapshotNearDaysAgo(id, 1) source), so reuse it — value24hAgo = totalValue −
+    // pnl24hValue — instead of re-querying per portfolio. pnl24hValue == null ⟺ no in-window
+    // baseline → exclude this portfolio from BOTH sides (matches the old !snapshot skip). This
+    // also makes the totals-24h exactly equal Σ of the per-portfolio 24h rows (derive's source).
+    if (d.pnl24hValue == null) return;
     has24hBaseline = true;
-    value24hAgo += Number(s.value.toString());
-    valueNowWithBaseline += derivedList[i]!.totalValue;
+    value24hAgo += d.totalValue - d.pnl24hValue;
+    valueNowWithBaseline += d.totalValue;
   });
   const pnl24hValue = has24hBaseline ? valueNowWithBaseline - value24hAgo : 0;
   const pnl24h = has24hBaseline && value24hAgo > 0 ? (pnl24hValue / value24hAgo) * 100 : 0;
@@ -419,7 +419,7 @@ async function buildOverview(
     // transaction legitimately starts the line earlier; otherwise it's createdAt. The frontend
     // uses it to clamp the MANUAL value-history reconstruction so a brand-new manual portfolio's
     // chart can't pre-date the portfolio. (Connected charts use recorded snapshots and ignore it.)
-    const earliestTx = earliestTxDates[i] ?? null;
+    const earliestTx = earliestTxDateByPortfolio.get(p.id) ?? null;
     const inception = earliestTx !== null && earliestTx < p.createdAt ? earliestTx : p.createdAt;
     let assetCount = 0;
     // retrofit-28: raw per-portfolio holdings (balance > 0 only), for client recompute.
