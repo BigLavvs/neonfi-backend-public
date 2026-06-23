@@ -91,6 +91,7 @@ export async function clearRedisAuthKeys(): Promise<void> {
     'resend_verify:*',
     'ws_ticket:*',
     'oauth_state:*',
+    'refresh_used:*',
   ];
   for (const pattern of patterns) {
     const keys = await redis.keys(pattern);

@@ -7,10 +7,10 @@
 //   - AuthError carries HTTP status + code so controllers stay thin.
 //   - Refresh tokens: opaque 32-byte base64url; stored as SHA-256 hex hash in
 //     Session.refreshTokenHash (§1.2). Raw token lives only in HttpOnly cookie.
-//   - Non-rotating refresh (§1.6): same Session row, same refresh cookie, new
-//     access token JWT on each /auth/refresh call.
-//     TODO(post-MVP security review): implement refresh-token rotation — each
-//     /auth/refresh should generate a new refresh token + hash, invalidate old.
+//   - Rotating refresh with reuse detection (audit SEC, decision 7): each
+//     /auth/refresh mints a NEW refresh token + hash on the same Session row,
+//     marks the spent hash consumed in Redis, and issues a fresh access token.
+//     Replaying a rotated-out (consumed) token revokes the whole session.
 
 import { createHash, randomBytes } from 'node:crypto';
 import { OAuth2Client } from 'google-auth-library';
@@ -34,6 +34,7 @@ import {
   createSession,
   findSessionById,
   findSessionByRefreshHash,
+  rotateSessionRefreshHash,
   revokeSession,
   revokeAllSessionsForUser,
   findActiveSessionsByUser,
@@ -376,13 +377,28 @@ export async function confirmPasswordReset(body: PasswordResetConfirmBody): Prom
 // refresh
 // ---------------------------------------------------------------------------
 
+// Rotating refresh with reuse detection (audit SEC, decision 7). Each /auth/refresh
+// mints a NEW refresh token, swaps it into the session row, and marks the spent token's
+// hash consumed in Redis. Presenting a previously-rotated-out (consumed) token is treated
+// as theft: the whole session is revoked so neither the attacker nor the victim can keep
+// refreshing — both are forced to re-authenticate.
 export async function refresh(
   rawRefreshToken: string,
-): Promise<{ accessToken: string }> {
-  const hash = sha256hex(rawRefreshToken);
-  const session = await findSessionByRefreshHash(hash);
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const oldHash = sha256hex(rawRefreshToken);
+  const session = await findSessionByRefreshHash(oldHash);
 
   if (!session) {
+    // Not a CURRENT token. If we recorded this hash as already-consumed, the token was
+    // rotated out and is now being replayed → reuse/theft. Revoke the session family.
+    const reusedSessionId = await redis.get(`refresh_used:${oldHash}`);
+    if (reusedSessionId) {
+      const sid = parseInt(reusedSessionId, 10);
+      if (Number.isInteger(sid)) {
+        await revokeSession(sid);
+        console.warn('[auth]', JSON.stringify({ event: 'refresh_token_reuse_detected', sessionId: sid }));
+      }
+    }
     throw new AuthError(401, 'INVALID_REFRESH_TOKEN', 'Refresh token not found');
   }
 
@@ -395,8 +411,23 @@ export async function refresh(
     throw new AuthError(401, 'INVALID_REFRESH_TOKEN', 'User not found');
   }
 
+  // Rotate: mint a new refresh token, slide the absolute expiry, and atomically swap it in.
+  const { raw: refreshToken, hash: newHash } = makeRefreshToken();
+  const refreshTtlMs = parseDurationToMs(config.REFRESH_TOKEN_EXPIRY);
+  const newExpiresAt = new Date(Date.now() + refreshTtlMs);
+  const rotated = await rotateSessionRefreshHash(session.id, oldHash, newHash, newExpiresAt);
+  if (!rotated) {
+    // Lost a concurrent rotation race — this exact token was already exchanged by a parallel
+    // refresh. Reject rather than minting a second live token from one refresh token.
+    throw new AuthError(401, 'INVALID_REFRESH_TOKEN', 'Refresh token not found');
+  }
+
+  // Mark the spent token consumed so a later replay trips reuse detection above. TTL matches
+  // the refresh lifetime — past that the token is expired anyway and the marker is moot.
+  await redis.set(`refresh_used:${oldHash}`, String(session.id), 'PX', refreshTtlMs);
+
   const accessToken = await signAccessToken({ userId: user.id, sessionId: session.id });
-  return { accessToken };
+  return { accessToken, refreshToken };
 }
 
 // ---------------------------------------------------------------------------

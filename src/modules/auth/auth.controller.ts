@@ -195,8 +195,8 @@ router.post('/password-reset/confirm', validate(PasswordResetConfirmSchema), asy
 });
 
 // ---------------------------------------------------------------------------
-// POST /auth/refresh — reads `refresh` cookie, issues new `session` cookie.
-// Refresh cookie is NOT replaced (non-rotating §1.6).
+// POST /auth/refresh — reads `refresh` cookie, issues a new `session` cookie AND a
+// rotated `refresh` cookie (rotation + reuse detection, audit SEC decision 7).
 // ---------------------------------------------------------------------------
 
 router.post('/refresh', async (c) => {
@@ -207,6 +207,7 @@ router.post('/refresh', async (c) => {
   try {
     const result = await refresh(rawRefreshToken);
     setSessionCookie(c, result.accessToken);
+    setRefreshCookie(c, result.refreshToken);
     return c.json(ok({ ok: true }), 200);
   } catch (e) {
     return handleError(e, c);

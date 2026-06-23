@@ -164,6 +164,25 @@ export async function revokeSession(id: number): Promise<void> {
   });
 }
 
+// Refresh-token rotation (audit SEC, decision 7). Atomically swap the session's
+// refreshTokenHash to a freshly-issued one and slide the absolute expiry, but ONLY if the
+// row still carries `oldHash` and is not revoked. The conditional updateMany makes two
+// concurrent refreshes with the same token safe: exactly one wins (count===1) and mints the
+// new token; the loser sees count===0 and is rejected — so a single refresh token can never
+// be exchanged for two live tokens. Returns true when this caller won the rotation.
+export async function rotateSessionRefreshHash(
+  sessionId: number,
+  oldHash: string,
+  newHash: string,
+  expiresAt: Date,
+): Promise<boolean> {
+  const result = await prisma.session.updateMany({
+    where: { id: sessionId, refreshTokenHash: oldHash, revokedAt: null },
+    data: { refreshTokenHash: newHash, expiresAt },
+  });
+  return result.count === 1;
+}
+
 // retrofit-6: bulk-revoke every live session for a user. Used by the
 // password-reset confirm flow so a reset locks out any attacker session.
 export async function revokeAllSessionsForUser(userId: number): Promise<void> {

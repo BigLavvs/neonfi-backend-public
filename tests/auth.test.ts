@@ -358,10 +358,10 @@ it('10: verify-email with invalid token returns 400 INVALID_VERIFICATION_TOKEN',
 });
 
 // ---------------------------------------------------------------------------
-// 11. Refresh — new session cookie issued; refresh cookie unchanged
+// 11. Refresh — new session cookie AND a rotated refresh cookie issued
 // ---------------------------------------------------------------------------
 
-it('11: refresh with valid refresh cookie issues a new session cookie', async () => {
+it('11: refresh with valid refresh cookie issues a new session cookie and rotates the refresh token', async () => {
   await registerTestUser();
   const loginRes = await loginTestUser();
   const originalSession = cookieValue(loginRes, 'session')!;
@@ -378,9 +378,10 @@ it('11: refresh with valid refresh cookie issues a new session cookie', async ()
   expect(newSession).toBeTruthy();
   expect(newSession).not.toBe(originalSession);
 
-  // Refresh cookie is NOT in the Set-Cookie response (non-rotating §1.6)
-  const refreshInResponse = cookieValue(res, 'refresh');
-  expect(refreshInResponse).toBeUndefined();
+  // Refresh token is ROTATED (audit SEC decision 7): a new refresh cookie is set and differs.
+  const newRefresh = cookieValue(res, 'refresh');
+  expect(newRefresh).toBeTruthy();
+  expect(newRefresh).not.toBe(refreshCookie);
 });
 
 // ---------------------------------------------------------------------------
@@ -400,6 +401,40 @@ it('12: refresh with a revoked session returns 401 SESSION_EXPIRED', async () =>
   expect(res.status).toBe(401);
   const json = await res.json() as { error: { code: string } };
   expect(json.error.code).toBe('SESSION_EXPIRED');
+});
+
+// ---------------------------------------------------------------------------
+// 13. Refresh — rotation + reuse detection (audit SEC decision 7)
+//     A rotated-out refresh token, replayed, is rejected AND revokes the session
+//     family so the new (rotated) token can no longer refresh either.
+// ---------------------------------------------------------------------------
+
+it('13: replaying a rotated-out refresh token is rejected and revokes the session family', async () => {
+  await registerTestUser();
+  const loginRes = await loginTestUser();
+  const firstRefresh = cookieValue(loginRes, 'refresh')!;
+
+  // First refresh rotates firstRefresh → secondRefresh.
+  const r1 = await post('/refresh', {}, `refresh=${firstRefresh}`);
+  expect(r1.status).toBe(200);
+  const secondRefresh = cookieValue(r1, 'refresh')!;
+  expect(secondRefresh).not.toBe(firstRefresh);
+
+  // Replaying the now-consumed firstRefresh → 401 (reuse), and it revokes the session.
+  const reuse = await post('/refresh', {}, `refresh=${firstRefresh}`);
+  expect(reuse.status).toBe(401);
+  expect(((await reuse.json()) as { error: { code: string } }).error.code).toBe('INVALID_REFRESH_TOKEN');
+
+  // The session is revoked, so even the legitimate rotated token can no longer refresh.
+  const afterRevoke = await post('/refresh', {}, `refresh=${secondRefresh}`);
+  expect(afterRevoke.status).toBe(401);
+  expect(((await afterRevoke.json()) as { error: { code: string } }).error.code).toBe('SESSION_EXPIRED');
+
+  // DB confirms the session row is revoked.
+  const dbUser = await prisma.user.findUniqueOrThrow({ where: { email: TEST_EMAIL } });
+  const sessions = await prisma.session.findMany({ where: { userId: dbUser.id } });
+  expect(sessions).toHaveLength(1);
+  expect(sessions[0]!.revokedAt).not.toBeNull();
 });
 
 // ---------------------------------------------------------------------------
