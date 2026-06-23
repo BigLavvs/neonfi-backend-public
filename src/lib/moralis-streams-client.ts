@@ -59,8 +59,10 @@ export async function createStream(opts: CreateStreamOpts): Promise<{ id: string
 
   const data = await res.json() as { id: string };
 
-  // Add wallet address to the stream
-  await fetch(`${MORALIS_STREAMS_BASE}/${data.id}/address`, {
+  // Add wallet address to the stream. audit perf #51: this had no !res.ok check, so a failed
+  // add-address silently returned a stream id watching NO address (no webhooks would ever
+  // arrive). Surface it — the caller logs + continues, and a resync can re-create the stream.
+  const addRes = await fetch(`${MORALIS_STREAMS_BASE}/${data.id}/address`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -68,6 +70,11 @@ export async function createStream(opts: CreateStreamOpts): Promise<{ id: string
     },
     body: JSON.stringify({ address: opts.address }),
   });
+  if (!addRes.ok) {
+    const text = await addRes.text().catch(() => '');
+    console.error('[moralis-streams] add-address failed', { streamId: data.id, status: addRes.status, body: text });
+    throw new Error(`Moralis Streams add-address failed: ${addRes.status}`);
+  }
 
   return { id: data.id };
 }

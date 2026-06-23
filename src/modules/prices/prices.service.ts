@@ -285,10 +285,17 @@ export interface PriceSymbolDebug {
   sources: Record<string, PriceSourceDebug>;
 }
 
-async function buildSymbolDebug(sym: string, now: number): Promise<PriceSymbolDebug> {
-  const exchangeKeys = EXCHANGES.map((e) => `price:${sym}:${e}`);
-  const raws = await redis.mget(`price:${sym}`, ...exchangeKeys);
+// The Redis keys backing one symbol's debug readout: [canonical, ...per-exchange] (aligned to
+// EXCHANGES). KEYS_PER_SYMBOL lets the board path slice a single flat mget back into per-symbol
+// windows (perf #49).
+const KEYS_PER_SYMBOL = 1 + EXCHANGES.length;
+function symbolDebugKeys(sym: string): string[] {
+  return [`price:${sym}`, ...EXCHANGES.map((e) => `price:${sym}:${e}`)];
+}
 
+// Pure parser over the 1+N raws for one symbol — shared by the single-symbol mget path and the
+// board's one flat mget.
+function parseSymbolDebug(sym: string, raws: (string | null)[], now: number): PriceSymbolDebug {
   let canonical: PriceSymbolDebug['canonical'] = null;
   const canonRaw = raws[0];
   if (canonRaw) {
@@ -316,6 +323,11 @@ async function buildSymbolDebug(sym: string, now: number): Promise<PriceSymbolDe
   return { symbol: sym, canonical, sources };
 }
 
+async function buildSymbolDebug(sym: string, now: number): Promise<PriceSymbolDebug> {
+  const raws = await redis.mget(...symbolDebugKeys(sym));
+  return parseSymbolDebug(sym, raws, now);
+}
+
 /**
  * Read-only price source board. With a symbol, return that symbol's canonical price + every
  * per-exchange source (ageMs/stale). Without one, return the first N catalog symbols as an
@@ -336,6 +348,12 @@ export async function getPriceDebug(
     return buildSymbolDebug(sym, now);
   }
   const board = [...getCatalogSymbols()].slice(0, DEBUG_BOARD_LIMIT);
-  const symbols = await Promise.all(board.map((s) => buildSymbolDebug(s, now)));
+  if (board.length === 0) return { symbols: [] };
+  // perf #49: ONE flat mget for the whole board (≤50×9 keys) instead of a 9-key mget per
+  // symbol, then slice the result back into per-symbol windows.
+  const raws = await redis.mget(...board.flatMap((s) => symbolDebugKeys(s)));
+  const symbols = board.map((s, i) =>
+    parseSymbolDebug(s, raws.slice(i * KEYS_PER_SYMBOL, (i + 1) * KEYS_PER_SYMBOL), now),
+  );
   return { symbols };
 }

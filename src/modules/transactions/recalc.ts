@@ -145,11 +145,13 @@ export async function recalcPortfolioNetDeposit(
   tx: TxClient,
   portfolioId: number,
 ): Promise<void> {
-  const assets = await tx.asset.findMany({
+  // perf #40/#41: sum DB-side with aggregate(_sum) instead of pulling every asset row to reduce
+  // in JS (this runs inside the write tx after each per-token recalc, amplified in bulk loops).
+  const agg = await tx.asset.aggregate({
     where: { portfolioId },
-    select: { netDeposit: true },
+    _sum: { netDeposit: true },
   });
-  const total = assets.reduce((sum, a) => sum + Number(a.netDeposit.toString()), 0);
+  const total = agg._sum.netDeposit !== null ? Number(agg._sum.netDeposit.toString()) : 0;
   await tx.portfolio.update({
     where: { id: portfolioId },
     data: { netDeposit: total.toFixed(8) },
