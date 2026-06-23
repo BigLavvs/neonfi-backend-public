@@ -24,7 +24,8 @@ function dec8(n: number): string {
 // Best-effort: never throws; per-wallet failures are logged and skipped. Returns counts for
 // the scheduler log.
 export async function repriceConnectedTokens(): Promise<{ wallets: number; repriced: number }> {
-  // Every (walletAddress, chainSlug) of a connected portfolio holding an auto-listed token.
+  // Every (walletAddress, chainSlug) of a connected portfolio holding an auto-listed token,
+  // along with WHICH auto-listed tokens (by contract + symbol) that wallet holds in our catalog.
   const assets = await prisma.asset.findMany({
     where: {
       token: { autoListed: true },
@@ -32,23 +33,36 @@ export async function repriceConnectedTokens(): Promise<{ wallets: number; repri
     },
     select: {
       portfolio: { select: { walletAddress: true, chain: { select: { slug: true } } } },
+      token: { select: { contractAddress: true, symbol: true } },
     },
   });
 
-  const wallets = new Map<string, { address: string; slug: string }>();
+  interface WalletEntry { address: string; slug: string; contracts: Set<string>; symbols: Set<string> }
+  const wallets = new Map<string, WalletEntry>();
   for (const a of assets) {
     const address = a.portfolio.walletAddress;
     const slug = a.portfolio.chain?.slug;
     if (!address || !slug) continue;
-    wallets.set(`${address}|${slug}`, { address, slug });
+    const key = `${address}|${slug}`;
+    let w = wallets.get(key);
+    if (!w) { w = { address, slug, contracts: new Set(), symbols: new Set() }; wallets.set(key, w); }
+    if (a.token.contractAddress) w.contracts.add(a.token.contractAddress.toLowerCase());
+    if (a.token.symbol) w.symbols.add(a.token.symbol.toUpperCase());
   }
 
   let repriced = 0;
-  for (const { address, slug } of wallets.values()) {
+  for (const { address, slug, contracts, symbols } of wallets.values()) {
     try {
       const summary = await fetchWalletSummary(address, { slug });
       if (!summary) continue;
       for (const t of summary.tokens) {
+        // perf #9: only reconcile provider tokens that map to one of OUR auto-listed catalog rows
+        // for this wallet. Skipping the rest (majors / CMC-priced tokens) avoids burning a
+        // CoinGecko call — and risking a 429 — on a token whose updateMany would match 0 rows
+        // anyway. Match by contract when present (precise), else by symbol.
+        const contractMatch = !!t.contractAddress && contracts.has(t.contractAddress.toLowerCase());
+        const symbolMatch = !!t.symbol && symbols.has(t.symbol.toUpperCase());
+        if (!contractMatch && !symbolMatch) continue;
         // retrofit-71 (C4): cross-check the provider price against a canonical feed (CoinGecko by
         // contract). reconcileTokenPrice prefers canonical when the provider is >25% off (the PEPU
         // 3.7× case), keeps the provider when confirmed, and flags 'unverified' when no canonical
