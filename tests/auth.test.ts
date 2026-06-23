@@ -12,6 +12,7 @@ import { app } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { redis } from '../src/lib/redis.js';
 import { sendPasswordResetEmail } from '../src/modules/email/email.service.js';
+import { emailIpSubject } from '../src/lib/lockout.js';
 import { cookieValue, cookieMaxAge, clearRedisAuthKeys, truncateAllUserData } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -205,8 +206,8 @@ it('5: login with wrong password returns 401 and increments lockout counter', as
   const sessions = await prisma.session.findMany({ where: { userId: dbUser.id } });
   expect(sessions).toHaveLength(0);
 
-  // Lockout counter incremented
-  const count = await redis.get(`lockout:login:${TEST_EMAIL}`);
+  // Lockout counter incremented (keyed per (email, IP); tests have no client IP → 'unknown')
+  const count = await redis.get(`lockout:login:${emailIpSubject(TEST_EMAIL, null)}`);
   expect(parseInt(count ?? '0', 10)).toBe(1);
 });
 
@@ -238,15 +239,59 @@ it('7: successful login clears the lockout counter', async () => {
   await post('/login', { email: TEST_EMAIL, password: 'WrongPass1' });
 
   // Verify counter is 2
-  const before = await redis.get(`lockout:login:${TEST_EMAIL}`);
+  const before = await redis.get(`lockout:login:${emailIpSubject(TEST_EMAIL, null)}`);
   expect(parseInt(before ?? '0', 10)).toBe(2);
 
   // Successful login clears it
   const res = await loginTestUser();
   expect(res.status).toBe(200);
 
-  const after = await redis.get(`lockout:login:${TEST_EMAIL}`);
+  const after = await redis.get(`lockout:login:${emailIpSubject(TEST_EMAIL, null)}`);
   expect(after).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// 7b. Lockout is per (email, IP) — an attacker on IP-A locking an account
+//     must NOT lock the real owner out from IP-B (anti targeted-DoS). [audit SEC]
+// ---------------------------------------------------------------------------
+
+function postFromIp(path: string, body: Record<string, unknown>, ip: string): Promise<Response> {
+  return app.request(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': ip },
+    body: JSON.stringify(body),
+  });
+}
+
+it('7b: per-IP lockout — failures from one IP do not lock the account from another IP', async () => {
+  await registerTestUser();
+  const attackerIp = '203.0.113.7';
+
+  // 6 wrong attempts from the attacker IP → that (email, IP) pair locks out.
+  for (let i = 0; i < 6; i++) {
+    await postFromIp('/login', { email: TEST_EMAIL, password: 'WrongPass1' }, attackerIp);
+  }
+  const lockedRes = await postFromIp('/login', { email: TEST_EMAIL, password: TEST_PASSWORD }, attackerIp);
+  expect(lockedRes.status).toBe(423);
+
+  // The real owner on a different IP can still log in successfully.
+  const ownerRes = await postFromIp('/login', { email: TEST_EMAIL, password: TEST_PASSWORD }, '198.51.100.20');
+  expect(ownerRes.status).toBe(200);
+});
+
+// ---------------------------------------------------------------------------
+// 7c. Unknown email is enumeration-uniform: same 401 INVALID_CREDENTIALS and a
+//     lockout counter is still recorded (dummy-hash compare keeps timing even).
+// ---------------------------------------------------------------------------
+
+it('7c: login with an unknown email returns 401 INVALID_CREDENTIALS and records a failure', async () => {
+  const res = await post('/login', { email: 'nobody@neonfi.test', password: 'WrongPass1' });
+  expect(res.status).toBe(401);
+  const json = (await res.json()) as { error: { code: string } };
+  expect(json.error.code).toBe('INVALID_CREDENTIALS');
+
+  const count = await redis.get(`lockout:login:${emailIpSubject('nobody@neonfi.test', null)}`);
+  expect(parseInt(count ?? '0', 10)).toBe(1);
 });
 
 // ---------------------------------------------------------------------------

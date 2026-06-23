@@ -1,22 +1,33 @@
-// Account-lockout helpers (Build Guide §6.9 / Appendix item 10).
+// Account-lockout helpers (Build Guide §6.9 / Appendix item 10; audit SEC per-IP dimension).
 //
 // State lives in Redis only — no DB writes.
-// Key: `lockout:login:<lowercased-email>` → integer counter.
-// TTL is AUTH_LOGIN_LOCKOUT_MS (milliseconds), set on the FIRST failure and
-// NOT extended on subsequent failures within the same window.  This means the
-// lockout expires from the first bad attempt, not the most recent one — a
-// deliberate MVP choice; rotation can be added later.
+// Key: `lockout:login:<subject>` → integer counter, where <subject> is one of:
+//   - emailIpSubject(email, ip) → `<lowercased-email>|<ip>` — per (account, IP). Caps brute force
+//     on ONE account WITHOUT letting an attacker lock the victim out from a different IP (so the
+//     per-email lockout can't be weaponized as a targeted DoS).
+//   - ipSubject(ip)            → `ip|<ip>`                 — per IP across all accounts; catches one
+//     IP spraying many accounts.
+// TTL is AUTH_LOGIN_LOCKOUT_MS, set on the FIRST failure and NOT extended on subsequent failures
+// within the same window (expires from the first bad attempt — a deliberate MVP choice).
 
 import { redis } from './redis.js';
 import { config } from './config.js';
 
-function key(email: string): string {
-  return `lockout:login:${email.toLowerCase()}`;
+function key(subject: string): string {
+  return `lockout:login:${subject}`;
 }
 
-/** Increment the failure counter; sets TTL on first failure.  Returns the new count. */
-export async function recordFailedLogin(email: string): Promise<number> {
-  const k = key(email);
+export function emailIpSubject(email: string, ip: string | null): string {
+  return `${email.toLowerCase()}|${ip ?? 'unknown'}`;
+}
+
+export function ipSubject(ip: string | null): string {
+  return `ip|${ip ?? 'unknown'}`;
+}
+
+/** Increment the failure counter for `subject`; sets TTL on first failure. Returns the new count. */
+export async function recordFailedLogin(subject: string): Promise<number> {
+  const k = key(subject);
   const count = await redis.incr(k);
   if (count === 1) {
     // First failure — set the lockout window starting now.
@@ -25,8 +36,8 @@ export async function recordFailedLogin(email: string): Promise<number> {
   return count;
 }
 
-export async function clearLockout(email: string): Promise<void> {
-  await redis.del(key(email));
+export async function clearLockout(subject: string): Promise<void> {
+  await redis.del(key(subject));
 }
 
 export interface LockoutState {
@@ -36,8 +47,11 @@ export interface LockoutState {
   ttlMs: number;
 }
 
-export async function getLockoutState(email: string): Promise<LockoutState> {
-  const k = key(email);
+export async function getLockoutState(
+  subject: string,
+  maxAttempts: number = config.AUTH_LOGIN_MAX_ATTEMPTS,
+): Promise<LockoutState> {
+  const k = key(subject);
   const results = await redis.pipeline().get(k).pttl(k).exec();
 
   const countRaw = results?.[0]?.[1];
@@ -47,7 +61,7 @@ export async function getLockoutState(email: string): Promise<LockoutState> {
   const ttlMs = typeof ttlRaw === 'number' && ttlRaw > 0 ? ttlRaw : 0;
 
   return {
-    locked: count >= config.AUTH_LOGIN_MAX_ATTEMPTS,
+    locked: count >= maxAttempts,
     count,
     ttlMs,
   };

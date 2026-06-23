@@ -1,0 +1,2969 @@
+ ▐▛███▜▌   Claude Code v2.1.185
+▝▜█████▛▘  Opus 4.8 · Claude Max
+  ▘▘ ▝▝    ~\Desktop\neonfi-backend
+
+
+❯ /effort                                                                       
+  ⎿  Set effort level to ultracode (this session only): xhigh + dynamic workflow
+     orchestration
+
+❯ I need a thorough crackdown on duplicated code, dead code, spagethi code,     
+  hardcoded hexed, styles, etc and many many more, do a very very deep and      
+  thorough audit off this app and report all that you find                      
+                                                                                
+  After that, do a thorough check on all functions and functionalities of the   
+  app and report things that you feel could've been handles more efficiently to 
+  consume less computing or server resources and also places that probably      
+  affect speed                                                                  
+                                                                                
+  After that, do an extremely thorough security audit of the app                
+                                                                                
+  Then after all that I want you to look at the docs folder and read through    
+  all of them, point out anywhere my code might've diverted from what is        
+  specified in the docs                                                         
+                                                                                
+  In all of these dont only look at neonfi-backend, also look at Neonfi in the  
+  desktop folder which is the front end                                         
+                                                                                
+  Do not get lazy, i have absolutely no concern about how long it takes, spawn  
+  as many agents as you migt need cos this is a very thorough task, i want you  
+  to go deep, deep to even a single letter                                      
+                                                                                
+                                                                                
+  After all that is done, create a report md file and write all your findings,  
+  reports, possible fixes, suggestions and everything needed into it, report to 
+  me when you are done                                                          
+
+● I'll start by scouting both codebases to understand their structure, then
+  orchestrate a deep multi-agent audit. Let me discover the work-list first.
+
+  Listed 2 directories (ctrl+o to expand)
+
+● Let me map the source trees and the docs in detail.
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+● Both codebases are substantial (backend ~21k LOC/139 files, frontend ~25k
+  LOC/82 files). The docs are .docx files. Let me check tooling for extracting
+  docx text and survey the frontend docs folder.
+
+  Listed 2 directories (ctrl+o to expand)
+
+● Both stacks are mapped. The docs exist as readable .txt/.md extracts in
+  Neonfi/docs/ (the .docx originals are identical content). I now have a
+  complete work-list:
+
+  - Backend: 139 files / ~21k LOC (Hono + Prisma + Redis + WS)
+  - Frontend: 82 files / ~25k LOC (SvelteKit/Svelte 5)
+  - Specs: schema.txt, architecture.txt, implementation.txt,
+  Neonfi_Backend_Build_Guide.md
+
+  This is a perfect deep fan-out. I'll orchestrate a workflow: recon → quality
+  (16 cluster agents) → performance (6) → security (8) → docs-divergence (5) →
+  per-dimension synthesis. Every agent reads its files in full and returns
+  structured findings. Let me launch it.
+
+● Workflow(Exhaustive multi-agent audit of NeonFi backend + frontend: code
+          quality, performance, security, docs divergence)
+  ⎿  /workflows to view dynamic workflow runs
+
+● The deep audit workflow is now running in the background (wf_190ac20d-b98).
+  Here's what it's executing:
+
+  Phase plan (~40 agents):
+  1. Recon — full backend API + WS protocol inventory (feeds the security & docs
+  agents)
+  2. Quality — 16 cluster agents (10 backend + 6 frontend) reading every file in
+  full + 2 cross-cutting duplication/dead-code/hardcoded-style sweeps
+  3. Performance — 6 agents (DB N+1/indexes, Redis/caching, external-API
+  fan-out, hot-path compute/WS, FE rendering/reactivity, FE network/loading)
+  4. Security — 8 agents (authz/IDOR, injection/validation, secrets/leakage,
+  webhook signatures, SSRF/upload, rate-limit/brute/enum, frontend
+  XSS/token-storage, payments integrity)
+  5. Docs divergence — 5 agents comparing
+  schema.txt/architecture.txt/implementation.txt/Backend_Build_Guide.md against
+  the real Prisma schema, modules, and endpoints
+  6. Synthesize — 5 agents writing the polished report sections from the
+  structured findings
+
+  Every finding is captured as structured data (severity, category, exact
+  file:line, evidence snippet, recommendation, confidence) so nothing gets
+  dropped. When it finishes, I'll assemble everything into a single
+  comprehensive report MD file and walk you through the headline findings.
+
+  You can watch live progress with /workflows. I'll be notified automatically
+  when it completes — no need to wait around. I'll report back with the findings
+  and the report file path.
+
+✻ Crunched for 7m 10s
+
+❯ /workflows 
+  ⎿  Dynamic workflows dialog dismissed
+
+● Dynamic workflow "Exhaustive multi-agent audit of NeonFi backend + frontend:
+code quality, performance, security, docs divergence" completed · 21m 43s
+  ⎿  You've hit your session limit · resets 2:30am (Africa/Lagos)
+     /upgrade or /usage-credits to finish what you’re working on.
+
+✻ Churned for 28m 43s
+
+❯ continue                                                                      
+
+● The workflow ran 43 agents and got substantial results before hitting the
+  session limit (resets 2:30am Africa/Lagos). Let me assess exactly what landed
+  and what I need to recover.
+
+● Bash(echo "=== NOW ==="; date; echo "=== TZ ==="; date +"%Z %z"; echo "===
+      workflow transcript dir ==="; ls -1
+      "C:/Users/pelum/.claude/projects/C--Users-pelum-Deskto…)
+  ⎿  === NOW ===
+     Sun Jun 21 02:33:03 WCAST 2026
+     === TZ ===
+     … +62 lines (ctrl+o to expand)
+
+● It's now 02:33 WCAST (= Africa/Lagos time) — the session limit reset at
+  2:30am, so it should be available again. The journal preserved all completed
+  work (recon + 16 quality agents + 2 global sweeps + 3 perf agents = 315 
+  findings). What failed: 3 perf agents, all 8 security agents, all 5 docs
+  agents, and all 5 synthesis agents.
+
+  Best path: resume the workflow from the journal — completed agents return
+  cached instantly, only the failed ones re-run. First I'll edit the script to
+  also return the full findings array (so nothing depends on synthesis alone),
+  which doesn't touch any cached agent call. Let me read the return block and
+  patch it.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\.claude\projects\C--Users-pelum-Desktop-neonfi-backend\f21a7ade-91f3-
+        4216-b575-de1eb9db8c3e\workflows\scripts\neonfi-deep-audit-wf_190ac20d-b
+        98.js)
+  ⎿  Added 1 line
+      216  ])
+      217  
+      218  return {
+      219 +  allFindings: all,                                           
+      220    counts: {
+      221      total: all.length,
+      222      byDimension: { qualityBackend: qBE.length, qualityFrontend
+           : qFE.length, performance: pAll.length, security: sAll.length,
+            docs: dAll.length },
+
+● Patched. Now I'll resume the workflow — the journal returns the 315 completed
+  findings instantly (cached), and only the failed agents re-run live: 3
+  performance + 8 security + 5 docs + 5 synthesis. The added allFindings return
+  guarantees I get every detailed finding back this time.  ⎿  /workflows to view dynamic workflow runs
+
+● Resume is running in the background (wf_190ac20d-b98). The 315 completed
+  findings are cached; the 21 previously-failed agents (3 performance + 8
+  security + 5 docs + 5 synthesis) are re-running now that the session has
+  reset.
+
+  While that runs, here's the interim picture from what already completed:
+
+  315 findings so far (quality + partial performance):
+  - 13 High, 59 Medium, 196 Low, 47 Info (0 Critical yet — security pass hadn't
+  run, so that number will change)
+
+  Headline High-severity items already surfaced:
+  - coinmarketcap-provider.ts:206 — CMC fetchPrices dedup still has the
+  market-cap-only collision bug that was already fixed in
+  fetchMetadata/fetchTopTokens (TON/junk-ticker)
+  - moralis-streams-client.ts:58 — stream address-add ignores HTTP status; a
+  failed call silently leaves a stream watching nothing
+  - health.ts:46 — /health returns 503 (whole app marked down) when only the
+  Coinbase WS feed blips
+  - payments/+page.svelte — two independent refund flows hit the same endpoint
+  that ignores which payment was selected; refund eligibility window is
+  inconsistent (3 days vs 7 days vs server flag) across three places
+  - AddTransactionModal.svelte — portfolio-transfer destination token is
+  selected in UI but never sent to the backend
+  - Performance: /overview double-fetches each portfolio's assets and re-runs
+  getLivePriceMap; recalc.ts unindexed symbol scan amplified in bulk loops;
+  prices.service.ts blocking redis.keys('overview:*') on every refresh;
+  price-resolver.ts ~13 sequential Redis round-trips per tick with no pipelining
+
+  The security and docs-divergence passes are the big gap still being filled
+  now. Once the resume completes, I'll have the full detailed findings array and
+  synthesis sections, and I'll assemble everything into the report MD file.
+  I'll report back when done.
+
+✻ Cogitated for 2m 8s
+
+● Cannot open agents — 1 still running in the background. Use 
+  /background to confirm abandoning them.
+
+❯ /workflows 
+  ⎿  Dynamic workflows dialog dismissed
+
+❯ /workflows 
+  ⎿  Dynamic workflows dialog dismissed
+
+❯ /workflows 
+  ⎿  Dynamic workflows dialog dismissed
+
+● Dynamic workflow "Exhaustive multi-agent audit of NeonFi backend + frontend:
+code quality, performance, security, docs divergence" completed · 23m 24s
+
+● The resume completed — full result is 825KB (too big for the notification, but
+  saved to disk). The 21 failed agents re-ran and synthesis produced the report
+  sections. Let me parse the full output file and inspect what landed before
+  assembling the report.
+
+● Bash(f="C:/Users/pelum/AppData/Local/Temp/claude/C--Users-pelum-Desktop-neonfi
+      -backend/f21a7ade-91f3-4216-b575-de1eb9db8c3e/tasks/w58kyxbsg.output";
+      echo "=== size =…)
+  ⎿  === size ===
+     888458 C:/Users/pelum/AppData/Local/Temp/claude/C--Users-pelum-Desktop
+     -neonfi-backend/f21a7ade-91f3-4216-b575-de1eb9db8c3e/tasks/w58kyxbsg.o
+     … +14 lines (ctrl+o to expand)
+
+● It's a wrapper object (summary, agentCount, logs, and the result). Let me
+  parse it properly with Node and inspect the structure, counts, and section
+  sizes.
+
+● Bash(cat > /c/Users/pelum/Desktop/neonfi-backend/_audit_inspect.mjs <<'EOF'
+      import fs from 'fs';…)
+  ⎿  TOP KEYS: [ 'summary', 'agentCount', 'logs', 'result' ]
+     RESULT KEYS: [ 'allFindings', 'counts', 'topFindings', 'sections', 'ap
+     iInventory' ]
+     … +33 lines (ctrl+o to expand)
+
+● Excellent — the resume filled everything in. 470 total findings: 1 critical, 
+  32 high, 99 medium, 270 low, 68 info. All five synthesis sections rendered
+  (security 25KB, perf 41KB, quality-BE 42KB, quality-FE 30KB, docs 32KB).
+  Security pass found 1 critical + 3 high.
+
+  Let me pull the critical + all high-severity findings so I can write a sharp
+  executive summary, then assemble the report.
+
+● Bash(cat > /c/Users/pelum/Desktop/neonfi-backend/_audit_top.mjs <<'EOF'
+      import fs from 'fs';…)
+  ⎿  [1] CRITICAL | security | security
+         Moralis idempotency key is constant per stream — every webhook aft
+     er the first is silently dropped for 30 days
+     … +220 lines (ctrl+o to expand)
+
+● I have all 33 critical/high findings. Note items 26–33 are largely the same 
+  WebSocket firehose-vs-spec divergence re-reported by multiple docs agents
+  (expected from parallel coverage) — I'll cluster those in the summary. Now let
+  me check the synthesis sections' formatting (entity encoding) before
+  assembling.
+
+● Bash(cat > /c/Users/pelum/Desktop/neonfi-backend/_audit_peek.mjs <<'EOF'
+      import fs from 'fs';…)
+  ⎿  === SECURITY head ===
+     ## Security
+     … +23 lines (ctrl+o to expand)
+
+● Sections are clean markdown (no entity encoding — synthesis agents decoded
+  them). Now I'll assemble the full report. Let me write the assembler script.
+
+● Write(_audit_assemble.mjs)
+  ⎿  Wrote 158 lines to _audit_assemble.mjs
+       2 import fs from 'fs';
+       3 const SRC = "C:/Users/pelum/AppData/Local/Temp/claude/C--Users-p
+         elum-Desktop-neonfi-backend/f21a7ade-91f3-4216-b575-de1eb9db8c3e
+       4 const OUT = "C:/Users/pelum/Desktop/neonfi-backend/AUDIT-COMPREH
+         ENSIVE-2026-06-21.md";
+       5 
+       7 const r = o.result;e(fs.readFileSync(SRC, 'utf8'));
+       8 const F = r.allFindings;
+       9 const C = r.counts;
+      10 const S = r.sections;
+     … +291 lines (ctrl+o to expand)
+
+● Bash(node /c/Users/pelum/Desktop/neonfi-backend/_audit_assemble.mjs)
+  ⎿  Error: Exit code 1
+     file:///C:/Users/pelum/Desktop/neonfi-backend/_audit_assemble.mjs:74
+       '**Performance (' + C.byDimension.performance + ' findings, 12 high).** 
+     The hot paths have clear wins: (1) `/overview` **fetches each portfolio\'s 
+     assets twice** and re-runs the live-price map a second time — the single 
+     biggest server-side redundancy; (2) the **price resolver does ~13 
+     sequential Redis round-trips per exchange tick with no pipelining**, a 
+     sustained firehose under live market data; (3) `/prices/refresh` runs a 
+     **blocking `redis.keys('overview:*')`** keyspace scan on every call; (4) 
+     the frontend **rebuilds entire SVG chart geometry on every price tick** 
+     (dashboard + performance pages) because the live total overwrites the last 
+     data point; (5) several **N+1 fan-outs** (wallet page = 3 REST calls per 
+     portfolio; `recalc.ts` unindexed symbol scans in bulk loops; 
+     connected-reprice making per-token CoinGecko calls).',
+                                                                                
+                                                                               
+                                                                               
+                                                                               
+                                                                               
+                                                                               
+         ^^^^^^^^
+
+     SyntaxError: Unexpected identifier 'overview'
+         at compileSourceTextModule (node:internal/modules/esm/utils:318:16)
+         at ModuleLoader.moduleStrategy 
+     (node:internal/modules/esm/translators:111:18)
+         at #translate (node:internal/modules/esm/loader:473:20)
+         at afterLoad (node:internal/modules/esm/loader:529:29)
+
+     … +8 lines (ctrl+o to expand)
+
+● The inner single quotes in redis.keys('overview:*') broke the single-quoted JS
+  string. Let me find all such cases.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Update(_audit_assemble.mjs)  ⎿  Added 1 line, removed 1 line
+      71    '',
+      72    '**Security (1 critical · 4 high).** Beyond the Moralis key: 
+          (1) **no global/IP rate limiting anywhere** — `register`, `logi
+          n`, `password-reset/confirm`, `verify-email`, and `refresh` are
+           completely unthrottled, enabling brute force, credential stuff
+          ing, and email-enumeration/DoS; (2) the **refund flow never rev
+          okes Pro access nor cancels the Stripe subscription**, allowing
+           recurring refund abuse while keeping paid features; (3) **`VIT
+          E_MOCK_AUTH` is a build-time auth bypass** that is currently `=
+          true` on disk — if a production build picks up that `.env`, all
+           auth guards vanish. Backend route protection is solid (cookie 
+          auth + ownership checks); the static frontend correctly treats 
+          its guards as UX-only. A recurring smell is over-reliance on a 
+          single `NODE_ENV==="production"` switch governing error leakage
+          , token logging, and cookie `Secure` flags.',
+      73    '',
+      74 -  '**Performance (' + C.byDimension.performance + ' findings, 1
+         -2 high).** The hot paths have clear wins: (1) `/overview` **fet
+         -ches each portfolio\'s assets twice** and re-runs the live-pric
+         -e map a second time — the single biggest server-side redundancy
+         -; (2) the **price resolver does ~13 sequential Redis round-trip
+         -s per exchange tick with no pipelining**, a sustained firehose 
+         -under live market data; (3) `/prices/refresh` runs a **blocking
+         - `redis.keys('overview:*')`** keyspace scan on every call; (4) 
+         -the frontend **rebuilds entire SVG chart geometry on every pric
+         -e tick** (dashboard + performance pages) because the live total
+         - overwrites the last data point; (5) several **N+1 fan-outs** (
+         -wallet page = 3 REST calls per portfolio; `recalc.ts` unindexed
+         - symbol scans in bulk loops; connected-reprice making per-token
+         - CoinGecko calls).',                                           
+      74 +  '**Performance (' + C.byDimension.performance + ' findings, 1
+         +2 high).** The hot paths have clear wins: (1) `/overview` **fet
+         +ches each portfolio\'s assets twice** and re-runs the live-pric
+         +e map a second time — the single biggest server-side redundancy
+         +; (2) the **price resolver does ~13 sequential Redis round-trip
+         +s per exchange tick with no pipelining**, a sustained firehose 
+         +under live market data; (3) `/prices/refresh` runs a **blocking
+         + `redis.keys(\'overview:*\')`** keyspace scan on every call; (4
+         +) the frontend **rebuilds entire SVG chart geometry on every pr
+         +ice tick** (dashboard + performance pages) because the live tot
+         +al overwrites the last data point; (5) several **N+1 fan-outs**
+         + (wallet page = 3 REST calls per portfolio; `recalc.ts` unindex
+         +ed symbol scans in bulk loops; connected-reprice making per-tok
+         +en CoinGecko calls).',                                         
+      75    '',
+      76    '**Code quality (' + (C.byDimension.qualityBackend + C.byDime
+          nsion.qualityFrontend) + ' findings across both stacks).** The 
+          dominant pattern is **duplicated business rules that can drift 
+          out of sync**: the "subscription effectively active" predicate 
+          is re-implemented in 5 places; the CMC `fetchPrices` dedup stil
+          l carries the exact market-cap-collision bug that was already f
+          ixed in its two sibling functions; the refund-eligibility windo
+          w is hardcoded inconsistently (3 days vs 7 days vs the server f
+          lag) across three spots in the payments page. There is a steady
+           supply of **dead code** (unused repository functions `createUs
+          er`/`updateUserOnboardingStatus`, unused schemas/interfaces) an
+          d a notable **functional bug**: the Add-Transaction modal lets 
+          the user pick a portfolio-transfer destination token that is **
+          never sent to the backend**.',
+      77    '',
+
+● Bash(node /c/Users/pelum/Desktop/neonfi-backend/_audit_assemble.mjs)
+  ⎿  WROTE C:/Users/pelum/Desktop/neonfi-backend/AUDIT-COMPREHENSIVE-2026-0
+     6-21.md
+     bytes: 205114
+     … +2 lines (ctrl+o to expand)
+
+● Report written (205KB, 1682 lines). Let me verify it rendered cleanly — check
+  the header/exec summary and the section transitions.
+
+  Read 1 file (ctrl+o to expand)
+
+● The header and prioritized table render cleanly. Let me verify all five
+  section headers landed correctly and the appendix is intact.
+
+● Bash(f=/c/Users/pelum/Desktop/neonfi-backend/AUDIT-COMPREHENSIVE-2026-06-21.md
+      ; echo "=== H2 headers (## ) ==="; grep -n "^## " "$f"; echo ""; echo "===
+      section divi…)
+  ⎿  === H2 headers (## ) ===
+     12:## Executive Summary
+     94:## Contents
+     … +48 lines (ctrl+o to expand)
+
+● The report is complete and well-structured — all five dimension sections with
+  full finding tables plus detailed write-ups for every Critical/High item, and
+  three appendices. Now let me clean up the scratch scripts I created.
+
+● Bash(rm -f _audit_inspect.mjs _audit_top.mjs _audit_peek.mjs
+      _audit_assemble.mjs && echo "cleaned temp scripts" && echo "=== final
+      report ===" && ls -la AUDIT-COMPRE…)
+  ⎿  cleaned temp scripts
+     === final report ===
+     -rw-r--r-- 1 pelum 197609 205114 Jun 21 03:01 AUDIT-COMPREHENSIVE-2026
+     … +7 lines (ctrl+o to expand)
+
+● Done. The full audit is complete and written to a report file. Here's the
+  summary.
+
+  ✅ Audit complete
+
+  Report:
+  C:\Users\pelum\Desktop\neonfi-backend\AUDIT-COMPREHENSIVE-2026-06-21.md (205
+  KB, 1,682 lines)
+
+  How it was done: 43 specialist agents read every source file in both repos in
+  full — backend (139 files / ~21k LOC) and frontend (82 files / ~25k LOC) —
+  across all four lenses you asked for. (The first run hit the 2:30am session
+  limit mid-way through; I resumed from the journal so nothing was lost and the
+  security + docs passes completed.)
+
+  What it found — 470 findings (1 critical · 32 high · 99 medium · 270 low · 68 
+  info)
+
+  ┌───────────────────────────────────┬──────────┐
+  │             Dimension             │ Findings │
+  ├───────────────────────────────────┼──────────┤
+  │ Security                          │ 51       │
+  ├───────────────────────────────────┼──────────┤
+  │ Performance / resource efficiency │ 63       │
+  ├───────────────────────────────────┼──────────┤
+  │ Code quality — backend            │ 159      │
+  ├───────────────────────────────────┼──────────┤
+  │ Code quality — frontend           │ 123      │
+  ├───────────────────────────────────┼──────────┤
+  │ Docs divergence                   │ 74       │
+  └───────────────────────────────────┴──────────┘
+
+  The headline items
+
+  🔴 1 CRITICAL — moralis-handlers.ts:159: the webhook idempotency key is keyed
+  per-stream, not per-delivery, so after the first webhook every subsequent
+  on-chain event is silently dropped for 30 days. Connected wallets stop syncing
+  after the first event. Fix already exists in-code (keccak256(rawBody)
+  fallback).
+
+  Top high-severity themes:
+  - Security: no global/IP rate limiting anywhere (register/login/reset/refresh
+  fully unthrottled); refunds never revoke Pro access or cancel the Stripe sub
+  (recurring-refund abuse); VITE_MOCK_AUTH=true is a build-time auth bypass that
+  ships if a stray .env is picked up.
+  - Performance: /overview fetches each portfolio's assets twice + double
+  live-price map; price resolver does ~13 un-pipelined Redis round-trips per 
+  tick; /prices/refresh runs a blocking redis.keys('overview:*'); both charts
+  rebuild all SVG geometry on every price tick; several N+1 fan-outs (wallet
+  page = 3 calls/portfolio).
+  - Quality: the "subscription effectively active" rule is copy-pasted in 5 
+  places; CMC fetchPrices still carries the TON/junk-ticker dedup bug already
+  fixed in its two siblings; refund window hardcoded inconsistently (3d vs 7d vs
+  server flag); real functional bug — Add-Transaction modal's transfer
+  destination token is never sent to the backend; dead code (createUser,
+  updateUserOnboardingStatus, unused schemas/interfaces).
+  - Docs divergence: the WebSocket contract drifted from spec (firehose prices[]
+  batch + no subscribe handshake — a real retrofit-28 decision the docs never
+  caught up to); schema drift on BalanceSnapshot PK, Transaction.transactionHash
+  uniqueness, Payment.subscriptionId; GET /auth/google replaced the spec's
+  POST.
+
+  Report structure
+
+  Executive summary → prioritized table of all 33 critical/high findings → then
+  five full sections (Security, Performance, Code Quality-Backend, Code
+  Quality-Frontend, Docs Divergence), each with a complete table of every
+  finding in that dimension plus detailed write-ups (evidence + concrete
+  code-level fix) for the critical/high ones → appendices (methodology, full
+  API/WS inventory, clustered-duplicate notes).
+
+  The report is descriptive only — I changed no application code. If you'd like,
+  I can turn any cluster (e.g. the critical Moralis fix, the rate-limiting gap,
+  or the /overview double-fetch) into an actual patch next.
+
+✻ Cogitated for 30m 14s
+
+※ recap: Completed a deep multi-agent audit of the NeonFi backend and frontend, writing 470 findings to AUDIT-COMPREHENSIVE-2026-06-21.md. Next action is yours: tell me if you want any finding turned into an actual code patch. (disable recaps in /config)
+
+❯ Read C:\Users\pelum\Desktop\neonfi-backend\_claude\AUDIT-REMEDIATION-PLAN.md  
+  and the audit report it references. Execute it batch by batch in the order    
+  listed. After each batch run the verification it specifies and commit (don't  
+  push). Stop and report the moment you hit any of the plan's STOP conditions.  
+
+● I'll read the remediation plan and the audit report it references, then
+  execute batch by batch.
+
+  Read 1 file (ctrl+o to expand)
+
+● The plan is clear. This is a large, strictly-sequenced effort with hard STOP
+  conditions (notably: any required DB migration → write it, list it, stop; and
+  money/billing ambiguity → stop). I'll execute batch by batch, verify + commit
+  after each, and stop the moment I hit a STOP condition.
+
+  Let me start by establishing the working-tree state in both repos and reading
+  the Batch 1 (CRITICAL Moralis) code + the referenced findings.
+
+● Bash(echo "=== BACKEND branch ===" && git branch --show-current && echo "===
+      BACKEND status (short) ===" && git status --short && echo "" && cd
+      /c/Users/pelum/Deskto…)
+  ⎿  === BACKEND branch ===
+     master
+     === BACKEND status (short) ===
+     … +69 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to C:\Users\pelum\Desktop\neonfi-backend
+
+● Backend source is fully committed (only untracked audit/notes files). Let me
+  check the frontend tree state without the cd reset issue.
+
+● Bash(git -C /c/Users/pelum/Desktop/Neonfi status --short && echo "=== FE
+      recent commits ===" && git -C /c/Users/pelum/Desktop/Neonfi log --oneline
+      -5 && echo "=== BE…)
+  ⎿  === FE recent commits ===
+     50101e5 feat(ui): chart zoom/pan + range-aware High/Low + scrollable a
+     llocation; avatar upload in TopBar/Sidebar + remove Account ID; 2dp mo
+     … +12 lines (ctrl+o to expand)
+
+● Both trees are clean (recent work already committed). Both repos are on their
+  working branch (master/main). Per safe-git practice I'll isolate this large
+  remediation on a dedicated branch in each repo, then commit per batch there
+  (no push).
+
+● Bash(git -C /c/Users/pelum/Desktop/neonfi-backend checkout -b
+      audit-remediation 2>&1 && git -C /c/Users/pelum/Desktop/Neonfi checkout -b
+      audit-remediation 2>&1 && ec…)
+  ⎿  Switched to a new branch 'audit-remediation'
+     Switched to a new branch 'audit-remediation'
+     === branches ===
+     … +2 lines (ctrl+o to expand)
+
+● Now let me read the Batch 1 (CRITICAL Moralis) code and the referenced
+  findings. Let me gather all the relevant files.
+
+  Read 1 file (ctrl+o to expand)
+
+● Now let me read the relevant audit findings (SEC #17/#18) and the existing
+  webhook test to understand the regression-test setup.
+
+● Bash(f=/c/Users/pelum/Desktop/neonfi-backend/AUDIT-COMPREHENSIVE-2026-06-21.md
+      ; echo "=== SEC #17 + #18 context ==="; sed -n '169,205p' "$f"; echo "===
+      find moralis…)
+  ⎿  === SEC #17 + #18 context ===
+     ### #17 (Critical) — Moralis idempotency key is constant per stream; e
+     very webhook after the first is silently dropped for 30 days
+     … +50 lines (ctrl+o to expand)
+● Let me read the existing webhook test harness and the SEC #18 (confirmed-only)
+  finding.
+
+  Read 1 file (ctrl+o to expand)
+
+● Now I understand the harness. Let me check the SEC #18 finding detail and
+  whether other test files depend on the old key format or confirmed handling.
+
+● Bash(f=/c/Users/pelum/Desktop/neonfi-backend/AUDIT-COMPREHENSIVE-2026-06-21.md
+      ; echo "=== SEC #18 ==="; grep -n "#18 " "$f" | head; sed -n '/### #18
+      /,/^---$/p' "$f"…)
+  ⎿  === SEC #18 ===
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● SEC #18 detail and the retry-safety test (which uses the old dedupeKey format
+  and will need updating). Let me read both.
+
+  Read 1 file (ctrl+o to expand)
+
+● The retry-safety test sets no confirmed field and asserts the old key format —
+  both will break under the decision. I need to update it too. Let me confirm
+  webhooks.test.ts doesn't also post Moralis payloads, and verify the SEC #18
+  reference in the report.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● webhooks.test.ts is Stripe-only — no Moralis collision. SEC #18 confirmed
+  ("Process only confirmed===true"). Now I'll implement Batch 1.
+
+  Edit 1 — moralis-handlers.ts: per-delivery idempotency key
+
+● Update(src\modules\webhooks\moralis-handlers.ts)
+  ⎿  Added 8 lines, removed 6 lines
+      156  // Event ID extraction — idempotency key derivation
+      157  // -----------------------------------------------------------
+           ----------------
+      158  
+      159 -function extractEventId(payload: MoralisPayload, rawBody: stri
+          -ng): string {                                                 
+      160 -  if (payload.streamId && payload.chainId && payload.tag !== u
+          -ndefined) {                                                   
+      161 -    return `${payload.streamId}_${payload.chainId}_${payload.t
+          -ag}`;                                                         
+      162 -  }                                                           
+      163 -  // Fallback: hash of the raw body (guaranteed unique per dis
+          -tinct payload)                                                
+      164 -  return keccak256(rawBody);                                  
+      159 +function extractEventId(rawBody: string): string {            
+      160 +  // Per-DELIVERY idempotency: keccak256 of the exact raw body
+          +. (audit SEC #17)                                             
+      161 +  // streamId/chainId/tag are immutable for a stream's lifetim
+          +e, so keying on                                               
+      162 +  // `${streamId}_${chainId}_${tag}` returned the SAME string 
+          +for every delivery and pinned                                 
+      163 +  // the dedupe key for 30 days — every webhook after the firs
+          +t was silently dropped. The raw                               
+      164 +  // body differs per delivery (distinct block/tx/log data + t
+          +he confirmed flag), so the hash                               
+      165 +  // is unique per delivery while a genuine replay of the iden
+          +tical body still dedupes.                                     
+      166 +  return `kc:${keccak256(rawBody)}`;                          
+      167  }
+      168  
+      169  // -----------------------------------------------------------
+           ----------------
+
+● Edit 2 — confirmed-only gate + updated call site:
+
+● Update(src\modules\webhooks\moralis-handlers.ts)
+  ⎿  Added 11 lines, removed 1 line
+      502      return c.json(err('MALFORMED_PAYLOAD', 'Request body is no
+           t valid JSON'), 400);
+      503    }
+      504  
+      505 +  // 3a. Confirmed-only ingestion (audit SEC #18). Moralis sen
+          +ds an UNCONFIRMED delivery on                                 
+      506 +  //     block inclusion and a CONFIRMED one after enough conf
+          +irmations. Ingesting the                                      
+      507 +  //     unconfirmed copy records reorg-able state that is nev
+          +er reconciled. Ack 200 so Moralis                             
+      508 +  //     stops retrying, but do NOT ingest and do NOT set a de
+          +dupe key — the confirmed delivery                             
+      509 +  //     carries `confirmed:true`, so its raw body (and thus i
+          +ts hash key) differs and is still                             
+      510 +  //     ingested.                                            
+      511 +  if (payload.confirmed !== true) {                           
+      512 +    return c.json(ok({ received: true, confirmed: false, ignor
+          +ed: true }), 200);                                            
+      513 +  }                                                           
+      514 +                                                              
+      515    // 4. Idempotency check
+      506 -  const eventId = extractEventId(payload, rawBody);           
+      516 +  const eventId = extractEventId(rawBody);                    
+      517    const seen = await redis.get(`moralis_event:${eventId}`);
+      518    if (seen) {
+      519      return c.json(ok({ received: true, duplicate: true }), 200
+           );
+
+● Edit 3 — moralis-webhook.test.ts: fix test 280's key assertion to hash-based:
+
+● Update(tests\moralis-webhook.test.ts)
+  ⎿  Added 2 lines, removed 2 lines
+      528    });
+      529    expect(Number(usdcAsset!.balance.toString())).toBeCloseTo(3,
+            4);
+      530  
+      531 -  // Idempotency key set exactly once                         
+      532 -  const key = await redis.get(`moralis_event:stream-280_${ETH_
+          -MORALIS_ID}_test`);                                           
+      531 +  // Idempotency key set exactly once (per-delivery hash key —
+          + audit SEC #17)                                               
+      532 +  const key = await redis.get(`moralis_event:kc:${keccak256(JS
+          +ON.stringify(payload))}`);                                    
+      533    expect(key).toBe('1');
+      534  });
+      535  
+
+● Edit 4 — add regression tests (SEC #17 distinct-deliveries + replay-dedupe; 
+  SEC #18 unconfirmed-ignored):
+
+● Update(tests\moralis-webhook.test.ts)
+  ⎿  Added 65 lines
+      534  });
+      535  
+      536  // -----------------------------------------------------------
+           ----------------
+      537 +// Per-delivery idempotency + confirmed-only (audit SEC #17 / 
+          +#18) — tests 294–296                                          
+      538 +// -----------------------------------------------------------
+          +----------------                                              
+      539 +                                                              
+      540 +it('294: two DISTINCT deliveries sharing streamId/chainId/tag 
+          +are BOTH processed; an identical replay dedupes (audit SEC #17
+          +)', async () => {                                             
+      541 +  // Provider balance is irrelevant here; just keep the post-w
+          +rite refresh deterministic.                                   
+      542 +  fetchWalletSummaryMock.mockResolvedValue(summaryOf([{ symbol
+          +: 'ETH', balance: 3, isNative: true }]));                     
+      543 +  const STREAM = 'stream-prod-constant'; // same stream identi
+          +ty for every delivery (production reality)                    
+      544 +                                                              
+      545 +  // Two genuinely different on-chain deliveries (distinct tx 
+          +hashes + blocks) on the SAME stream.                          
+      546 +  const p1 = makePayload(                                     
+      547 +    { txs: [{ hash: '0xdeliv294a', from: OTHER_ADDRESS, to: WA
+          +LLET_ADDRESS, value: '1000000000000000000' }], block: { timest
+          +amp: '1704067200', number: '19000001', hash: '0xblk294a' } }, 
+      548 +    STREAM,                                                   
+      549 +  );                                                          
+      550 +  const p2 = makePayload(                                     
+      551 +    { txs: [{ hash: '0xdeliv294b', from: OTHER_ADDRESS, to: WA
+          +LLET_ADDRESS, value: '1000000000000000000' }], block: { timest
+          +amp: '1704067260', number: '19000002', hash: '0xblk294b' } }, 
+      552 +    STREAM,                                                   
+      553 +  );                                                          
+      554 +                                                              
+      555 +  const r1 = await postWebhook(p1, sign(p1));                 
+      556 +  expect(r1.status).toBe(200);                                
+      557 +  expect((await r1.json()).data.processed).toBe(1);           
+      558 +                                                              
+      559 +  // Under the old per-stream key this SECOND delivery would s
+          +hort-circuit as duplicate and 0xdeliv294b                     
+      560 +  // would be lost forever. With per-delivery hashing it must 
+          +process.                                                      
+      561 +  const r2 = await postWebhook(p2, sign(p2));                 
+      562 +  expect(r2.status).toBe(200);                                
+      563 +  const j2 = await r2.json();                                 
+      564 +  expect(j2.data.duplicate).toBeUndefined();                  
+      565 +  expect(j2.data.processed).toBe(1);                          
+      566 +                                                              
+      567 +  // Both transfers persisted.                                
+      568 +  expect(await prisma.transaction.count({ where: { portfolioId
+          +, transactionHash: '0xdeliv294a' } })).toBe(1);               
+      569 +  expect(await prisma.transaction.count({ where: { portfolioId
+          +, transactionHash: '0xdeliv294b' } })).toBe(1);               
+      570 +                                                              
+      571 +  // A true replay of the identical body STILL dedupes.       
+      572 +  const replay = await postWebhook(p2, sign(p2));             
+      573 +  expect(replay.status).toBe(200);                            
+      574 +  expect((await replay.json()).data.duplicate).toBe(true);    
+      575 +  expect(await prisma.transaction.count({ where: { portfolioId
+          +, transactionHash: '0xdeliv294b' } })).toBe(1);               
+      576 +});                                                           
+      577 +                                                              
+      578 +it('296: unconfirmed delivery (confirmed=false) is ack-and-ign
+          +ored, not ingested, no dedupe key (audit SEC #18)', async () =
+          +> {                                                           
+      579 +  const payload = makePayload(                                
+      580 +    {                                                         
+      581 +      confirmed: false,                                       
+      582 +      txs: [{ hash: '0xunconfirmed296', from: OTHER_ADDRESS, t
+          +o: WALLET_ADDRESS, value: '1000000000000000000' }],           
+      583 +    },                                                        
+      584 +    'stream-296',                                             
+      585 +  );                                                          
+      586 +  const res = await postWebhook(payload, sign(payload));      
+      587 +  expect(res.status).toBe(200);                               
+      588 +  const json = await res.json();                              
+      589 +  expect(json.data.received).toBe(true);                      
+      590 +  expect(json.data.confirmed).toBe(false);                    
+      591 +  expect(json.data.ignored).toBe(true);                       
+      592 +                                                              
+      593 +  // Nothing ingested.                                        
+      594 +  expect(await prisma.transaction.count({ where: { portfolioId
+          +, transactionHash: '0xunconfirmed296' } })).toBe(0);          
+      595 +                                                              
+      596 +  // No dedupe key set → the later CONFIRMED delivery (differe
+          +nt body/hash) can still be ingested.                          
+      597 +  const key = await redis.get(`moralis_event:kc:${keccak256(JS
+          +ON.stringify(payload))}`);                                    
+      598 +  expect(key).toBeNull();                                     
+      599 +});                                                           
+      600 +                                                              
+      601 +// -----------------------------------------------------------
+          +----------------                                              
+      602  // NFT OUT, null marketplace fields, idempotency (tests 291–29
+           3)
+      603  // -----------------------------------------------------------
+           ----------------
+      604  
+
+● Now update the retry-safety test: the payloads set no confirmed (would now be
+  ignored) and assert the old key format. Let me read the current import block
+  and patch the helper + payloads + assertions.
+
+● Update(tests\moralis-retry-safety.test.ts)
+  ⎿  Added 1 line
+      11  //   • DUPLICATE hash → idempotent success (200, counted proces
+          sed, dedupe set).
+      12  
+      13  import { it, expect, describe, beforeEach, vi } from 'vitest';
+      14 +import { keccak256 } from 'js-sha3';                           
+      15  import type { Context } from 'hono';
+      16  
+      17  const WALLET = '0xabcdef1234567890abcdef1234567890abcdef12';
+
+● Update(tests\moralis-retry-safety.test.ts)
+  ⎿  Added 4 lines, removed 2 lines
+      74    } as unknown as Context;
+      75  }
+      76  
+      77 -function dedupeKey(streamId: string, chainId: string, tag: stri
+         -ng): string {                                                  
+      78 -  return `moralis_event:${streamId}_${chainId}_${tag}`;        
+      77 +// Per-delivery hash key (audit SEC #17). The handler now keys 
+         +idempotency off keccak256 of the                               
+      78 +// exact raw body, which here is JSON.stringify(payload) (see m
+         +akeCtx).                                                       
+      79 +function dedupeKey(payload: object): string {                  
+      80 +  return `moralis_event:kc:${keccak256(JSON.stringify(payload))
+         +}`;                                                            
+      81  }
+      82  
+      83  beforeEach(() => {
+
+● Update(tests\moralis-retry-safety.test.ts)
+  ⎿  Added 1 line
+      103    chainId: '0x1',
+      104    streamId: 'stream-retry',
+      105    tag: 'test',
+      106 +  confirmed: true, // confirmed-only ingestion (audit SEC #18)
+      107    ...extra,
+      108  });
+      109  
+
+● Now the two inline payloads + the five assertions. Test 1 (transient native):
+
+● Update(tests\moralis-retry-safety.test.ts)
+  ⎿  Added 3 lines, removed 2 lines
+      112      const transient = Object.assign(new Error('server closed t
+           he connection'), { code: 'P1017' });
+      113      mocks.createTransactionFromWebhook.mockRejectedValueOnce(t
+           ransient);
+      114  
+      115 -    const res = await handleMoralisWebhook(makeCtx(nativePaylo
+          -ad()));                                                       
+      115 +    const payload = nativePayload();                          
+      116 +    const res = await handleMoralisWebhook(makeCtx(payload)); 
+      117  
+      118      expect(res.status).toBe(500);
+      119      const json = await res.json();
+     ...
+      123      expect(mocks.createTransactionFromWebhook).toHaveBeenCalle
+           dTimes(1);
+      124      // ...but the dedupe key must NOT be set, so Moralis can r
+           etry.
+      125      expect(redis.set).not.toHaveBeenCalled();
+      125 -    expect(mocks.redisStore.has(dedupeKey('stream-retry', '0x1
+          -', 'test'))).toBe(false);                                     
+      126 +    expect(mocks.redisStore.has(dedupeKey(payload))).toBe(fals
+          +e);                                                           
+      127    });
+      128  
+      129    it('TRANSIENT erc20 error (generic throw) → 500 and NO dedup
+           e key set', async () => {
+● Test 2 (transient erc20):
+
+● Update(tests\moralis-retry-safety.test.ts)
+  ⎿  Added 2 lines, removed 1 line
+      144        chainId: '0x1',
+      145        streamId: 'stream-erc20',
+      146        tag: 'test',
+      147 +      confirmed: true,                                        
+      148      };
+      149      mocks.createTransactionFromWebhook.mockRejectedValueOnce(n
+           ew Error('unexpected boom'));
+      150  
+     ...
+      152  
+      153      expect(res.status).toBe(500);
+      154      expect(redis.set).not.toHaveBeenCalled();
+      154 -    expect(mocks.redisStore.has(dedupeKey('stream-erc20', '0x1
+          -', 'test'))).toBe(false);                                     
+      155 +    expect(mocks.redisStore.has(dedupeKey(payload))).toBe(fals
+          +e);                                                           
+      156    });
+      157  
+      158    it('GENUINE business skip (unknown token) → 200, skipped, de
+           dupe key IS set', async () => {
+
+● Test 3 (business skip):
+
+● Update(tests\moralis-retry-safety.test.ts)
+  ⎿  Added 2 lines, removed 1 line
+      174        chainId: '0x1',
+      175        streamId: 'stream-biz',
+      176        tag: 'test',
+      177 +      confirmed: true,                                        
+      178      };
+      179  
+      180      const res = await handleMoralisWebhook(makeCtx(payload));
+     ...
+      185      expect(json.data.processed).toBe(0);
+      186      // A deterministic business skip is acked + deduped.
+      187      expect(redis.set).toHaveBeenCalledTimes(1);
+      187 -    expect(mocks.redisStore.get(dedupeKey('stream-biz', '0x1',
+          - 'test'))).toBe('1');                                         
+      188 +    expect(mocks.redisStore.get(dedupeKey(payload))).toBe('1')
+          +;                                                             
+      189      // Never even attempted to write a transaction.
+      190      expect(mocks.createTransactionFromWebhook).not.toHaveBeenC
+           alled();
+      191    });
+
+● Test 4 (duplicate hash) and Test 5 (happy path):
+
+● Update(tests\moralis-retry-safety.test.ts)
+  ⎿  Added 3 lines, removed 2 lines
+      194      const dup = Object.assign(new Error('dup'), { code: 'TRANS
+           ACTION_HASH_DUPLICATE' });
+      195      mocks.createTransactionFromWebhook.mockRejectedValueOnce(d
+           up);
+      196  
+      197 -    const res = await handleMoralisWebhook(makeCtx(nativePaylo
+          -ad({ streamId: 'stream-dup' })));                             
+      197 +    const payload = nativePayload({ streamId: 'stream-dup' });
+      198 +    const res = await handleMoralisWebhook(makeCtx(payload)); 
+      199  
+      200      expect(res.status).toBe(200);
+      201      const json = await res.json();
+      202      expect(json.data.processed).toBe(1); // counted as process
+           ed — already ingested
+      203      expect(redis.set).toHaveBeenCalledTimes(1);
+      203 -    expect(mocks.redisStore.get(dedupeKey('stream-dup', '0x1',
+          - 'test'))).toBe('1');                                         
+      204 +    expect(mocks.redisStore.get(dedupeKey(payload))).toBe('1')
+          +;                                                             
+      205    });
+      206  
+      207    it('happy path native IN → 200 processed=1 and dedupe key se
+           t', async () => {
+
+● Update(tests\moralis-retry-safety.test.ts)
+  ⎿  Added 3 lines, removed 2 lines
+      205    });
+      206  
+      207    it('happy path native IN → 200 processed=1 and dedupe key se
+           t', async () => {
+      208 -    const res = await handleMoralisWebhook(makeCtx(nativePaylo
+          -ad({ streamId: 'stream-ok' })));                              
+      208 +    const payload = nativePayload({ streamId: 'stream-ok' }); 
+      209 +    const res = await handleMoralisWebhook(makeCtx(payload)); 
+      210  
+      211      expect(res.status).toBe(200);
+      212      const json = await res.json();
+      213      expect(json.data.processed).toBe(1);
+      214      expect(json.data.skipped).toBe(0);
+      214 -    expect(mocks.redisStore.get(dedupeKey('stream-ok', '0x1', 
+          -'test'))).toBe('1');                                          
+      215 +    expect(mocks.redisStore.get(dedupeKey(payload))).toBe('1')
+          +;                                                             
+      216    });
+      217  });
+
+● Batch 1 edits complete. Now the verification: typecheck → check:singletons →
+  the affected test suites.
+
+● Bash(echo "=== typecheck ===" && npm run typecheck 2>&1 | tail -20)
+  ⎿  === typecheck ===
+
+     > neonfi-backend@0.0.1 typecheck
+     > tsc --noEmit
+
+● Typecheck clean. Now singletons check and the affected test suites:
+
+● Bash(echo "=== check:singletons ===" && npm run check:singletons 2>&1 | tail
+      -15)
+  ⎿  === check:singletons ===
+
+     > neonfi-backend@0.0.1 check:singletons
+     … +4 lines (ctrl+o to expand)
+
+● Bash(echo "=== vitest: moralis suites ===" && npx vitest run
+      tests/moralis-retry-safety.test.ts tests/moralis-webhook.test.ts 2>&1 |
+      tail -45)
+  ⎿  === vitest: moralis suites ===
+         at runFiles (file:///C:/Users/pelum/Desktop/neonfi-backend/node_mo
+     dules/@vitest/runner/dist/index.js:1262:5)
+     … +65 lines (ctrl+o to expand)
+
+● Both suites green — 22 passed. (The P1017/unexpected boom/balance refresh 
+  failed lines are the intentional error-path logs from tests that mock
+  rejections — all expected.) Batch 1 verification passes. Committing just the
+  three changed files (not the untracked audit/notes).
+
+● Bash(git add src/modules/webhooks/moralis-handlers.ts
+      tests/moralis-webhook.test.ts tests/moralis-retry-safety.test.ts && git
+      status --short && echo "--- committing…)
+  ⎿  warning: in the working copy of 'src/modules/webhooks/moralis-handlers
+     .ts', LF will be replaced by CRLF the next time Git touches it
+     warning: in the working copy of 'tests/moralis-retry-safety.test.ts',
+     … +70 lines (ctrl+o to expand)
+
+● Batch 1 committed (ac17b41).
+
+  Batch 2 — Security High/Critical (rate limiting, refund-revoke, mock-auth
+  removal). The refund-revoke touches billing, so I'll investigate it deeply
+  before changing anything — and check whether it needs a DB migration (a STOP
+  condition). Let me gather the refund flow, schema, app.ts, and the FE
+  mock-auth files, plus the precise findings.
+
+  Read 1 file (ctrl+o to expand)
+
+● I now understand the refund flow: payment.refundAvailable is already a DB
+  column (no migration needed there), and the current refund does a Stripe
+  refund but never cancels the sub or sets refundAvailable=false. The 3-day
+  window already exists.
+
+  The refund change is a money/billing behavior change — a designated STOP
+  condition — and its exact period-end wiring needs care. I'll do the
+  non-billing Batch 2 items first (mock-auth removal, rate limiting), then
+  assess the refund change against the webhook wiring before touching it.
+
+  Let me start with mock-auth removal (FE, decision 3). Reading the affected
+  files.
+
+  Read 1 file (ctrl+o to expand)
+
+● Let me read the other mock-auth sites and find every VITE_MOCK_AUTH reference.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Mock-auth has more sites than the report named (ConnectionBanner.svelte,
+  (dashboard)/+layout.svelte also read the flag). Decision 3 says remove it
+  entirely. Let me read all the usage sites to remove them cleanly.
+
+  Read 4 files (ctrl+o to expand)
+
+● I have all five mock-auth code sites. Let me check the current
+  .env/.env.example content, then remove the bypass everywhere.
+  Read 1 file (ctrl+o to expand)
+
+● The frontend .env also holds the live Neon credentials (SEC #37) — I'll remove
+  those in Batch 3 (secrets), per the plan's split. For now, mock-auth removal.
+  Making all edits:
+
+● Update(~\Desktop\Neonfi\src\hooks.server.ts)
+  ⎿  Removed 6 lines
+      21      return resolve(event);
+      22    }
+      23  
+      24 -  // TODO: remove this bypass when backend is ready            
+      25 -  const MOCK_AUTH = import.meta.env.VITE_MOCK_AUTH === 'true'; 
+      26 -  if (MOCK_AUTH) {                                             
+      27 -    return resolve(event);                                     
+      28 -  }                                                            
+      29 -                                                               
+      24    const sessionToken = event.cookies.get('session');
+      25    if (!sessionToken) {
+      26      redirect(302, '/register');
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\+layout.ts)
+  ⎿  Removed 12 lines
+      24  export const ssr = false;
+      25  
+      26  export const load: LayoutLoad = async () => {
+      27 -  // TODO: remove this bypass when backend is ready            
+      28 -  const MOCK_AUTH = import.meta.env.VITE_MOCK_AUTH === 'true'; 
+      29 -  if (MOCK_AUTH) {                                             
+      30 -    return {                                                   
+      31 -      session: {                                               
+      32 -        user: { id: 'dev', name: 'Dev User', email: 'dev@exampl
+         -e.com', avatarUrl: null },                                     
+      33 -        plan: 'free' as const,                                 
+      34 -        onboardingStatus: 'complete' as const                  
+      35 -      }                                                        
+      36 -    };                                                         
+      37 -  }                                                            
+      38 -                                                               
+      27    // Real session: the HttpOnly `session` cookie authenticates 
+          GET /users/me (api.ts sends
+      28    // credentials). 401 / expired / no cookie → not signed in → 
+          /register. Incomplete
+      29    // onboarding → /onboarding. On full-page loads hooks.server.
+          ts runs this same guard first;
+
+● Update(~\Desktop\Neonfi\src\routes\(onboarding)\onboarding\+page.ts)
+  ⎿  Removed 12 lines
+      16  }
+      17  
+      18  export const load: PageLoad = async () => {
+      19 -  // TODO: remove this bypass when backend is ready            
+      20 -  const MOCK_AUTH = import.meta.env.VITE_MOCK_AUTH === 'true'; 
+      21 -  if (MOCK_AUTH) {                                             
+      22 -    return {                                                   
+      23 -      onboardingStep: 1,                                       
+      24 -      authProvider: 'email' as const,                          
+      25 -      emailVerified: false,                                    
+      26 -      email: 'dev@example.com',                                
+      27 -      plan: 'free' as const                                    
+      28 -    };                                                         
+      29 -  }                                                            
+      30 -                                                               
+      19    // Real session: hydrate onboarding state from GET /users/me 
+          (cookie auth). No/invalid
+      20    // session → /register; completed onboarding → /dashboard. St
+          ep mapping mirrors the wizard:
+      21    // pending_verification & verified → step 1 (emailVerified di
+          fferentiates the prompt),
+
+● Update(~\Desktop\Neonfi\src\lib\components\ConnectionBanner.svelte)
+  ⎿  Added 1 line, removed 3 lines
+       1  <script lang="ts">
+       2    import { wsStatus } from '$lib/ws';
+       3  
+       4 -  const MOCK = import.meta.env.VITE_MOCK_AUTH === 'true';      
+       5 -                                                               
+       4    let dismissed = $state(false);
+       5  
+       8 -  const visible = $derived(!MOCK && !dismissed && $wsStatus !==
+         - 'connected');                                                 
+       6 +  const visible = $derived(!dismissed && $wsStatus !== 'connect
+         +ed');                                                          
+       7  
+       8    // Re-show whenever connection drops (after a successful conn
+          ection)
+       9    $effect(() => {
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\+layout.svelte)
+  ⎿  Added 1 line, removed 3 lines
+      34      return () => clearTimeout(t);
+      35    });
+      36  
+      37 -  const MOCK = import.meta.env.VITE_MOCK_AUTH === 'true';      
+      38 -                                                               
+      37    onMount(() => {
+      40 -    if (MOCK || data.session?.plan !== 'pro') return;          
+      38 +    if (data.session?.plan !== 'pro') return;                  
+      39      // Pass a ticket PROVIDER, not a one-shot ticket: ws.ts min
+          ts a FRESH ws-token on every
+      40      // (re)connect (tickets are single-use), and api.get refres
+          hes the access token on 401, so
+      41      // the socket self-heals across token expiry and backend re
+          starts — no page reload needed.
+
+● Now the .env (remove the mock line) and .env.example (remove the block):
+
+● Update(~\Desktop\Neonfi\.env)
+  ⎿  Removed 1 line
+      1  VITE_API_URL=
+      2  VITE_WS_URL=
+      3 -VITE_MOCK_AUTH=true                                             
+      3  
+      4  DATABASE_URL=postgresql://neondb_owner:npg_wqJ6gfNntkR0@ep-squar
+         e-sea-apc8xcng-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode
+         =require&channel_binding=require
+      5  DIRECT_URL=postgresql://neondb_owner:npg_wqJ6gfNntkR0@ep-square-
+         sea-apc8xcng.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require&
+         channel_binding=require
+      6   No newline at end of file
+
+● Update(~\Desktop\Neonfi\.env.example)
+  ⎿  Removed 4 lines
+       9  # WebSocket base URL for real-time price feeds (Pro users only)
+      10  # Example: wss://api.neonfi.app
+      11  VITE_WS_URL=
+      12 -                                                               
+      13 -# Set to true to bypass the session-cookie auth guard (mock/dev
+         - mode, no backend required)                                    
+      14 -# Must be unset or false in production                         
+      15 -VITE_MOCK_AUTH=                                                
+
+● Mock-auth removed from all code + env. Let me verify no stray references
+  remain in src/ and run the frontend check.
+
+● Bash(echo "=== residual VITE_MOCK_AUTH/MOCK in src ==="; grep -rn
+      "VITE_MOCK_AUTH\|MOCK" /c/Users/pelum/Desktop/Neonfi/src 2>/dev/null ||
+      echo "(none)"; echo ""; ech…)
+  ⎿  === residual VITE_MOCK_AUTH/MOCK in src ===
+     (none)
+     … +8 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to C:\Users\pelum\Desktop\neonfi-backend
+
+● Frontend check clean (0 errors/warnings), no residual refs. Committing the
+  frontend mock-auth removal.
+
+● Bash(cd /c/Users/pelum/Desktop/Neonfi && git add src/hooks.server.ts
+      "src/routes/(dashboard)/+layout.ts"
+      "src/routes/(onboarding)/onboarding/+page.ts" src/lib/compon…)
+  ⎿  warning: in the working copy of '.env.example', LF will be replaced by
+      CRLF the next time Git touches it
+     warning: in the working copy of 'src/hooks.server.ts', LF will be repl
+     … +10 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to C:\Users\pelum\Desktop\neonfi-backend
+
+● Frontend mock-auth committed (adbd939).
+
+  Next Batch 2 item: global IP rate limiting (decision 7, BE — additive
+  middleware). Let me read app.ts and the Redis lib to implement a
+  sliding-window limiter.
+
+  Read 1 file (ctrl+o to expand)
+
+● Now the rate limiter (decision 7). I must ensure a global limiter doesn't
+  break the test suite (which fires many rapid requests — that would trip a STOP
+  condition). Let me read config.ts and vitest.config.ts to wire an env-gated
+  limiter and trusted-IP handling.
+
+  Read 1 file (ctrl+o to expand)
+
+● isTest is exported — I'll gate the limiter off in tests to avoid breaking the
+  suite. Let me check the err envelope signature (for the 429 details shape) and
+  the existing lockout lib before writing the limiter.
+
+  Read 1 file (ctrl+o to expand)
+
+● err takes only (code, message) — I'll extend it with an optional details
+  (additive; also unblocks the batch-3 lockout retryAfter nesting). Let me check
+  how the test env is configured so the limiter can be disabled in tests
+  without breaking the suite.
+
+  Read 1 file, listed 1 directory (ctrl+o to expand)
+● Key detail: backend .env has NODE_ENV=development, but Vitest sets
+  NODE_ENV=test by default (and dotenv won't override an already-set var), so
+  isTest is true during tests — gating the limiter on !isTest cleanly disables
+  it in the suite. Good.
+
+  Implementing rate limiting. First, extend the err envelope with optional
+  details (additive; also unblocks the batch-3 lockout retryAfter fix):
+
+● Update(src\lib\envelope.ts)
+  ⎿  Added 5 lines, removed 2 lines
+      13    error: {
+      14      code: string;
+      15      message: string;
+      16 +    // Optional structured detail the frontend can read (e.g. {
+         + retryAfter }). lib/api.ts                                     
+      17 +    // reads retry hints from error.details.retryAfter.        
+      18 +    details?: Record<string, unknown>;                         
+      19    };
+      20  }
+      21  
+     ...
+      23    return meta === undefined ? { data } : { data, meta };
+      24  }
+      25  
+      23 -export function err(code: string, message: string): ErrorEnvelo
+         -pe {                                                           
+      24 -  return { error: { code, message } };                         
+      26 +export function err(code: string, message: string, details?: Re
+         +cord<string, unknown>): ErrorEnvelope {                        
+      27 +  return { error: details === undefined ? { code, message } : {
+         + code, message, details } };                                   
+      28  }
+
+● Now add the rate-limit config vars:
+
+● Update(src\lib\config.ts)
+  ⎿  Added 15 lines
+      160      AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).de
+           fault(5),
+      161      AUTH_LOGIN_LOCKOUT_MS: z.coerce.number().int().min(1000).d
+           efault(900000),
+      162  
+      163 +    // --- Global IP rate limiting (audit SEC #27) ---        
+      164 +    // Redis sliding-window per trusted client IP, mounted in 
+          +app.ts. Gated off automatically                               
+      165 +    // when NODE_ENV=test so the integration suite (which fire
+          +s many rapid requests) is                                     
+      166 +    // unaffected. NOTE: explicit-transform boolean (Boolean("
+          +false")===true would never                                    
+      167 +    // disable). Buckets: GLOBAL on all API routes (except sig
+          +nature-verified webhooks), a                                  
+      168 +    // tighter AUTH bucket on /auth/*, and a SENSITIVE bucket 
+          +on provider-fanout + refund.                                  
+      169 +    RATE_LIMIT_ENABLED: z                                     
+      170 +      .string()                                               
+      171 +      .transform((v) => v === 'true')                         
+      172 +      .default('true'),                                       
+      173 +    RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).de
+          +fault(60000),                                                 
+      174 +    RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().min(1).defa
+          +ult(240),                                                     
+      175 +    RATE_LIMIT_AUTH_MAX: z.coerce.number().int().min(1).defaul
+          +t(30),                                                        
+      176 +    RATE_LIMIT_SENSITIVE_MAX: z.coerce.number().int().min(1).d
+          +efault(12),                                                   
+      177 +                                                              
+      178      // --- Token metadata sync (Stage 9B) ---
+      179      // NOTE: deliberately NOT z.coerce.boolean() — Boolean("fa
+           lse") === true in JS,
+      180      // so "false" would NOT disable. Stage 13 caught the same 
+           bug for SNAPSHOT_ENABLED;
+
+● Now the rate-limit middleware lib:
+
+● Write(src\lib\rate-limit.ts)
+  ⎿  Wrote 86 lines to src\lib\rate-limit.ts
+       2 // Neonfi backend — global IP rate limiting (audit SEC #27).
+       3 // A Redis sliding-window-log limiter mounted as Hono middleware
+       4 // previously NO IP/global throttle anywhere, so register/login/
+         password-reset/verify-email/
+         uckets:esh were brute-forceable and DoS-able. This adds per-IP b
+       6 //   - GLOBAL    on every API route except the signature-verifie
+       7 //   - AUTH      tighter, on /auth/*
+       8 //   - SENSITIVE tighter still, on provider-fanout (/portfolios/
+       9 //llet/preview) + /subscriptions/refund
+      10 // Design notes:
+     … +97 lines (ctrl+o to expand)
+
+● Now mount the limiters in app.ts. Let me first confirm the exact
+  wallet-preview route path so the sensitive limiter matches.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Path confirmed: /portfolios/wallet/preview. Mounting the limiters in app.ts:
+
+● Update(src\app.ts)
+  ⎿  Added 2 lines, removed 1 line
+       9  //   POST /api/v1/auth/*   — Stage 1A email auth flows
+      10  
+      11  import { Hono } from 'hono';
+      12 -import { isProduction } from './lib/config.js';                
+      12 +import { config, isProduction } from './lib/config.js';        
+      13  import { checkHealth } from './lib/health.js';
+      14  import { err, ok } from './lib/envelope.js';
+      15 +import { rateLimit } from './lib/rate-limit.js';               
+      16  import { authRouter } from './modules/auth/auth.controller.js';
+      17  import { usersRouter } from './modules/users/users.controller.j
+          s';
+      18  import { subscriptionsRouter } from './modules/subscriptions/su
+          bscriptions.controller.js';
+
+● Update(src\app.ts)
+  ⎿  Added 28 lines
+      44  
+      45    // API v1
+      46    const api = new Hono();
+      47 +                                                               
+      48 +  // Global IP rate limiting (audit SEC #27). Registered before
+         + the routes so it runs first.                                  
+      49 +  // No-ops when NODE_ENV=test or RATE_LIMIT_ENABLED=false. Web
+         +hooks are excluded (signature-                                 
+      50 +  // verified + idempotent; they arrive from provider IPs in bu
+         +rsts).                                                         
+      51 +  api.use('*', rateLimit({                                     
+      52 +    id: 'global',                                              
+      53 +    limit: config.RATE_LIMIT_GLOBAL_MAX,                       
+      54 +    windowMs: config.RATE_LIMIT_WINDOW_MS,                     
+      55 +    skip: (c) => c.req.path.startsWith('/api/v1/webhooks'),    
+      56 +  }));                                                         
+      57 +  // Tighter bucket on auth flows (brute force / credential stu
+         +ffing / enumeration).                                          
+      58 +  api.use('/auth/*', rateLimit({                               
+      59 +    id: 'auth',                                                
+      60 +    limit: config.RATE_LIMIT_AUTH_MAX,                         
+      61 +    windowMs: config.RATE_LIMIT_WINDOW_MS,                     
+      62 +  }));                                                         
+      63 +  // Tightest bucket on expensive provider-fanout + the refund 
+         +endpoint.                                                      
+      64 +  api.use('/portfolios/wallet/preview', rateLimit({            
+      65 +    id: 'wallet-preview',                                      
+      66 +    limit: config.RATE_LIMIT_SENSITIVE_MAX,                    
+      67 +    windowMs: config.RATE_LIMIT_WINDOW_MS,                     
+      68 +  }));                                                         
+      69 +  api.use('/subscriptions/refund', rateLimit({                 
+      70 +    id: 'refund',                                              
+      71 +    limit: config.RATE_LIMIT_SENSITIVE_MAX,                    
+      72 +    windowMs: config.RATE_LIMIT_WINDOW_MS,                     
+      73 +  }));                                                         
+      74 +                                                               
+      75    api.get('/_ping', (c) => c.json(ok({ ok: true }), 200));
+      76    api.route('/auth', authRouter);
+      77    api.route('/users', usersRouter);
+
+● Now a focused unit test for the limiter (mocking redis + config so it runs
+  despite the test-env gate):
+
+● Write(tests\rate-limit.test.ts)
+  ⎿  Wrote 129 lines to tests\rate-limit.test.ts
+       2 // Neonfi backend — rate limiter unit test (audit SEC #27).
+       3 // The limiter is gated off when NODE_ENV=test, so we mock ../sr
+         c/lib/config.js to force it ON
+         edis.js with an in-memory sortedBLED:true) and mock ../src/lib/r
+       5 // set so the sliding-window logic runs deterministically — no r
+         eal Redis.
+       7 import { it, expect, describe, beforeEach, vi } from 'vitest';
+       8 import type { Context } from 'hono';
+       9 
+      10 vi.mock('../src/lib/config.js', () => ({
+     … +133 lines (ctrl+o to expand)
+
+● Now verify Batch 2's rate-limit work: typecheck, singletons, the new unit
+  test, plus the auth suite (to confirm the global/auth limiter mount no-ops in
+  tests and breaks nothing).
+
+● Bash(echo "=== typecheck ===" && npm run typecheck 2>&1 | tail -8 && echo "===
+      singletons ===" && npm run check:singletons 2>&1 | tail -3)
+  ⎿  === typecheck ===
+
+     > neonfi-backend@0.0.1 typecheck
+     … +7 lines (ctrl+o to expand)
+
+● Bash(echo "=== rate-limit unit + auth + webhooks suites ===" && npx vitest run
+      tests/rate-limit.test.ts tests/auth.test.ts tests/webhooks.test.ts 2>&1 |
+      tail -20)
+  ⎿  === rate-limit unit + auth + webhooks suites ===
+        ✓ 35: password-reset request for an email user returns 200, stores
+     token, sends email 451ms
+     … +21 lines (ctrl+o to expand)
+
+● All green — 59 passed (rate-limit unit 3, auth 41, webhooks 15); the global +
+  auth limiters mount cleanly and no-op in tests. Committing the rate-limiting
+  work.
+
+● Bash(git add src/lib/rate-limit.ts src/lib/envelope.ts src/lib/config.ts
+      src/app.ts tests/rate-limit.test.ts && git status --short | grep -vE
+      "^\?\?" && echo "--- co…)
+  ⎿  warning: in the working copy of 'src/app.ts', LF will be replaced by C
+     RLF the next time Git touches it
+     warning: in the working copy of 'src/lib/envelope.ts', LF will be repl
+     … +12 lines (ctrl+o to expand)
+
+● Backend rate limiting committed (fdd7f67).
+
+  The remaining Batch 2 item is the refund-revoke flow (decision 2). This is a
+  money/billing-correctness change — an explicit STOP condition in the plan —
+  and it's also tightly coupled to a frontend UI consolidation (decision 2
+  bundles backend revoke + single-source refund window + merging the two refund
+  UIs). Before touching billing, let me gather the exact current wiring so I can
+  give you an accurate checkpoint.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● I now have the full refund picture. Critically: payments.dto.ts already
+  derives an effective refundAvailable flag, the period-end downgrade path
+  already exists (scheduledPlanId=free → customer.subscription.deleted →
+  applyScheduledDowngrade), and a refund webhook already marks payments
+  refunded. Let me confirm the DTO's eligibility computation so my checkpoint is
+  precise.
+
+  Read 1 file (ctrl+o to expand)
+● I've reached a STOP condition. Here's my checkpoint.
+
+  Progress so far (branch audit-remediation in both repos, nothing pushed)
+
+  Batch: 1
+  Item: CRITICAL Moralis per-delivery idempotency + confirmed-only ingestion +
+    regression tests
+  Repo: backend
+  Commit: ac17b41
+  Verified: typecheck ✓ · singletons ✓ · moralis suites 22/22 ✓
+  ────────────────────────────────────────
+  Batch: 2
+  Item: Mock-auth bypass removed entirely (VITE_MOCK_AUTH)
+  Repo: frontend
+  Commit: adbd939
+  Verified: svelte-check 0/0 ✓
+  ────────────────────────────────────────
+  Batch: 2
+  Item: Global per-IP rate limiting (GLOBAL/AUTH/SENSITIVE buckets, fail-open,
+    test-gated) + err() details
+  Repo: backend
+  Commit: fdd7f67
+  Verified: typecheck ✓ · singletons ✓ · rate-limit+auth+webhooks 59/59 ✓
+
+  Batch 2's three high/critical security items were: rate limiting ✓, mock-auth
+  ✓, and refund-revoke — which is the next item.
+
+  Why I'm stopping
+
+  The refund-revoke change (decision 2) changes refund/billing behavior — which
+  the plan explicitly lists as a STOP condition ("Any behavioral change … could
+  affect money/billing correctness"). You told me to stop the moment I hit one.
+  It's also coupled to a frontend UI consolidation that the protocol otherwise
+  schedules in Batch 6, so it spans two batches.
+
+  I've fully scoped it and it's ready to execute — no migration needed
+  (refundAvailable, scheduledPlanId already exist; the period-end downgrade path
+  already works via customer.subscription.deleted → applyScheduledDowngrade).
+  My planned implementation:
+
+  Backend (subscriptions.service.refundSubscription):
+  1. SET NX Redis cooldown refund:<paymentId> (reject concurrent double-refund).
+  2. Set payment.refundAvailable = false in DB before the Stripe call; restore 
+  it if Stripe fails (so a transient failure doesn't permanently block a legit
+  refund).
+  3. stripe.refunds.create(..., { idempotencyKey: 'refund:<paymentId>' }).
+  4. On success: stripe.subscriptions.update(stripeSubscriptionId, { 
+  cancel_at_period_end: true }) + set scheduledPlanId = free — reusing the
+  existing downgrade path so the user keeps Pro until period end, then drops to
+  Free (via the existing webhook). Hoist the duplicated THREE_DAYS_MS to one
+  shared constant.
+  5. New tests: double-refund blocked, refund-fail restores flag, refund sets
+  cancel_at_period_end + scheduledPlanId=free.
+
+  Frontend (payments/+page.svelte): drop the client isEligible() 3-day heuristic
+  + the 7-day/3-day hardcodes, rely solely on the server's refundAvailable flag
+  (the DTO already computes it with the 3-day window), and merge the two refund
+  UIs into one entry point.
+
+  One design point: I recommend wiring the period-end drop via scheduledPlanId =
+  free (the existing, webhook-applied downgrade path) rather than status = 
+  cancelled. Both keep Pro until period end; scheduledPlanId reuses code that's
+  already tested.
+
+  Also flagged (not yet done): Neonfi/.env still contains the live Neon
+  DATABASE_URL/DIRECT_URL (SEC #37). I have these slated for Batch 3 (delete the
+  two lines) — but you still need to rotate that Neon credential, since it's
+  been on disk in the frontend repo.
+
+  How would you like me to proceed?
+
+● User answered Claude's questions:
+  ⎿  · The refund-revoke change touches refund/billing behavior (a plan STOP 
+     condition). How should I proceed? → Proceed as specified
+
+● You chose proceed as specified. Implementing the refund-revoke (backend, with
+  scheduledPlanId=free wiring) + frontend consolidation, with tests. First let
+  me see the existing refund tests and the shared constant location so I don't
+  break anything.
+
+● Bash(echo "=== refund tests in subscriptions.test.ts ==="; grep -n
+      "refund\|Refund\|REFUND"
+      /c/Users/pelum/Desktop/neonfi-backend/tests/subscriptions.test.ts | head…)
+  ⎿  === refund tests in subscriptions.test.ts ===
+     22:  mockRefundsCreate,
+     29:  mockRefundsCreate: vi.fn(),
+     … +100 lines (ctrl+o to expand)
+
+● The subscriptions test mocks Stripe + uses real DB. Critically, test 109 
+  asserts the Payment is NOT mutated and refundAvailable stays true — which
+  decision 2 deliberately reverses, so I must update that test (an obvious,
+  expected update, not a blocking failure). Let me read the full refund test
+  block to update it precisely.
+
+  Read 1 file (ctrl+o to expand)
+
+● Let me check the beforeEach mock defaults (especially subscriptions.update)
+  and the shared constants.ts/redis lib before writing.
+
+● Bash(echo "=== subscriptions.test beforeEach (150-180) ==="; sed -n '150,185p'
+      /c/Users/pelum/Desktop/neonfi-backend/tests/subscriptions.test.ts; echo
+      "=== constants…)
+  ⎿  === subscriptions.test beforeEach (150-180) ===
+           planId: plan.id,
+           billingCycleId: cycle.id,
+     … +52 lines (ctrl+o to expand)
+
+● All clear — mockSubscriptionsUpdate has a default resolved value, redis.set
+  supports NX, and constants.ts is the right home for the shared window.
+  Implementing now.
+
+  1. Shared REFUND_WINDOW_MS constant:
+
+● Update(src\lib\constants.ts)
+  ⎿  File must be read first
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(src\lib\constants.ts)
+  ⎿  Added 7 lines
+       4   * Pro portfolios only — free portfolios never produce snapshot
+          s, so retention is moot for them.
+       5   */
+       6  export const SNAPSHOT_RETENTION_DAYS = 730; // 24 months
+       7 +                                                               
+       8 +/**                                                            
+       9 + * Refund eligibility window (audit decision 2). A succeeded pa
+         +yment is refundable for this long                              
+      10 + * after creation. SINGLE SOURCE OF TRUTH: used by the refund s
+         +ervice (eligibility gate) and the                              
+      11 + * payments DTO (the `refundAvailable` flag the frontend render
+         +s from), so the two never disagree.                            
+      12 + */                                                            
+      13 +export const REFUND_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 3 d
+         +ays                                                            
+
+● 2. payments.dto.ts — use the shared constant:
+
+● Update(src\modules\payments\payments.dto.ts)
+  ⎿  Added 1 line
+      1  import type { Prisma } from '@prisma/client';
+      2 +import { REFUND_WINDOW_MS } from '../../lib/constants.js';      
+      3  
+      4  export type PaymentWithStatus = Prisma.PaymentGetPayload<{
+      5    include: { status: true };
+
+● Update(src\modules\payments\payments.dto.ts)
+  ⎿  Added 1 line, removed 3 lines
+      19    createdAt: Date;
+      20  }
+      21  
+      22 -const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;                 
+      23 -                                                               
+      22  export function toPaymentDTO(payment: PaymentWithStatus): Payme
+          ntDTO {
+      23    const refundAvailable =
+      24      payment.refundAvailable &&
+      25      payment.status.name === 'succeeded' &&
+      28 -    Date.now() - payment.createdAt.getTime() <= THREE_DAYS_MS; 
+      26 +    Date.now() - payment.createdAt.getTime() <= REFUND_WINDOW_M
+         +S;                                                             
+      27  
+      28    return {
+      29      id: payment.id,
+
+● 3. subscriptions.service.ts — imports + rewrite refundSubscription:
+
+● Update(src\modules\subscriptions\subscriptions.service.ts)
+  ⎿  Added 2 lines
+      11  
+      12  import { prisma } from '../../lib/prisma.js';
+      13  import { stripe } from '../../lib/stripe.js';
+      14 +import { redis } from '../../lib/redis.js';                    
+      15  import { config } from '../../lib/config.js';
+      16 +import { REFUND_WINDOW_MS } from '../../lib/constants.js';     
+      17  import {
+      18    createFreeSubscription,
+      19    findSubscriptionByUserId,
+
+● Update(src\modules\subscriptions\subscriptions.service.ts)
+  ⎿  Added 61 lines, removed 15 lines
+      381  // refundSubscription — POST /subscriptions/refund
+      382  // -----------------------------------------------------------
+           ----------------
+      383  
+      384 -const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;                
+      385 -                                                              
+      384  export async function refundSubscription(
+      385    user: UserWithRelations,
+      386    body: RefundSubscriptionBody,
+     ...
+      403    const eligible =
+      404      payment.refundAvailable &&
+      405      payment.status.name === 'succeeded' &&
+      408 -    Date.now() - payment.createdAt.getTime() <= THREE_DAYS_MS;
+      406 +    Date.now() - payment.createdAt.getTime() <= REFUND_WINDOW_
+          +MS;                                                           
+      407  
+      408    if (!eligible) {
+      409      throw new SubscriptionError(400, 'REFUND_NOT_ELIGIBLE', 'T
+           his payment is not eligible for refund');
+      410    }
+      411  
+      414 -  const refundParams: Parameters<typeof stripe.refunds.create>
+          -[0] = {                                                       
+      415 -    payment_intent: payment.stripePaymentIntentId,            
+      416 -  };                                                          
+      417 -  if (body.reason) {                                          
+      418 -    refundParams.reason = 'requested_by_customer';            
+      419 -    refundParams.metadata = { user_reason: body.reason.slice(0
+          -, 500) };                                                     
+      412 +  // --- Concurrency safety (audit decision 2) ---            
+      413 +  // 1) Redis SET NX cooldown so two in-flight requests can't 
+          +both reach Stripe.                                            
+      414 +  const lockKey = `refund:${payment.id}`;                     
+      415 +  const acquired = await redis.set(lockKey, '1', 'EX', 120, 'N
+          +X');                                                          
+      416 +  if (acquired !== 'OK') {                                    
+      417 +    throw new SubscriptionError(409, 'REFUND_IN_PROGRESS', 'A 
+          +refund for this payment is already being processed');         
+      418    }
+      419  
+      420    try {
+      423 -    await stripe.refunds.create(refundParams);                
+      424 -  } catch (e: unknown) {                                      
+      425 -    const code = (e as { code?: string }).code ?? 'unknown';  
+      426 -    throw new SubscriptionError(400, 'REFUND_FAILED', 'Refund 
+          -request failed', { stripeCode: code });                       
+      427 -  }                                                           
+      421 +    // 2) Flip refundAvailable=false BEFORE the Stripe call, a
+          +tomically (compare-and-set on the                             
+      422 +    //    refundAvailable:true guard) so a racing request that
+          + slipped past the eligibility read                            
+      423 +    //    can't double-refund.                                
+      424 +    const flipped = await prisma.payment.updateMany({         
+      425 +      where: { id: payment.id, refundAvailable: true },       
+      426 +      data: { refundAvailable: false },                       
+      427 +    });                                                       
+      428 +    if (flipped.count === 0) {                                
+      429 +      throw new SubscriptionError(409, 'REFUND_IN_PROGRESS', '
+          +A refund for this payment is already being processed');       
+      430 +    }                                                         
+      431  
+      429 -  return { refundRequested: true, paymentId: payment.id };    
+      432 +    // 3) Create the Stripe refund with a per-payment idempote
+          +ncy key so a retry of THIS request                            
+      433 +    //    never issues a second refund.                       
+      434 +    const refundParams: Parameters<typeof stripe.refunds.creat
+          +e>[0] = {                                                     
+      435 +      payment_intent: payment.stripePaymentIntentId,          
+      436 +    };                                                        
+      437 +    if (body.reason) {                                        
+      438 +      refundParams.reason = 'requested_by_customer';          
+      439 +      refundParams.metadata = { user_reason: body.reason.slice
+          +(0, 500) };                                                   
+      440 +    }                                                         
+      441 +                                                              
+      442 +    try {                                                     
+      443 +      await stripe.refunds.create(refundParams, { idempotencyK
+          +ey: `refund:${payment.id}` });                                
+      444 +    } catch (e: unknown) {                                    
+      445 +      // Stripe failed — RESTORE the flag so a transient failu
+          +re doesn't permanently block a legit                          
+      446 +      // refund, then surface the error.                      
+      447 +      await prisma.payment                                    
+      448 +        .update({ where: { id: payment.id }, data: { refundAva
+          +ilable: true } })                                             
+      449 +        .catch(() => undefined);                              
+      450 +      const code = (e as { code?: string }).code ?? 'unknown';
+      451 +      throw new SubscriptionError(400, 'REFUND_FAILED', 'Refun
+          +d request failed', { stripeCode: code });                     
+      452 +    }                                                         
+      453 +                                                              
+      454 +    // 4) Revoke Pro AT PERIOD END (audit decision 2): cancel 
+          +the Stripe subscription at period end                         
+      455 +    //    and schedule the local downgrade to Free. The user k
+          +eeps Pro until the paid period                                
+      456 +    //    expires, then the existing customer.subscription.del
+          +eted webhook applies the downgrade.                           
+      457 +    //    The refund already succeeded, so a failure here must
+          + NOT 500 the request — log + continue                         
+      458 +    //    (the charge.refunded webhook still marks the payment
+          + refunded; reconcile out-of-band).                            
+      459 +    if (sub.stripeSubscriptionId && sub.plan.name !== 'free') 
+          +{                                                             
+      460 +      try {                                                   
+      461 +        await stripe.subscriptions.update(sub.stripeSubscripti
+          +onId, { cancel_at_period_end: true });                        
+      462 +        const freePlan = await prisma.plan.findUniqueOrThrow({
+          + where: { name: 'free' } });                                  
+      463 +        await updateSubscriptionById(sub.id, { scheduledPlanId
+          +: freePlan.id, scheduledBillingCycleId: null });              
+      464 +      } catch (e) {                                           
+      465 +        console.error(                                        
+      466 +          '[subscriptions] refund succeeded but scheduling per
+          +iod-end downgrade failed',                                    
+      467 +          e instanceof Error ? e.message : e,                 
+      468 +        );                                                    
+      469 +      }                                                       
+      470 +    }                                                         
+      471 +                                                              
+      472 +    return { refundRequested: true, paymentId: payment.id };  
+      473 +  } finally {                                                 
+      474 +    await redis.del(lockKey).catch(() => undefined);          
+      475 +  }                                                           
+      476  }
+
+● Now update the refund tests for the new behavior (test 109 asserted the old
+  "not mutated" behavior) and add concurrency + restore-on-failure tests. First,
+  import redis in the test:
+
+● Update(tests\subscriptions.test.ts)
+  ⎿  Added 1 line
+       6  import { it, beforeEach, expect, vi } from 'vitest';
+       7  import { app } from '../src/app.js';
+       8  import { prisma } from '../src/lib/prisma.js';
+       9 +import { redis } from '../src/lib/redis.js';                   
+      10  import { cookieValue, clearRedisAuthKeys, seedPayment, truncate
+          AllUserData } from './helpers.js';
+      11  import { config } from '../src/lib/config.js';
+      12  
+
+● Now rewrite test 109 for the new revoke behavior:
+
+● Update(tests\subscriptions.test.ts)
+  ⎿  Added 60 lines, removed 3 lines
+      863  // 109. POST /subscriptions/refund — eligible succeeded paymen
+           t within 3 days
+      864  // -----------------------------------------------------------
+           ----------------
+      865  
+      866 -it('109: POST /subscriptions/refund — eligible payment within 
+          -3 days → 200, Stripe called correctly, Payment not mutated', a
+          -sync () => {                                                  
+      866 +it('109: POST /subscriptions/refund — eligible payment → 200, 
+          +Stripe refund (idempotency key), refundAvailable flipped false
+          +, Pro revoked at period end (audit decision 2)', async () => {
+      867    await registerUser();
+      868    const cookies = await loginUser();
+      869    const { userId, subscriptionId } = await createProSubDirectl
+           y(TEST_EMAIL);
+     ...
+      882    expect(json.data.refundRequested).toBe(true);
+      883    expect(json.data.paymentId).toBe(payment.id);
+      884  
+      885 -  // Stripe called with correct args                          
+      885 +  // Stripe refund called with the per-payment idempotency key
+          + (no double-refund on retry).                                 
+      886    expect(mockRefundsCreate).toHaveBeenCalledWith(
+      887      expect.objectContaining({
+      888        payment_intent: payment.stripePaymentIntentId,
+      889        reason: 'requested_by_customer',
+      890        metadata: { user_reason: 'I changed my mind' },
+      891      }),
+      892 +    expect.objectContaining({ idempotencyKey: `refund:${paymen
+          +t.id}` }),                                                    
+      893    );
+      894  
+      894 -  // Payment row NOT mutated — status still succeeded, refundA
+          -vailable still true                                           
+      895 +  // refundAvailable flipped to false (set BEFORE the Stripe c
+          +all). Status stays 'succeeded' in                             
+      896 +  // this unit context — the real charge.refunded webhook flip
+          +s it to 'refunded'.                                           
+      897    const dbPayment = await prisma.payment.findUniqueOrThrow({
+      898      where: { id: payment.id },
+      899      include: { status: true },
+      900    });
+      901    expect(dbPayment.status.name).toBe('succeeded');
+      902 +  expect(dbPayment.refundAvailable).toBe(false);              
+      903 +                                                              
+      904 +  // Pro revoked AT PERIOD END: Stripe sub set to cancel_at_pe
+          +riod_end + local downgrade to Free                            
+      905 +  // scheduled (the user keeps Pro until the period ends).    
+      906 +  expect(mockSubscriptionsUpdate).toHaveBeenCalledWith('sub_te
+          +st_refund', { cancel_at_period_end: true });                  
+      907 +  const freePlan = await prisma.plan.findUniqueOrThrow({ where
+          +: { name: 'free' } });                                        
+      908 +  const dbSub = await prisma.subscription.findUniqueOrThrow({ 
+          +where: { id: subscriptionId } });                             
+      909 +  expect(dbSub.scheduledPlanId).toBe(freePlan.id);            
+      910 +});                                                           
+      911 +                                                              
+      912 +// -----------------------------------------------------------
+          +----------------                                              
+      913 +// 109b. Concurrency: a refund already in progress (lock held)
+          + → 409 REFUND_IN_PROGRESS                                     
+      914 +// -----------------------------------------------------------
+          +----------------                                              
+      915 +                                                              
+      916 +it('109b: POST /subscriptions/refund — refund already in progr
+          +ess (Redis lock held) → 409 REFUND_IN_PROGRESS; Stripe NOT cal
+          +led', async () => {                                           
+      917 +  await registerUser();                                       
+      918 +  const cookies = await loginUser();                          
+      919 +  const { userId, subscriptionId } = await createProSubDirectl
+          +y(TEST_EMAIL);                                                
+      920 +  const payment = await seedPayment({ userId, subscriptionId, 
+          +status: 'succeeded', refundAvailable: true });                
+      921 +                                                              
+      922 +  // Simulate a concurrent refund holding the per-payment lock
+          +.                                                             
+      923 +  await redis.set(`refund:${payment.id}`, '1', 'EX', 120, 'NX'
+          +);                                                            
+      924 +                                                              
+      925 +  const res = await post('/refund', {}, cookies);             
+      926 +  expect(res.status).toBe(409);                               
+      927 +  const json = await res.json() as { error: { code: string } }
+          +;                                                             
+      928 +  expect(json.error.code).toBe('REFUND_IN_PROGRESS');         
+      929 +  expect(mockRefundsCreate).not.toHaveBeenCalled();           
+      930 +  // refundAvailable untouched (still true) since we never sta
+          +rted.                                                         
+      931 +  const dbPayment = await prisma.payment.findUniqueOrThrow({ w
+          +here: { id: payment.id } });                                  
+      932    expect(dbPayment.refundAvailable).toBe(true);
+      933 +                                                              
+      934 +  await redis.del(`refund:${payment.id}`);                    
+      935  });
+      936  
+      937  // -----------------------------------------------------------
+           ----------------
+      938 +// 109c. Stripe refund fails → 400 REFUND_FAILED; refundAvaila
+          +ble RESTORED; lock released                                   
+      939 +// -----------------------------------------------------------
+          +----------------                                              
+      940 +                                                              
+      941 +it('109c: POST /subscriptions/refund — Stripe refund fails → 4
+          +00 REFUND_FAILED, refundAvailable restored, lock released (ret
+          +ry-safe)', async () => {                                      
+      942 +  await registerUser();                                       
+      943 +  const cookies = await loginUser();                          
+      944 +  const { userId, subscriptionId } = await createProSubDirectl
+          +y(TEST_EMAIL);                                                
+      945 +  const payment = await seedPayment({ userId, subscriptionId, 
+          +status: 'succeeded', refundAvailable: true });                
+      946 +                                                              
+      947 +  mockRefundsCreate.mockRejectedValueOnce(Object.assign(new Er
+          +ror('card_error'), { code: 'charge_already_refunded' }));     
+      948 +                                                              
+      949 +  const res = await post('/refund', {}, cookies);             
+      950 +  expect(res.status).toBe(400);                               
+      951 +  const json = await res.json() as { error: { code: string } }
+          +;                                                             
+      952 +  expect(json.error.code).toBe('REFUND_FAILED');              
+      953 +                                                              
+      954 +  // Flag restored so a legitimate retry can succeed; lock rel
+          +eased.                                                        
+      955 +  const dbPayment = await prisma.payment.findUniqueOrThrow({ w
+          +here: { id: payment.id } });                                  
+      956 +  expect(dbPayment.refundAvailable).toBe(true);               
+      957 +  expect(await redis.get(`refund:${payment.id}`)).toBeNull(); 
+      958 +});                                                           
+      959 +                                                              
+      960 +// -----------------------------------------------------------
+          +----------------                                              
+      961  // 110. POST /subscriptions/refund — no reason
+      962  // -----------------------------------------------------------
+           ----------------
+      963  
+● Now fix test 110's call assertion (refund now passes a second idempotencyKey
+  arg):
+
+● Update(tests\subscriptions.test.ts)
+  ⎿  Added 2 lines, removed 1 line
+      974    const json = await res.json() as { data: { refundRequested: 
+           boolean } };
+      975    expect(json.data.refundRequested).toBe(true);
+      976  
+      977 -  // Called without reason and without metadata.user_reason   
+      977 +  // Called without reason and without metadata.user_reason (s
+          +econd arg is the idempotency key).                            
+      978    expect(mockRefundsCreate).toHaveBeenCalledWith(
+      979      expect.not.objectContaining({ reason: expect.anything() })
+           ,
+      980 +    expect.anything(),                                        
+      981    );
+      982    const callArg = mockRefundsCreate.mock.calls[0]![0] as Recor
+           d<string, unknown>;
+      983    expect(callArg.reason).toBeUndefined();
+
+● Now verify the backend refund changes: typecheck, singletons, and the
+  subscriptions + payments suites.
+
+● Bash(echo "=== residual THREE_DAYS_MS ==="; grep -rn "THREE_DAYS_MS"
+      /c/Users/pelum/Desktop/neonfi-backend/src || echo "(none)"; echo "===
+      typecheck ==="; npm run ty…)
+  ⎿  === residual THREE_DAYS_MS ===
+     (none)
+     === typecheck ===
+     … +3 lines (ctrl+o to expand)
+
+● Bash(echo "=== singletons ===" && npm run check:singletons 2>&1 | tail -3 &&
+      echo "=== subscriptions + payments suites ===" && npx vitest run
+      tests/subscriptions.tes…)
+  ⎿  === singletons ===
+     > node scripts/check-singletons.mjs
+     … +36 lines (ctrl+o to expand)
+
+● Backend refund work green — 50 passed (subscriptions 40, payments 10),
+  including the new concurrency + restore-on-failure tests. Now the frontend
+  half of decision 2: consolidate the two refund UIs and remove the client-side
+  eligibility duplicates. Let me read the payments page.
+
+  Read 1 file (ctrl+o to expand)
+
+● Two refund flows confirmed: (1) the card-level "Request Refund" button gated
+  by server data.refundEligible (but its hint wrongly says "7 days"), and (2)
+  the per-payment table affordance gated by a client-side isEligible() 3-day
+  heuristic that opens RefundConfirmModal — hitting an endpoint that ignores
+  which payment is chosen. Let me read +page.ts to see how refundEligible/dateMs
+  are derived before consolidating.
+
+  Read 1 file (ctrl+o to expand)
+
+● Data layer confirmed: refundEligible already comes from the server's
+  refundAvailable (authoritative, 3-day window). The client isEligible() is the
+  duplicate. Let me confirm RefundConfirmModal has no other importer and find
+  any other "7 day" copy before consolidating.
+
+● Bash(echo "=== RefundConfirmModal importers ==="; grep -rn
+      "RefundConfirmModal" /c/Users/pelum/Desktop/Neonfi/src; echo ""; echo "===
+      '7 day' / isEligible refs in FE…)
+  ⎿  === RefundConfirmModal importers ===
+     /c/Users/pelum/Desktop/Neonfi/src/routes/(dashboard)/payments/+page.sv
+     elte:5:    import RefundConfirmModal from '$lib/components/modals/RefundCo
+     … +20 lines (ctrl+o to expand)
+
+
+● Consolidation plan confirmed — the modal is orphaned after this and even
+  admits the backend ignores the selected payment. Making the edits to
+  payments/+page.svelte (keep one server-flag-driven entry point, remove the
+  per-payment affordance + client isEligible, derive copy from one constant):
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)
+  ⎿  Removed 1 line
+      2    import type { PageData } from './$types';
+      3    import Badge from '$lib/components/Badge.svelte';
+      4    import Button from '$lib/components/Button.svelte';
+      5 -  import RefundConfirmModal from '$lib/components/modals/RefundC
+        -onfirmModal.svelte';                                            
+      5    import { page } from '$app/stores';
+      6    import { txStatusVariant, formatPrice } from '$lib/format';
+      7    import { api, ApiError } from '$lib/api';
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)
+  ⎿  Added 4 lines, removed 10 lines
+      78      }
+      79    }
+      80  
+      81 -  // ── Per-payment refund ────────────────────────────────────
+         -────────────                                                   
+      82 -  type RefundTarget = { date: string; amount: number; descripti
+         -on: string; paymentId: string };                               
+      83 -  let showRefundModal = $state(false);                         
+      84 -  let refundTarget = $state<RefundTarget | null>(null);        
+      85 -                                                               
+      81    // ── Kebab menu ────────────────────────────────────────────
+          ────────────
+      82    let openKebab = $state<string | null>(null);
+      83  
+      89 -  const isEligible = (paymentDate: Date) => {                  
+      90 -    const diffMs = Date.now() - paymentDate.getTime();         
+      91 -    const diffDays = diffMs / (1000 * 60 * 60 * 24);           
+      92 -    return diffDays <= 3;                                      
+      93 -  };                                                           
+      84 +  // Refund eligibility is decided SERVER-SIDE (audit decision 
+         +2): the `refundEligible` flag the                              
+      85 +  // API returns already encodes the window. This constant only
+         + drives display copy so the UI text                            
+      86 +  // can never drift from the server rule. There is a single re
+         +fund entry point (the card button).                            
+      87 +  const REFUND_WINDOW_DAYS = 3;                                
+      88  
+      89    // ── Plan feature lists ────────────────────────────────────
+          ────────────
+      90    const freeFeatures = ['1 manual portfolio', 'Up to 5 assets',
+           'Basic charts', 'Email support'];
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)
+  ⎿  Added 1 line, removed 1 line
+      175              <Button variant="ghost" size="sm" disabled={refund
+           Loading} onclick={handleRefund}>
+      176                {refundLoading ? 'Processing…' : 'Request Refund
+           '}
+      177              </Button>
+      178 -            <span class="refund-hint">Eligible within 7 days o
+          -f payment</span>                                              
+      178 +            <span class="refund-hint">Eligible within {REFUND_
+          +WINDOW_DAYS} days of payment</span>                           
+      179            {/if}
+      180            {#if refundError}
+      181              <span class="form-error">{refundError}</span>
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)
+  ⎿  Added 1 line, removed 1 line
+      305            <line x1="12" y1="8" x2="12.01" y2="8" />
+      306          </svg>
+      307          <span>
+      308 -          <strong>Refund Policy:</strong> Refunds are availabl
+          -e within 3 days of payment.                                   
+      308 +          <strong>Refund Policy:</strong> Refunds are availabl
+          +e within {REFUND_WINDOW_DAYS} days of payment.                
+      309            Contact <span class="primary">support@neonfi.io</spa
+           n> with your transaction ID to settle disputes.
+      310          </span>
+      311        </div>
+
+● Now remove the per-payment refund affordances (inline + kebab) and the modal
+  usage:
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)
+  ⎿  Removed 8 lines
+      348                <!-- Inline links — visible >900px -->
+      349                <span class="actions-inline">
+      350                  <a href={row.receiptUrl} class="receipt-link" 
+           target="_blank" rel="noopener noreferrer">View</a>
+      351 -                {#if isEligible(new Date(row.dateMs))}        
+      352 -                  <button                                     
+      353 -                    class="btn-refund"                        
+      354 -                    onclick={() => { refundTarget = { date: ro
+          -w.date, amount: row.amount, description: row.description, paym
+          -entId: row.paymentId }; showRefundModal = true; }}            
+      355 -                  >                                           
+      356 -                    Request Refund                            
+      357 -                  </button>                                   
+      358 -                {/if}                                         
+      351                </span>
+      352                <!-- Kebab menu — visible ≤900px -->
+      353                <span class="actions-kebab">
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)
+  ⎿  Removed 6 lines
+      363                          class="kebab-item"
+      364                          onclick={() => { window.open(row.recei
+           ptUrl, '_blank', 'noopener,noreferrer'); openKebab = null; }}
+      365                        >View Details</button>
+      366 -                      {#if isEligible(new Date(row.dateMs))}  
+      367 -                        <button                               
+      368 -                          class="kebab-item kebab-refund"     
+      369 -                          onclick={() => { refundTarget = { da
+          -te: row.date, amount: row.amount, description: row.description
+          -, paymentId: row.paymentId }; showRefundModal = true; openKeba
+          -b = null; }}                                                  
+      370 -                        >Request Refund</button>              
+      371 -                      {/if}                                   
+      366                      </div>
+      367                    {/if}
+      368                  </div>
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)
+  ⎿  Removed 7 lines
+      386  </div>
+      387  
+      388  <!-- ── Cancel confirmation dialog ───────────────────────────
+           ─────────────── -->
+      389 -{#if showRefundModal && refundTarget}                         
+      390 -  <RefundConfirmModal                                         
+      391 -    payment={refundTarget}                                    
+      392 -    onclose={() => { showRefundModal = false; refundTarget = n
+          -ull; }}                                                       
+      393 -  />                                                          
+      394 -{/if}                                                         
+      395 -                                                              
+      389  {#if showCancelDialog}
+      390    <!-- svelte-ignore a11y_click_events_have_key_events a11y_in
+           teractive_supports_focus -->
+      391    <div class="overlay" role="dialog" aria-modal="true" aria-la
+           bel="Cancel subscription">
+
+● Now remove the now-unused CSS (.btn-refund, .kebab-refund) to keep
+  svelte-check clean, and delete the orphaned modal:
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)
+  ⎿  Removed 17 lines
+      920      opacity: 0.75;
+      921    }
+      922  
+      923 -  .btn-refund {                                               
+      924 -    background: transparent;                                  
+      925 -    border: none;                                             
+      926 -    color: var(--loss);                                       
+      927 -    font-family: inherit;                                     
+      928 -    font-size: 13px;                                          
+      929 -    font-weight: 600;                                         
+      930 -    cursor: pointer;                                          
+      931 -    padding: 0;                                               
+      932 -    white-space: nowrap;                                      
+      933 -    transition: opacity 0.15s ease;                           
+      934 -  }                                                           
+      935 -                                                              
+      936 -  .btn-refund:hover {                                         
+      937 -    opacity: 0.72;                                            
+      938 -  }                                                           
+      939 -                                                              
+      923    /* Kebab button + dropdown */
+      924    .kebab-backdrop {
+      925      position: fixed;
+
+● Update(~\Desktop\Neonfi\src\routes\(dashboard)\payments\+page.svelte)  ⎿  Removed 4 lines
+      987      background: var(--surface-2);
+      988    }
+      989  
+      990 -  .kebab-refund {                                             
+      991 -    color: var(--loss);                                       
+      992 -  }                                                           
+      993 -                                                              
+      990    /* ── Cancel dialog ────────────────────────────────────────
+           ──────────── */
+      991    .overlay {
+      992      position: fixed;
+
+● Delete the orphaned modal, then run svelte-check:
+
+● Bash(rm -f "/c/Users/pelum/Desktop/Neonfi/src/lib/components/modals/RefundConf
+      irmModal.svelte" && echo "deleted RefundConfirmModal.svelte" && echo "===
+      residual refu…)
+  ⎿  deleted RefundConfirmModal.svelte
+     === residual refund modal/isEligible refs ===
+     (none)
+     … +8 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to C:\Users\pelum\Desktop\neonfi-backend
+
+● svelte-check clean (0/0). No residual refs. Committing the refund changes —
+  backend first:
+
+● Bash(git add src/lib/constants.ts src/modules/payments/payments.dto.ts
+      src/modules/subscriptions/subscriptions.service.ts
+      tests/subscriptions.test.ts && git status -…)
+  ⎿  warning: in the working copy of 'src/lib/constants.ts', LF will be rep
+     laced by CRLF the next time Git touches it
+     warning: in the working copy of 'src/modules/payments/payments.dto.ts'
+     … +13 lines (ctrl+o to expand)
+
+● Now the frontend refund consolidation commit:
+
+● Bash(cd /c/Users/pelum/Desktop/Neonfi && git add
+      "src/routes/(dashboard)/payments/+page.svelte"
+      "src/lib/components/modals/RefundConfirmModal.svelte" && git status -…)
+  ⎿  warning: in the working copy of 'src/routes/(dashboard)/payments/+page
+     .svelte', LF will be replaced by CRLF the next time Git touches it
+     D  src/lib/components/modals/RefundConfirmModal.svelte
+     … +4 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to C:\Users\pelum\Desktop\neonfi-backend
+
+● Batch 2 is complete (4 commits: mock-auth, rate limiting, refund backend,
+  refund frontend). Before checkpointing into Batch 3, let me run the full 
+  backend suite to validate Batches 1–2 holistically (I changed shared files
+  like envelope.ts and app.ts).
+
+● Bash(npx vitest run 2>&1 | tail -25)
+  ⎿  Running in the background (↓ to manage)
+
+● The full suite is running in the background (500+ tests against Neon — takes a
+  few minutes). I'll wait for it to complete before reporting the Batch 2
+  checkpoint, so I can confirm everything is green holistically.
+
+● Bash(sleep 1; echo "waiting for full suite (bgf795rtp)...")
+  ⎿  waiting for full suite (bgf795rtp)...
+
+● Batch 2 is fully committed. I've kicked off the full backend suite to validate
+  Batches 1–2 together; it's running in the background and I'll be notified
+  when it finishes.
+
+  Progress so far — branch audit-remediation in both repos (nothing pushed):
+
+  ┌─────┬───────────────────────────────────────────────┬─────────┬──────────┐
+  │  #  │                     Batch                     │ Commit  │   Repo   │
+  ├─────┼───────────────────────────────────────────────┼─────────┼──────────┤
+  │ 1   │ CRITICAL Moralis idempotency + confirmed-only │ ac17b41 │ backend  │
+  │     │  + tests                                      │         │          │
+  ├─────┼───────────────────────────────────────────────┼─────────┼──────────┤
+  │ 2   │ Mock-auth bypass removed                      │ adbd939 │ frontend │
+  ├─────┼───────────────────────────────────────────────┼─────────┼──────────┤
+  │ 2   │ Global per-IP rate limiting + err().details   │ fdd7f67 │ backend  │
+  ├─────┼───────────────────────────────────────────────┼─────────┼──────────┤
+  │ 2   │ Refund: revoke Pro at period-end +            │ a85233f │ backend  │
+  │     │ concurrency safety + tests                    │         │          │
+  ├─────┼───────────────────────────────────────────────┼─────────┼──────────┤
+  │ 2   │ Refund UI consolidated to one server-driven   │ 81419e3 │ frontend │
+  │     │ entry point                                   │         │          │
+  └─────┴───────────────────────────────────────────────┴─────────┴──────────┘
+
+  All affected suites passed at each step (moralis 22/22,
+  auth+webhooks+rate-limit 59/59, subscriptions+payments 50/50, svelte-check
+  0/0).
+
+  Once the full suite result lands, I'll report it and then checkpoint on Batch 
+  3 (Security medium/low) — which leads with items the plan explicitly routes to
+  you for a decision: CSP/security-headers placement (in-app kit.csp vs 
+  nginx.conf) and the img-src/connect-src allowlist (your action item), plus the
+  CSRF mechanism choice and refresh-token-rotation scope (auth/request-contract
+  changes). I'll lay out which Batch 3 items I can do immediately without input
+  vs. which need your call.
+
+✻ Baked for 31m 38s
+
+● Background command "Run full backend test suite" completed (exit code 0)
+
+● Full suite finished (exit 0). Let me read the result tail to confirm counts.
+
+  Read 1 file (ctrl+o to expand)
+
+● Full suite: 721 passed, 2 failed, 1 skipped. Both failures are in ws.test.ts
+  (an unexpected price_update frame). My memory notes flag this exact file as a
+  known firehose/pub-sub pollution flake. Let me confirm the two failures and
+  whether they're related to my changes or the documented flake.
+
+● Bash(f="C:/Users/pelum/AppData/Local/Temp/claude/C--Users-pelum-Desktop-neonfi
+      -backend/f21a7ade-91f3-4216-b575-de1eb9db8c3e/tasks/bgf795rtp.output";
+      echo "=== FAIL l…)
+  ⎿  === FAIL lines ===
+
+     === test names around failures ===
+     7:+     "type": "price_update",
+
+● Bash(f="C:/Users/pelum/AppData/Local/Temp/claude/C--Users-pelum-Desktop-neonfi
+      -backend/f21a7ade-91f3-4216-b575-de1eb9db8c3e/tasks/bgf795rtp.output";
+      grep -nE "✓|✗|×|…)
+  ⎿  11: ❯ tests/ws.test.ts:412:18
+     === raw context around first failure marker ===
+     11: ❯ tests/ws.test.ts:412:18
+
+● Output captured only the failure tail. The signature (unexpected price_update
+  frame) matches the documented ws.test.ts firehose/pub-sub flake — and none of
+  my changes touch WS broadcasting or price publishing. The reliable check: run
+  ws.test.ts in isolation (the memory notes it passes alone).
+
+● Bash(npx vitest run tests/ws.test.ts 2>&1 | tail -12)
+  ⎿      412|   expect(frames).toEqual([]); // no error frame, no echo — no
+     thing cam…
+            |                  ^
+     … +10 lines (ctrl+o to expand)
+
+● It fails in isolation too (2 failed / 10 passed) — so it's not the cross-file
+  flake. The signature is still "unexpected price_update frame," which means
+  something is actively publishing price:* to the shared Redis pub/sub. The
+  memory repeatedly warns to kill the backend dev server before the suite. Let
+  me check whether a dev server / price feed is running and polluting Redis.
+
+● Bash(echo "=== node/tsx processes ==="; tasklist //FI "IMAGENAME eq node.exe"
+      2>/dev/null | head -20; echo "=== port 3000 (dev server) ==="; netstat
+      -ano 2>/dev/null…)  ⎿  === node/tsx processes ===
+
+     Image Name                     PID Session Name        Session#    Mem
+     … +22 lines (ctrl+o to expand)
+
+● Found it: a backend dev server is running (PID 79400 on :3000) and actively
+  publishing 1461 price:* keys to Redis db0. Its price firehose broadcasts
+  price_update over the global Redis pub/sub, which ws.test receives — the exact
+  failure. My changes touch no WS/price code, so this is the documented
+  environmental pollution, not a regression. Per the project's standard practice
+  (memory: "kill backend dev before full-suite"), let me stop it and re-run
+  ws.test to prove clean.
+
+● Bash(taskkill //PID 79400 //T //F 2>&1 | head; sleep 2; echo "=== port 3000
+      after kill ==="; netstat -ano 2>/dev/null | grep -E ":3000\b" | head ||
+      echo "(port 3000…)
+  ⎿  SUCCESS: The process with PID 79776 (child process of PID 79400) has b
+     een terminated.
+     SUCCESS: The process with PID 79400 (child process of PID 63148) has b
+     … +2 lines (ctrl+o to expand)
+
+● Dev server killed, port 3000 free. Let me verify it doesn't auto-respawn and
+  re-run ws.test:
+
+● Bash(sleep 3; echo "=== port 3000 ==="; netstat -ano 2>/dev/null | grep -E
+      ":3000\b" || echo "(free)"; echo "=== re-run ws.test.ts ==="; npx vitest
+      run tests/ws.test…)
+  ⎿  === port 3000 ===
+     (free)
+     === re-run ws.test.ts ===
+     … +6 lines (ctrl+o to expand)
+
+● Proven clean: with the dev server stopped, ws.test.ts passes 12/12. The 2
+  full-suite failures were entirely the running dev server's price firehose
+  polluting Redis pub/sub — not my changes. So Batches 1–2 are green:
+  effectively 723 passed / 1 skipped (the #300 TimescaleDB skip). I killed the
+  dev server (PID 79400) and left it stopped (standard practice before the
+  suite); you can restart it with npm run dev.
+
+  Batch 2 is complete and verified. Now into Batch 3 (Security medium/low). I'll
+  do the safe, no-decision items now and checkpoint for the ones that need your
+  call (CSP placement/allowlist, CSRF mechanism, refresh-token rotation). Let
+  me read the files for the safe items.
+
+  Read 1 file (ctrl+o to expand)
+
+● verifyAccessToken doesn't pin algorithms. Let me pin it, then read the users
+  schema for the avatarUrl drop (and check tests).
+
+● Update(src\lib\jwt.ts)
+  ⎿  Added 4 lines, removed 1 line
+      44  export async function verifyAccessToken(
+      45    token: string,
+      46  ): Promise<AccessTokenPayload> {
+      47 -  const { payload } = await jwtVerify<AccessTokenPayload>(token
+         -, secret);                                                     
+      47 +  // Pin the accepted algorithm (audit SEC, JWT alg pinning). W
+         +ithout `algorithms`, jose accepts                              
+      48 +  // whatever symmetric alg the token header claims — never let
+         + a token dictate its own verification                          
+      49 +  // algorithm. We only ever sign HS256, so verification must o
+         +nly accept HS256.                                              
+      50 +  const { payload } = await jwtVerify<AccessTokenPayload>(token
+         +, secret, { algorithms: ['HS256'] });                          
+      51    return payload;
+      52  }
+      53  
+
+  Read 1 file (ctrl+o to expand)
+
+● Now check whether the users service/tests use avatarUrl in PATCH before
+  dropping it:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● avatarUrl via PATCH is exercised by tests 40, 41, 48. Decision 5 drops it
+  entirely (avatars are managed by the dedicated POST/DELETE /me/avatar
+  endpoints). Let me read those tests to update them to assert rejection.
+
+  Read 1 file (ctrl+o to expand)
+
+● Let me check test 43 (multi-field) and test 48 for avatarUrl usage:
+
+  Read 1 file (ctrl+o to expand)
+
+● Test 48 still passes (any avatarUrl → 400 VALIDATION_ERROR via .strict());
+  only 40 and 41 need updating. Dropping avatarUrl from the schema:
+
+● Update(src\modules\users\users.schemas.ts)
+  ⎿  Added 2 lines
+       5  // must NOT be accepted from clients:
+       6  //   email             — change requires re-verification + sess
+          ion re-issue (doc-fix item)
+       7  //   password          — change is deferred (see stage-2.md §1.
+          1)
+       8 +//   avatarUrl         — server-managed via POST/DELETE /users/
+         +me/avatar only (retrofit-90);                                  
+       9 +//                       a client must never set an arbitrary a
+         +vatar URL here (audit SEC #4/#23)                              
+      10  //   plan/billingCycle — server-managed via Subscription (Stage
+           3)
+      11  //   onboardingStatus  — server-managed lifecycle
+      12  //   authProvider      — immutable after registration
+
+● Update(src\modules\users\users.schemas.ts)
+  ⎿  Added 1 line, removed 7 lines
+      23        .max(100)
+      24        .nullable()
+      25        .optional(),
+      26 -    avatarUrl: z                                               
+      27 -      .string()                                                
+      28 -      .url('avatarUrl must be a valid URL')                    
+      29 -      .max(2048)                                               
+      30 -      .nullable()                                              
+      31 -      .optional(),                                             
+      26      newsletterSubscribed: z.boolean().optional(),
+      27    })
+      34 -  .strict(); // unknown fields → 400 VALIDATION_ERROR          
+      28 +  .strict(); // unknown fields (incl. avatarUrl) → 400 VALIDATI
+         +ON_ERROR                                                       
+      29  
+      30  export type PatchMeBody = z.infer<typeof PatchMeSchema>;
+      31  
+
+● Now update tests 40 and 41 to assert the new rejection contract:
+
+● Update(tests\users.test.ts)
+  ⎿  Added 13 lines, removed 20 lines
+      293  });
+      294  
+      295  // -----------------------------------------------------------
+           ----------------
+      296 -// 40. PATCH /users/me — update avatarUrl                     
+      296 +// 40. PATCH /users/me — avatarUrl is rejected (managed via PO
+          +ST /me/avatar only)                                           
+      297  // -----------------------------------------------------------
+           ----------------
+      298  
+      299 -it('40: PATCH /users/me updates avatarUrl in response and DB',
+          - async () => {                                                
+      299 +it('40: PATCH /users/me rejects avatarUrl (avatars are set via
+          + POST /me/avatar, audit SEC #4/#23)', async () => {           
+      300    const sessionCookie = await registerAndLogin();
+      301 -  const url = 'https://example.com/avatar.png';               
+      301  
+      303 -  const res = await patch('/me', { avatarUrl: url }, sessionCo
+          -okie);                                                        
+      304 -  expect(res.status).toBe(200);                               
+      302 +  const res = await patch('/me', { avatarUrl: 'https://example
+          +.com/avatar.png' }, sessionCookie);                           
+      303 +  expect(res.status).toBe(400);                               
+      304  
+      306 -  const json = await res.json() as { data: { user: Record<stri
+          -ng, unknown> } };                                             
+      307 -  expect(json.data.user.avatarUrl).toBe(url);                 
+      305 +  const json = await res.json() as { error: { code: string } }
+          +;                                                             
+      306 +  expect(json.error.code).toBe('VALIDATION_ERROR');           
+      307  
+      308 +  // The avatar was NOT set via this path.                    
+      309    const dbUser = await prisma.user.findUniqueOrThrow({ where: 
+           { email: TEST_EMAIL } });
+      310 -  expect(dbUser.avatarUrl).toBe(url);                         
+      310 +  expect(dbUser.avatarUrl).toBeNull();                        
+      311  });
+      312  
+      313  // -----------------------------------------------------------
+           ----------------
+      314 -// 41. PATCH /users/me — avatarUrl: null clears the field     
+      314 +// 41. PATCH /users/me — avatarUrl:null also rejected (clear v
+          +ia DELETE /me/avatar)                                         
+      315  // -----------------------------------------------------------
+           ----------------
+      316  
+      317 -it('41: PATCH /users/me with avatarUrl:null clears the field',
+          - async () => {                                                
+      317 +it('41: PATCH /users/me rejects avatarUrl:null too (clearing i
+          +s via DELETE /me/avatar)', async () => {                      
+      318    const sessionCookie = await registerAndLogin();
+      319  
+      320 -  // Set it first                                             
+      321 -  await patch('/me', { avatarUrl: 'https://example.com/avatar.
+          -png' }, sessionCookie);                                       
+      322 -                                                              
+      323 -  // Now clear it                                             
+      320    const res = await patch('/me', { avatarUrl: null }, sessionC
+           ookie);
+      325 -  expect(res.status).toBe(200);                               
+      321 +  expect(res.status).toBe(400);                               
+      322  
+      327 -  const json = await res.json() as { data: { user: Record<stri
+          -ng, unknown> } };                                             
+      328 -  expect(json.data.user.avatarUrl).toBeNull();                
+      329 -                                                              
+      330 -  const dbUser = await prisma.user.findUniqueOrThrow({ where: 
+          -{ email: TEST_EMAIL } });                                     
+      331 -  expect(dbUser.avatarUrl).toBeNull();                        
+      323 +  const json = await res.json() as { error: { code: string } }
+          +;                                                             
+      324 +  expect(json.error.code).toBe('VALIDATION_ERROR');           
+      325  });
+      326  
+      327  // -----------------------------------------------------------
+           ----------------
+
+● Note: the plan routes security-header placement (in-app vs nginx) to you
+  explicitly, so I'll defer headers/CSP. The clearly-safe, no-decision items
+  remaining are error-lockdown and deleting the FE .env creds. Adding
+  DEBUG_ERRORS config + locking down onError:
+
+● Update(src\lib\config.ts)
+  ⎿  Added 10 lines
+      175      RATE_LIMIT_AUTH_MAX: z.coerce.number().int().min(1).defaul
+           t(30),
+      176      RATE_LIMIT_SENSITIVE_MAX: z.coerce.number().int().min(1).d
+           efault(12),
+      177  
+      178 +    // --- Error verbosity (audit SEC error lockdown) ---     
+      179 +    // When true, the global error handler returns the real er
+          +ror message — DEBUGGING ONLY.                                 
+      180 +    // Default false so production never leaks internal error 
+          +text. Deliberately NOT keyed on                               
+      181 +    // NODE_ENV: a mis-set NODE_ENV must not be able to expose
+          + internals. Explicit-transform                                
+      182 +    // boolean (Boolean("false") === true would never disable)
+          +.                                                             
+      183 +    DEBUG_ERRORS: z                                           
+      184 +      .string()                                               
+      185 +      .transform((v) => v === 'true')                         
+      186 +      .default('false'),                                      
+      187 +                                                              
+      188      // --- Token metadata sync (Stage 9B) ---
+      189      // NOTE: deliberately NOT z.coerce.boolean() — Boolean("fa
+           lse") === true in JS,
+      190      // so "false" would NOT disable. Stage 13 caught the same 
+           bug for SNAPSHOT_ENABLED;
+
+● Update(src\app.ts)  ⎿  Added 1 line, removed 1 line
+       9  //   POST /api/v1/auth/*   — Stage 1A email auth flows
+      10  
+      11  import { Hono } from 'hono';
+      12 -import { config, isProduction } from './lib/config.js';        
+      12 +import { config } from './lib/config.js';                      
+      13  import { checkHealth } from './lib/health.js';
+      14  import { err, ok } from './lib/envelope.js';
+      15  import { rateLimit } from './lib/rate-limit.js';
+
+● Update(src\app.ts)
+  ⎿  Added 3 lines, removed 1 line
+       97    app.notFound((c) => c.json(err('NOT_FOUND', 'Resource not fo
+           und'), 404));
+       98    app.onError((e, c) => {
+       99      console.error('[error]', e);
+      100 -    const message = isProduction ? 'Internal server error' : e
+          -.message;                                                     
+      100 +    // Never leak internal error text by default. Verbose mess
+          +ages only with an explicit                                    
+      101 +    // DEBUG_ERRORS=true opt-in — NOT keyed on NODE_ENV (audit
+          + SEC error lockdown).                                         
+      102 +    const message = config.DEBUG_ERRORS ? e.message : 'Interna
+          +l server error';                                              
+      103      return c.json(err('INTERNAL_ERROR', message), 500);
+      104    });
+      105  
+
+● Now delete the live Neon credentials from the frontend .env (SEC #37 — the CC
+  action item; you still need to rotate the credential in Neon):
+
+● Update(~\Desktop\Neonfi\.env)
+  ⎿  Added 1 line, removed 4 lines
+      1  VITE_API_URL=
+      2 -VITE_WS_URL=                                                    
+      3 -                                                                
+      4 -DATABASE_URL=postgresql://neondb_owner:npg_wqJ6gfNntkR0@ep-squar
+        -e-sea-apc8xcng-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode
+        -=require&channel_binding=require                                
+      5 -DIRECT_URL=postgresql://neondb_owner:npg_wqJ6gfNntkR0@ep-square-
+        -sea-apc8xcng.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require&
+        -channel_binding=require                                         
+      2   No newline at end of file
+      3 +VITE_WS_URL=                                                    
+      4   No newline at end of file
+
+● Now verify: typecheck, singletons, and the affected suites (users for
+  avatarUrl, auth for the JWT pin):
+
+● Bash(echo "=== typecheck ===" && npm run typecheck 2>&1 | tail -6 && echo "===
+      singletons ===" && npm run check:singletons 2>&1 | tail -2 && echo "===
+      users + auth s…)
+  ⎿  === typecheck ===
+
+     > neonfi-backend@0.0.1 typecheck
+     … +17 lines (ctrl+o to expand)
+
+● Green — 75 passed. Committing Batch 3's safe items (JWT alg pin, error
+  lockdown, avatarUrl drop):
+
+● Bash(git add src/lib/jwt.ts src/lib/config.ts src/app.ts
+      src/modules/users/users.schemas.ts tests/users.test.ts && git status
+      --short | grep -vE "^\?\?" && echo "---…)
+  ⎿  warning: in the working copy of 'src/app.ts', LF will be replaced by C
+     RLF the next time Git touches it
+     warning: in the working copy of 'src/lib/jwt.ts', LF will be replaced
+     … +13 lines (ctrl+o to expand)
+
+● Committed (e56ea4b). I've now reached the Batch 3 items that genuinely need
+  your decisions (the plan routes these to you). Here's the state and what I
+  need from you.
+
+  Progress — branch audit-remediation in both repos (nothing pushed)
+
+  Backend: ac17b41 (Batch 1 critical Moralis) · fdd7f67 (rate limiting) ·
+  a85233f (refund revoke) · e56ea4b (JWT pin + error lockdown + avatarUrl drop)
+  Frontend: adbd939 (mock-auth removed) · 81419e3 (refund UI consolidated)
+  Local-only (gitignored .env): removed VITE_MOCK_AUTH and the live Neon
+  DATABASE_URL/DIRECT_URL.
+
+  Full backend suite verified green (723 pass / 1 skip; the 2 earlier ws.test
+  failures were your running dev server polluting Redis pub/sub — proven by
+  ws.test passing 12/12 once stopped). svelte-check 0/0.
+
+  Batch 3 remaining — needs your call
+
+  I've done the no-decision items (JWT pin, error lockdown, avatarUrl drop). The
+  rest of Batch 3 hits points the plan explicitly reserves for you:
+
+  - Security headers + CSP — your action item: where do they live (in-app Hono
+  middleware vs nginx.conf), and the CSP img-src/connect-src allowlist needs
+  confirming.
+  - Refresh-token rotation + reuse detection — a larger auth-flow change; worth
+  confirming you want it in this pass.
+  - CSRF, per-IP lockout + dummy-hash timing fix, webhook hardening (bodyLimit +
+  Moralis Zod + BigInt guards) — I can do these now without further input if
+  you want.
+
+  ⚠️ Reminder: rotate the Neon credential — it sat in Neonfi/.env (I deleted the
+  two lines locally, but it should be considered compromised).
+
+● User answered Claude's questions:
+  ⎿  · Where should the security headers + CSP live? → In-app (Hono middleware)
+     · Implement refresh-token rotation + reuse detection now? → Implement now
+     · Proceed now with the remaining no-input Batch 3 items? → Proceed with all
+
+● All three answered: headers in-app (Hono), refresh rotation now, proceed with 
+  all remaining. I'll implement these as verified sub-commits. Starting with
+  security headers.
+
+  Note: since the backend is a JSON API (serves no HTML/scripts), I'll use a
+  strict default-src 'none' CSP there (needs no host allowlist and is stronger
+  than a permissive one) — the img-src/connect-src allowlist only matters for
+  the SvelteKit frontend, which I'll flag as a follow-up.
+
+● Write(src\lib\security-headers.ts)
+  ⎿  Wrote 28 lines to src\lib\security-headers.ts
+         on 7).nfi backend — security response headers (audit SEC, decisi
+       3 // The repo previously set no security headers. This middleware 
+       4 // The backend is a JSON API (it never serves HTML or scripts), 
+         so the CSP is locked all the way
+         from an API response — plusne'` — nothing should ever be loaded 
+         g) and nosniff (MIME sniffing).-Frame-Options: DENY (clickjackin
+       7 // HSTS is production-only (it only makes sense over HTTPS and w
+       8 //ld be wrong on a local http host).
+         Stripe, Moralis/IPFS) belongs on allowlist (images.neonfi.live, 
+      10 // the SvelteKit FRONTEND CSP (kit.cs
+     … +28 lines (ctrl+o to expand)
+
+● Mount it in app.ts:
+
+● Update(src\app.ts)
+  ⎿  Added 1 line
+      13  import { checkHealth } from './lib/health.js';
+      14  import { err, ok } from './lib/envelope.js';
+      15  import { rateLimit } from './lib/rate-limit.js';
+      16 +import { securityHeaders } from './lib/security-headers.js';   
+      17  import { authRouter } from './modules/auth/auth.controller.js';
+      18  import { usersRouter } from './modules/users/users.controller.j
+          s';
+      19  import { subscriptionsRouter } from './modules/subscriptions/su
+          bscriptions.controller.js';
+
+● Update(src\app.ts)
+  ⎿  Added 3 lines
+      34  export function createApp(): Hono {
+      35    const app = new Hono();
+      36  
+      37 +  // Security response headers on every response (audit SEC, de
+         +cision 7).                                                     
+      38 +  app.use('*', securityHeaders());                             
+      39 +                                                               
+      40    // Health check (not under /api/v1 — Coolify polls it directl
+          y)
+      41    app.get('/health', async (c) => {
+      42      const health = await checkHealth();
+
+● Now CSRF protection (Origin/Referer allowlist on cookie-authed writes, gated
+  off in tests). Adding config + the middleware:
+
+● Update(src\lib\config.ts)
+  ⎿  Added 10 lines
+      175      RATE_LIMIT_AUTH_MAX: z.coerce.number().int().min(1).defaul
+           t(30),
+      176      RATE_LIMIT_SENSITIVE_MAX: z.coerce.number().int().min(1).d
+           efault(12),
+      177  
+      178 +    // --- CSRF protection (audit SEC, decision 7) ---        
+      179 +    // Origin/Referer allowlist on cookie-authed state-changin
+          +g requests. Gated off when                                    
+      180 +    // NODE_ENV=test. CSRF_ALLOWED_ORIGINS is an optional comm
+          +a-separated list ADDED to the                                 
+      181 +    // implicit allowlist (APP_BASE_URL + API_BASE_URL origins
+          +). Explicit-transform boolean.                                
+      182 +    CSRF_ENABLED: z                                           
+      183 +      .string()                                               
+      184 +      .transform((v) => v === 'true')                         
+      185 +      .default('true'),                                       
+      186 +    CSRF_ALLOWED_ORIGINS: z.string().optional(),              
+      187 +                                                              
+      188      // --- Error verbosity (audit SEC error lockdown) ---
+      189      // When true, the global error handler returns the real er
+           ror message — DEBUGGING ONLY.
+      190      // Default false so production never leaks internal error 
+           text. Deliberately NOT keyed on
+
+● Write(src\lib\csrf.ts)
+  ⎿  Wrote 69 lines to src\lib\csrf.ts
+       2 // Neonfi backend — CSRF protection (audit SEC, decision 7).
+         s exposed to cross-site requestookies (session/refresh), so it i
+       4 // forgery: a malicious page could trigger a state-changing requ
+       5 // cookies. Browsers ALWAYS attach an Origin header to cross-ori
+         gin state-changing fetches/forms, so
+         he browser CSRF vector with zero(with Referer fallback) blocks t
+         er-initiated cross-site requests no Origin/Referer are not brows
+       8 // (server-to-server, curl, native apps) and are allowed.
+      10 // Only mutating methods are guarded. Signature-verified webhook
+         s (Stripe/
+     … +69 lines (ctrl+o to expand)
+
+● Mount CSRF in app.ts:
+
+● Update(src\app.ts)
+  ⎿  Added 1 line
+      14  import { err, ok } from './lib/envelope.js';
+      15  import { rateLimit } from './lib/rate-limit.js';
+      16  import { securityHeaders } from './lib/security-headers.js';
+      17 +import { csrfProtection } from './lib/csrf.js';                
+      18  import { authRouter } from './modules/auth/auth.controller.js';
+      19  import { usersRouter } from './modules/users/users.controller.j
+          s';
+      20  import { subscriptionsRouter } from './modules/subscriptions/su
+          bscriptions.controller.js';
+
+● Update(src\app.ts)  ⎿  Added 6 lines
+      50    // API v1
+      51    const api = new Hono();
+      52  
+      53 +  // CSRF protection on cookie-authed state-changing requests (
+         +audit SEC, decision 7). Webhooks                               
+      54 +  // are signature-verified and arrive without a browser Origin
+         + — skip them. No-ops in tests.                                 
+      55 +  api.use('*', csrfProtection({                                
+      56 +    skip: (c) => c.req.path.startsWith('/api/v1/webhooks'),    
+      57 +  }));                                                         
+      58 +                                                               
+      59    // Global IP rate limiting (audit SEC #27). Registered before
+           the routes so it runs first.
+      60    // No-ops when NODE_ENV=test or RATE_LIMIT_ENABLED=false. Web
+          hooks are excluded (signature-
+      61    // verified + idempotent; they arrive from provider IPs in bu
+          rsts).
+
+● Now small tests for both (security headers via the real app; CSRF via mocked
+  config since it's test-gated):
+
+● Write(tests\security-headers.test.ts)
+  ⎿  Wrote 13 lines to tests\security-headers.test.ts
+         on 7).nfi backend — security response headers (audit SEC, decisi
+       2 import { it, expect } from 'vitest';
+       3 import { app } from '../src/app.js';
+       5 it('sets security headers on API responses', async () => {
+       6   const res = await app.request('/api/v1/_ping');
+       7   expect(res.status).toBe(200);
+       9   expect(res.headers.get('x-content-type-options')).toBe('nosnif
+         f');
+      10   expect(res.headers.get('referrer-policy')).toBe('strict-origin
+         -when-cross-origin');
+     … +7 lines (ctrl+o to expand)
+
+● Write(tests\csrf.test.ts)
+  ⎿  Wrote 73 lines to tests\csrf.test.ts
+         on 7).nfi backend — CSRF middleware unit test (audit SEC, decisi
+       2 // Gated off when NODE_ENV=test, so we mock config to force it O
+         N.
+       3 import { it, expect, describe, vi } from 'vitest';
+       4 import type { Context } from 'hono';
+       6 vi.mock('../src/lib/config.js', () => ({
+       7   config: {
+       8     CSRF_ENABLED: true,
+       9     APP_BASE_URL: 'https://app.neonfi.live',
+      10     API_BASE_URL: 'https://api.neonfi.live',
+     … +75 lines (ctrl+o to expand)
+
+● Verify security headers + CSRF: typecheck, singletons, the two new unit tests,
+  plus the portfolios suite (lots of mutating requests — confirms CSRF is
+  correctly gated off in tests and headers don't break responses).
+
+● Bash(echo "=== typecheck ===" && npm run typecheck 2>&1 | tail -6 && echo "===
+      singletons ===" && npm run check:singletons 2>&1 | tail -2 && echo "===
+      security-heade…)
+  ⎿  === typecheck ===
+
+     > neonfi-backend@0.0.1 typecheck
+     … +16 lines (ctrl+o to expand)
+
+● Green — 51 passed (csrf 5, security-headers 1, portfolios 45; CSRF correctly
+  no-ops in tests, headers present). Committing security headers + CSRF:
+
+● Bash(git add src/lib/security-headers.ts src/lib/csrf.ts src/lib/config.ts
+      src/app.ts tests/security-headers.test.ts tests/csrf.test.ts && git status
+      --short | grep…)
+  ⎿  warning: in the working copy of 'src/app.ts', LF will be replaced by C
+     RLF the next time Git touches it
+     warning: in the working copy of 'src/lib/csrf.ts', LF will be replaced
+     … +16 lines (ctrl+o to expand)
+
+● Committed (8609e98). Next: per-IP login lockout dimension + dummy-hash timing 
+  equalization. Let me read the lockout lib and the login flow.
+
+  Read 1 file (ctrl+o to expand)
+
+● Now the login flow in auth.service.ts (how lockout + password compare are
+  used):
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● I have the login flow (it already receives ip). I'll add the dummy-hash timing
+  fix and a per-(email,IP) + per-IP lockout dimension. First let me check how
+  the test harness clears lockout keys and how the existing lockout tests
+  behave, to avoid breaking them.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● clearRedisAuthKeys clears lockout:login:* (so new sub-keys reset between
+  tests), and tests 5/7 assert the exact lockout:login:<email> key — those need
+  updating for the new per-(email,IP) keying. Let me read those tests precisely.
+
+  Read 1 file (ctrl+o to expand)
+
+● Test 6 reads json.meta.retryAfterMs (top-level meta) — I'll leave that
+  location untouched (the "move to error.details" is a separate finding, not
+  decision 7). Tests 5/7 read the exact lockout key, which changes with
+  per-(email,IP) keying. Let me confirm TEST_EMAIL and that tests send no IP.
+
+● Bash(echo "=== TEST_EMAIL def ==="; grep -n "TEST_EMAIL\s*="
+      /c/Users/pelum/Desktop/neonfi-backend/tests/auth.test.ts | head -3; echo
+      "=== post helper (headers) ==="…)
+  ⎿  === TEST_EMAIL def ===
+     80:const TEST_EMAIL = 'integration@neonfi.test';
+     === post helper (headers) ===
+     … +19 lines (ctrl+o to expand)
+
+● TEST_EMAIL='integration@neonfi.test' (lowercase), tests send no IP (→
+  unknown). Let me confirm lockout functions have no other callers before
+  changing their signature.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Only auth.service uses them. Rewriting lockout.ts to be subject-based with
+  per-(email,IP) and per-IP subjects:
+
+● Write(src\lib\lockout.ts)
+  ⎿  Added 30 lines, removed 16 lines
+       1 -// Account-lockout helpers (Build Guide §6.9 / Appendix item 10
+         -).                                                             
+       1 +// Account-lockout helpers (Build Guide §6.9 / Appendix item 10
+         +; audit SEC per-IP dimension).                                 
+       2  //
+       3  // State lives in Redis only — no DB writes.
+       4 -// Key: `lockout:login:<lowercased-email>` → integer counter.  
+       5 -// TTL is AUTH_LOGIN_LOCKOUT_MS (milliseconds), set on the FIRS
+         -T failure and                                                  
+       6 -// NOT extended on subsequent failures within the same window. 
+         - This means the                                                
+       7 -// lockout expires from the first bad attempt, not the most rec
+         -ent one — a                                                    
+       8 -// deliberate MVP choice; rotation can be added later.         
+       4 +// Key: `lockout:login:<subject>` → integer counter, where <sub
+         +ject> is one of:                                               
+       5 +//   - emailIpSubject(email, ip) → `<lowercased-email>|<ip>` — 
+         +per (account, IP). Caps brute force                            
+       6 +//     on ONE account WITHOUT letting an attacker lock the vict
+         +im out from a different IP (so the                             
+       7 +//     per-email lockout can't be weaponized as a targeted DoS)
+         +.                                                              
+       8 +//   - ipSubject(ip)            → `ip|<ip>`                 — p
+         +er IP across all accounts; catches one                         
+       9 +//     IP spraying many accounts.                              
+      10 +// TTL is AUTH_LOGIN_LOCKOUT_MS, set on the FIRST failure and N
+         +OT extended on subsequent failures                             
+      11 +// within the same window (expires from the first bad attempt —
+         + a deliberate MVP choice).                                     
+      12  
+      13  import { redis } from './redis.js';
+      14  import { config } from './config.js';
+      15  
+      13 -function key(email: string): string {                          
+      14 -  return `lockout:login:${email.toLowerCase()}`;               
+      16 +function key(subject: string): string {                        
+      17 +  return `lockout:login:${subject}`;                           
+      18  }
+      19  
+      17 -/** Increment the failure counter; sets TTL on first failure.  
+         -Returns the new count. */                                      
+      18 -export async function recordFailedLogin(email: string): Promise
+         -<number> {                                                     
+      19 -  const k = key(email);                                        
+      20 +export function emailIpSubject(email: string, ip: string | null
+         +): string {                                                    
+      21 +  return `${email.toLowerCase()}|${ip ?? 'unknown'}`;          
+      22 +}                                                              
+      23 +                                                               
+      24 +export function ipSubject(ip: string | null): string {         
+      25 +  return `ip|${ip ?? 'unknown'}`;                              
+      26 +}                                                              
+      27 +                                                               
+      28 +/** Increment the failure counter for `subject`; sets TTL on fi
+         +rst failure. Returns the new count. */                         
+      29 +export async function recordFailedLogin(subject: string): Promi
+         +se<number> {                                                   
+      30 +  const k = key(subject);                                      
+      31    const count = await redis.incr(k);
+      32    if (count === 1) {
+      33      // First failure — set the lockout window starting now.
+     ...
+      36    return count;
+      37  }
+      38  
+      28 -export async function clearLockout(email: string): Promise<void
+         -> {                                                            
+      29 -  await redis.del(key(email));                                 
+      39 +export async function clearLockout(subject: string): Promise<vo
+         +id> {                                                          
+      40 +  await redis.del(key(subject));                               
+      41  }
+      42  
+      43  export interface LockoutState {
+     ...
+      47    ttlMs: number;
+      48  }
+      49  
+      39 -export async function getLockoutState(email: string): Promise<L
+         -ockoutState> {                                                 
+      40 -  const k = key(email);                                        
+      50 +export async function getLockoutState(                         
+      51 +  subject: string,                                             
+      52 +  maxAttempts: number = config.AUTH_LOGIN_MAX_ATTEMPTS,        
+      53 +): Promise<LockoutState> {                                     
+      54 +  const k = key(subject);                                      
+      55    const results = await redis.pipeline().get(k).pttl(k).exec();
+      56  
+      57    const countRaw = results?.[0]?.[1];
+     ...
+      61    const ttlMs = typeof ttlRaw === 'number' && ttlRaw > 0 ? ttlR
+          aw : 0;
+      62  
+      63    return {
+      50 -    locked: count >= config.AUTH_LOGIN_MAX_ATTEMPTS,           
+      64 +    locked: count >= maxAttempts,                              
+      65      count,
+      66      ttlMs,
+      67    };
+
+● Update(src\lib\config.ts)
+  ⎿  Added 3 lines
+      159      // Both are optional with sensible defaults; set them in .
+           env for production.
+      160      AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).de
+           fault(5),
+      161      AUTH_LOGIN_LOCKOUT_MS: z.coerce.number().int().min(1000).d
+           efault(900000),
+      162 +    // Coarser per-IP cap (audit SEC): one IP spraying many ac
+          +counts trips this. Generous vs the                            
+      163 +    // per-account limit so shared/NAT egress isn't falsely lo
+          +cked.                                                         
+      164 +    AUTH_LOGIN_IP_MAX_ATTEMPTS: z.coerce.number().int().min(1)
+          +.default(50),                                                 
+      165  
+      166      // --- Global IP rate limiting (audit SEC #27) ---
+      167      // Redis sliding-window per trusted client IP, mounted in 
+           app.ts. Gated off automatically
+● Now rewrite the login() flow in auth.service.ts (imports, dummy-hash helper,
+  two-dimension lockout + timing equalization):
+
+● Update(src\modules\auth\auth.service.ts)
+  ⎿  File must be read first
+
+  Read 1 file (ctrl+o to expand)
+
+● Your organization has disabled Claude subscription access for Claude Code ·
+  Use an Anthropic API key instead, or ask your admin to enable access
+
+✻ Cogitated for 18m 57s

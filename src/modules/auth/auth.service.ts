@@ -18,7 +18,13 @@ import { config, isProduction } from '../../lib/config.js';
 import { redis } from '../../lib/redis.js';
 import { signAccessToken } from '../../lib/jwt.js';
 import { hashPassword, verifyPassword } from '../../lib/password.js';
-import { recordFailedLogin, clearLockout, getLockoutState } from '../../lib/lockout.js';
+import {
+  recordFailedLogin,
+  clearLockout,
+  getLockoutState,
+  emailIpSubject,
+  ipSubject,
+} from '../../lib/lockout.js';
 import { parseDurationToMs } from '../../lib/duration.js';
 import { prisma } from '../../lib/prisma.js';
 import {
@@ -76,6 +82,18 @@ function makeRefreshToken(): { raw: string; hash: string } {
 
 function makeVerificationToken(): string {
   return randomBytes(32).toString('hex');
+}
+
+// Timing-attack defense: when the email is unknown (or a Google-only account
+// with no password), we still run a bcrypt compare against a fixed dummy hash so
+// the response time of "no such user" matches "wrong password". The dummy hash is
+// computed once and cached for the process lifetime.
+let dummyHashPromise: Promise<string> | null = null;
+function getDummyHash(): Promise<string> {
+  if (!dummyHashPromise) {
+    dummyHashPromise = hashPassword('neonfi-timing-equalizer-not-a-real-secret');
+  }
+  return dummyHashPromise;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,36 +160,42 @@ export async function login(
   ip: string | null,
   userAgent: string | null,
 ): Promise<{ user: UserDTO; accessToken: string; refreshToken: string }> {
-  // 1. Lockout check before any DB lookup (avoid leaking timing via DB query)
-  const lockout = await getLockoutState(body.email);
-  if (lockout.locked) {
+  // 1. Lockout check before any DB lookup (avoid leaking timing via DB query).
+  //    Two dimensions (audit SEC, per-IP):
+  //      - emailSub = (account, IP) — caps brute force on ONE account from ONE IP
+  //        WITHOUT letting an attacker lock the victim out from a different IP (so
+  //        the per-email lockout can't be weaponized as a targeted DoS).
+  //      - ipSub    = IP across all accounts — catches one IP spraying many accounts.
+  const emailSub = emailIpSubject(body.email, ip);
+  const ipSub = ipSubject(ip);
+  const [emailLockout, ipLockout] = await Promise.all([
+    getLockoutState(emailSub),
+    getLockoutState(ipSub, config.AUTH_LOGIN_IP_MAX_ATTEMPTS),
+  ]);
+  if (emailLockout.locked || ipLockout.locked) {
     throw new AuthError(423, 'ACCOUNT_LOCKED', 'Account temporarily locked due to too many failed attempts', {
-      retryAfterMs: lockout.ttlMs,
+      retryAfterMs: Math.max(emailLockout.ttlMs, ipLockout.ttlMs),
     });
   }
 
+  const recordFailure = () =>
+    Promise.all([recordFailedLogin(emailSub), recordFailedLogin(ipSub)]);
+
   // 2–3. Uniform error for "user not found" and "wrong password" to prevent
-  //      email enumeration attacks.
+  //      email enumeration. In both no-user and no-password (Google-only) cases we
+  //      still run a bcrypt compare against a dummy hash so response timing matches
+  //      the wrong-password path and can't be used to enumerate accounts.
   const user = await findUserByEmail(body.email);
-  if (!user) {
-    await recordFailedLogin(body.email);
+  const passwordHashToCheck = user?.passwordHash ?? (await getDummyHash());
+  const passwordOk = await verifyPassword(body.password, passwordHashToCheck);
+
+  if (!user || !user.passwordHash || !passwordOk) {
+    await recordFailure();
     throw new AuthError(401, 'INVALID_CREDENTIALS', 'Invalid email or password');
   }
 
-  if (!user.passwordHash) {
-    // Google-only account — no password set; treat same as wrong credentials.
-    await recordFailedLogin(body.email);
-    throw new AuthError(401, 'INVALID_CREDENTIALS', 'Invalid email or password');
-  }
-
-  const passwordOk = await verifyPassword(body.password, user.passwordHash);
-  if (!passwordOk) {
-    await recordFailedLogin(body.email);
-    throw new AuthError(401, 'INVALID_CREDENTIALS', 'Invalid email or password');
-  }
-
-  // 4. Successful auth — clear lockout counter.
-  await clearLockout(body.email);
+  // 4. Successful auth — clear both lockout counters.
+  await Promise.all([clearLockout(emailSub), clearLockout(ipSub)]);
 
   // 5. Create session
   const { raw: refreshToken, hash: refreshTokenHash } = makeRefreshToken();

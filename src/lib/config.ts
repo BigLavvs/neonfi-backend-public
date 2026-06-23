@@ -159,6 +159,9 @@ const schema = z
     // Both are optional with sensible defaults; set them in .env for production.
     AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
     AUTH_LOGIN_LOCKOUT_MS: z.coerce.number().int().min(1000).default(900000),
+    // Coarser per-IP cap (audit SEC): one IP spraying many accounts trips this. Generous vs the
+    // per-account limit so shared/NAT egress isn't falsely locked.
+    AUTH_LOGIN_IP_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(50),
 
     // --- Global IP rate limiting (audit SEC #27) ---
     // Redis sliding-window per trusted client IP, mounted in app.ts. Gated off automatically
