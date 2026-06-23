@@ -409,7 +409,12 @@ async function resolveExternalTxCount(
 // from the DB (the balances setConnectedBalancesFromSummary just wrote — cache-immune). This is
 // the value the chart's right edge is stitched to, so it equals the headline (no drift).
 async function currentConnectedValue(portfolioId: number): Promise<number> {
-  const assets = await prisma.asset.findMany({ where: { portfolioId }, include: { token: true } });
+  // perf #45: select only the two columns this sum needs (was `include: { token: true }`,
+  // pulling every Asset + Token column for a balance×price reduce).
+  const assets = await prisma.asset.findMany({
+    where: { portfolioId },
+    select: { balance: true, token: { select: { currentPrice: true } } },
+  });
   let total = 0;
   for (const a of assets) total += Number(a.balance.toString()) * Number(a.token.currentPrice.toString());
   return total;
@@ -701,22 +706,34 @@ async function buildConnectedCostMap(
   }
 
   const map: ConnectedCostMap = new Map();
+  // First pass: resolve tier 1/2 in memory; defer contracts that still need the catalog lookup.
+  const pending: Array<{ contract: string; avgCost: number | null; realized: number }> = [];
   for (const t of pnl.tokens) {
     const contract = t.contractAddress;
     if (!contract) continue;
     const hasInfo = t.avgCost != null || (t.realizedPnlUsd != null && Math.abs(t.realizedPnlUsd) > 1e-9);
     if (!hasInfo) continue;
-    let tokenId = heldByContract.get(contract) ?? existingByContract.get(contract);
-    if (tokenId == null) {
-      // tier 3: catalog by contract (no auto-list — we have no symbol from the scalar query).
-      const tok = await prisma.token.findFirst({
-        where: { contractAddress: { equals: contract, mode: 'insensitive' } },
-        select: { id: true },
-      });
-      if (tok) tokenId = tok.id;
+    const tokenId = heldByContract.get(contract) ?? existingByContract.get(contract);
+    const entry = { avgCost: t.avgCost, realized: t.realizedPnlUsd ?? 0 };
+    if (tokenId != null) map.set(tokenId, entry);
+    else pending.push({ contract, ...entry });
+  }
+
+  // tier 3 (perf #27/#39): ONE findMany for every still-unresolved contract instead of a
+  // findFirst per token inside the loop. Catalog EVM contracts are stored lower-cased (same
+  // assumption tier 2 above keys on), so match against a lower-cased `in` set.
+  if (pending.length > 0) {
+    const lowered = [...new Set(pending.map((p) => p.contract.toLowerCase()))];
+    const rows = await prisma.token.findMany({
+      where: { contractAddress: { in: lowered } },
+      select: { id: true, contractAddress: true },
+    });
+    const idByContract = new Map<string, number>();
+    for (const r of rows) if (r.contractAddress) idByContract.set(r.contractAddress.toLowerCase(), r.id);
+    for (const p of pending) {
+      const tokenId = idByContract.get(p.contract.toLowerCase());
+      if (tokenId != null) map.set(tokenId, { avgCost: p.avgCost, realized: p.realized });
     }
-    if (tokenId == null) continue;
-    map.set(tokenId, { avgCost: t.avgCost, realized: t.realizedPnlUsd ?? 0 });
   }
   return map.size > 0 ? map : null;
 }
