@@ -325,7 +325,14 @@ export async function getPriceDebug(
   now: number = Date.now(),
 ): Promise<PriceSymbolDebug | { symbols: PriceSymbolDebug[] }> {
   if (symbol) {
-    return buildSymbolDebug(symbol.toUpperCase(), now);
+    const sym = symbol.toUpperCase();
+    // audit SEC #9: the symbol is interpolated into Redis key names (price:<SYM>:*). It's not
+    // injectable today (literal GET), but validate as defense-in-depth — reject anything that
+    // isn't a short alphanumeric ticker and return an empty readout instead of querying Redis.
+    if (sym.length > 20 || !/^[A-Z0-9]+$/.test(sym)) {
+      return { symbol: sym.slice(0, 20), canonical: null, sources: {} };
+    }
+    return buildSymbolDebug(sym, now);
   }
   const board = [...getCatalogSymbols()].slice(0, DEBUG_BOARD_LIMIT);
   const symbols = await Promise.all(board.map((s) => buildSymbolDebug(s, now)));

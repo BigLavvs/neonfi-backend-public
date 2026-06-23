@@ -145,10 +145,19 @@ function toNum(v: number | string | null | undefined): number | null {
 }
 
 // Raw `ipfs://` URLs won't load in an <img>; rewrite to a public gateway. Already-HTTP
-// URLs pass through unchanged.
+// URLs pass through unchanged. audit SEC #26: the path after `ipfs://` is provider-sourced,
+// so strip anything outside the CID/sub-path charset and length-cap it before splicing into
+// the fixed gateway host — a hostile path can't smuggle a query string or traversal.
 function toHttpImage(u: string | null | undefined): string | null {
   if (!u) return null;
-  if (u.startsWith('ipfs://')) return `https://ipfs.io/ipfs/${u.slice(7).replace(/^ipfs\//, '')}`;
+  if (u.startsWith('ipfs://')) {
+    const cleaned = u
+      .slice(7)
+      .replace(/^ipfs\//, '')
+      .replace(/[^A-Za-z0-9/._-]/g, '')
+      .slice(0, 512);
+    return cleaned ? `https://ipfs.io/ipfs/${cleaned}` : null;
+  }
   return u;
 }
 

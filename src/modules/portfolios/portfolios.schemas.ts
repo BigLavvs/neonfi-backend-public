@@ -1,9 +1,15 @@
 import { z } from 'zod';
 
+// audit SEC #7: cap the raw address length at the schema layer so a multi-MB string is
+// rejected BEFORE it's parsed/echoed. The precise EVM/Solana format check stays downstream
+// (wallet-validator) on purpose: an ill-formed-but-short address yields a friendly
+// `status: 'invalid'` response rather than a blunt 400. 64 clears EVM (42) and Solana (≤44).
+const walletAddressField = z.string().min(1).max(64);
+
 const ConnectedPortfolioSchema = z.object({
   type: z.literal('connected'),
   name: z.string().min(1).max(255),
-  walletAddress: z.string().min(1),
+  walletAddress: walletAddressField,
   chainId: z.number().int().positive(),
 }).strict();
 
@@ -49,7 +55,7 @@ export type UpdatePortfolioBody = z.infer<typeof UpdatePortfolioBodySchema>;
 // connected create body, but used by POST /portfolios/wallet/preview to look the wallet
 // up across the read-side providers before the user commits to creating the portfolio.
 export const walletPreviewSchema = z.object({
-  walletAddress: z.string().min(1),
+  walletAddress: walletAddressField,
   chainId: z.number().int().positive(),
 }).strict();
 

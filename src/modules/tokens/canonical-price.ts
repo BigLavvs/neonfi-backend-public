@@ -40,8 +40,13 @@ export const coinGeckoCanonicalSource: CanonicalPriceSource = {
   async byContract(slug, contract) {
     const platform = PLATFORM_BY_SLUG[slug.toLowerCase()];
     if (!platform) return null;
+    // audit SEC #25: every platform here is EVM, so the (provider-sourced) contract must be a
+    // 0x+40-hex address before we splice it into the CoinGecko URL. Reject anything else rather
+    // than fetching an attacker-shaped path.
+    const normalized = contract.toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(normalized)) return null;
     try {
-      const url = `${config.COINGECKO_BASE}/coins/${platform}/contract/${contract.toLowerCase()}`;
+      const url = `${config.COINGECKO_BASE}/coins/${platform}/contract/${normalized}`;
       const headers: Record<string, string> = { accept: 'application/json' };
       if (config.COINGECKO_API_KEY) headers['x-cg-demo-api-key'] = config.COINGECKO_API_KEY;
       const res = await fetch(url, { headers });
