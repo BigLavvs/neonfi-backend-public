@@ -6,6 +6,7 @@
   "description": "Neonfi backend — Hono + TypeScript API + WebSocket server (Part 1: Foundations)",
   "main": "dist/index.js",
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "tsx watch src/index.ts",
     "build": "npm run check:singletons && tsc",
     "start": "node dist/index.js",

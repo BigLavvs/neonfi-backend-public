@@ -9,6 +9,7 @@
 //   POST /api/v1/auth/*   — Stage 1A email auth flows
 
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { config } from './lib/config.js';
 import { checkHealth } from './lib/health.js';
 import { err, ok } from './lib/envelope.js';
@@ -34,6 +35,14 @@ import { wsHealthHandler } from './ws/health.js';
 
 export function createApp(): Hono {
   const app = new Hono();
+
+  // CORS — required for cross-subdomain cookie auth (frontend on app.*, API on api.*).
+  app.use('*', cors({
+    origin: config.APP_BASE_URL,
+    credentials: true,
+    allowHeaders: ['Content-Type', 'X-CSRF-Token'],
+    allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+  }));
 
   // Security response headers on every response (audit SEC, decision 7).
   app.use('*', securityHeaders());
