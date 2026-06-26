@@ -5,6 +5,7 @@ import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import { invalidatePnlCache } from '../transactions/transactions.service.js';
 import { recalcAssetBalance, recalcPortfolioNetDeposit } from '../transactions/recalc.js';
 import { findTokenPriceSnapshotOnOrBefore } from '../tokens/tokens.repository.js';
+import { fetchHistoricalPriceUsd } from '../../lib/historical-price.js';
 import {
   findAllAssetsByPortfolioId,
   findAssetById,
@@ -79,15 +80,21 @@ export async function addAsset(
   } else if (body.cost.mode === 'historical') {
     const asOf = new Date(body.cost.date);
     const snap = await findTokenPriceSnapshotOnOrBefore(body.tokenId, asOf);
-    if (!snap) {
+    // Prefer stored history; if we have none on/before the date (snapshots only run forward from
+    // when the backend went live), fetch the price at that instant on-demand before giving up.
+    let priceAtDate: number | null = snap ? Number(snap.price) : null;
+    if (priceAtDate == null) {
+      priceAtDate = await fetchHistoricalPriceUsd(token.symbol, asOf);
+    }
+    if (priceAtDate == null) {
       throw new AssetError(
         400,
         'PRICE_HISTORY_UNAVAILABLE',
-        'No price history on or before the requested date — choose average or no cost',
+        'No price available for the requested date — choose average or no cost',
         { tokenSymbol: token.symbol, date: body.cost.date },
       );
     }
-    openingCostBasis = (balanceNum * snap.price).toFixed(8);
+    openingCostBasis = (balanceNum * priceAtDate).toFixed(8);
     openingAt = asOf;
   }
   // mode === 'none' → openingCostBasis stays null (cost-unknown holding).
@@ -205,15 +212,24 @@ export async function updateAsset(
     } else if (body.cost.mode === 'historical') {
       const asOf = new Date(body.cost.date);
       const snap = await findTokenPriceSnapshotOnOrBefore(existing.tokenId, asOf);
-      if (!snap) {
+      let priceAtDate: number | null = snap ? Number(snap.price) : null;
+      if (priceAtDate == null) {
+        // No stored history on/before the date — fetch the price at that instant on-demand.
+        const tok = await prisma.token.findUnique({
+          where: { id: existing.tokenId },
+          select: { symbol: true },
+        });
+        if (tok) priceAtDate = await fetchHistoricalPriceUsd(tok.symbol, asOf);
+      }
+      if (priceAtDate == null) {
         throw new AssetError(
           400,
           'PRICE_HISTORY_UNAVAILABLE',
-          'No price history on or before the requested date — choose average or no cost',
+          'No price available for the requested date — choose average or no cost',
           { date: body.cost.date },
         );
       }
-      openingCostBasis = (balanceNum * snap.price).toFixed(8);
+      openingCostBasis = (balanceNum * priceAtDate).toFixed(8);
       openingAt = asOf;
     } else {
       openingCostBasis = null;
