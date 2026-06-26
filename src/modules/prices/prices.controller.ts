@@ -10,6 +10,8 @@ import type { AuthEnv } from '../auth/middleware.js';
 import { refreshBodySchema, historyQuerySchema, type HistoryQuery } from './prices.schemas.js';
 import { resolveSymbolsForUser, refreshPrices, getPriceDebug, getPriceHistory } from './prices.service.js';
 import { isSubscriptionEffectivelyActive } from '../subscriptions/subscription-status.js';
+import { findTokenPriceSnapshotOnOrBefore } from '../tokens/tokens.repository.js';
+import { fetchHistoricalPriceUsd } from '../../lib/historical-price.js';
 
 const RATE_LIMIT_TTL_S = 30;
 
@@ -85,6 +87,29 @@ pricesRouter.get('/history', requireAuth, async (c) => {
   if (q.symbols.length === 0) return c.json(ok({ history: {} }), 200);
   const history = await getPriceHistory(q.symbols, q.range);
   return c.json(ok({ history }), 200);
+});
+
+// GET /api/v1/prices/historical?tokenId=123&date=2025-02-26T22:50 — resolve the per-unit USD price
+// at a past instant for the starting-assets "as of date" preview. Same resolution the asset create
+// uses: stored snapshot → on-demand provider chain (CoinGecko → Mobula). Returns { price: number|null }.
+pricesRouter.get('/historical', requireAuth, async (c) => {
+  const tokenIdRaw = c.req.query('tokenId');
+  const dateRaw = c.req.query('date');
+  const tokenId = Number(tokenIdRaw);
+  if (!tokenIdRaw || !Number.isInteger(tokenId) || tokenId <= 0 || !dateRaw) {
+    return c.json(err('VALIDATION_ERROR', 'tokenId (int) and date are required'), 400);
+  }
+  const asOf = new Date(dateRaw);
+  if (Number.isNaN(asOf.getTime())) {
+    return c.json(err('VALIDATION_ERROR', 'date must be a valid date-time'), 400);
+  }
+  const token = await prisma.token.findUnique({ where: { id: tokenId }, select: { symbol: true } });
+  if (!token) return c.json(err('INVALID_TOKEN', 'Token not found'), 400);
+
+  const snap = await findTokenPriceSnapshotOnOrBefore(tokenId, asOf);
+  let price: number | null = snap ? Number(snap.price) : null;
+  if (price == null) price = await fetchHistoricalPriceUsd(token.symbol, asOf);
+  return c.json(ok({ price }), 200);
 });
 
 // GET /api/v1/prices/debug?symbol=BTC — read-only source-visibility readout (retrofit-35).
