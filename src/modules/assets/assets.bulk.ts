@@ -18,6 +18,7 @@ import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
 import { invalidatePnlCache } from '../transactions/transactions.service.js';
 import { recalcAssetBalance, recalcPortfolioNetDeposit } from '../transactions/recalc.js';
 import { findTokenPriceSnapshotOnOrBefore } from '../tokens/tokens.repository.js';
+import { fetchHistoricalPriceUsd } from '../../lib/historical-price.js';
 import { CreateAssetBodySchema, type BulkAssetsBody } from './assets.schemas.js';
 import {
   BulkError,
@@ -160,11 +161,16 @@ export async function bulkCreateAssets(
     } else if (mode === 'historical') {
       const asOf = new Date(ymdToIso(acquiredDate));
       const snap = await findTokenPriceSnapshotOnOrBefore(token.id, asOf);
-      if (!snap) {
-        add('acquired_date', `no price history on or before ${acquiredDate} — provide a cost per unit instead`);
+      // Stored history first; if none on/before the date, fetch the price at that instant on-demand.
+      let priceAtDate: number | null = snap ? Number(snap.price) : null;
+      if (priceAtDate == null) {
+        priceAtDate = await fetchHistoricalPriceUsd(token.symbol, asOf);
+      }
+      if (priceAtDate == null) {
+        add('acquired_date', `no price available for ${acquiredDate} — provide a cost per unit instead`);
         continue;
       }
-      openingCostBasis = (qtyNum * snap.price).toFixed(8);
+      openingCostBasis = (qtyNum * priceAtDate).toFixed(8);
       openingAt = asOf;
     }
 
