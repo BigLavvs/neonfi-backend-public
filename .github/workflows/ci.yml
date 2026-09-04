@@ -57,7 +57,7 @@ jobs:
       CONNECTED_REPRICE_ENABLED: "false"
       LIVE_PRICE_FLUSH_ENABLED: "false"
       DB_KEEPALIVE_ENABLED: "false"
-      PRICE_DEBUG_ENABLED: "false"
+      PRICE_DEBUG_ENABLED: "true"
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       DIRECT_URL: postgresql://postgres:postgres@localhost:5432/postgres
       DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/neonfi_test

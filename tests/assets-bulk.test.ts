@@ -154,7 +154,8 @@ it('historical with no snapshot on/before the date → row error on acquired_dat
   const json = (await res.json()) as BulkResp;
   expect(json.data!.imported).toBe(0);
   expect(json.data!.errors[0]).toMatchObject({ row: 1, column: 'acquired_date' });
-  expect(json.data!.errors[0]!.message).toContain('no price history');
+  expect(json.data!.errors[0]!.message).toMatch(/no price available for 2000-01-01/i);
+  expect(json.data!.errors[0]!.message).toContain('provide a cost per unit');
 });
 
 // ---------------------------------------------------------------------------

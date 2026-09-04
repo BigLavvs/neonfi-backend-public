@@ -19,6 +19,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'node:http';
 import type { Server as HttpServer } from 'node:http';
+import type { Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { redis } from '../lib/redis.js';
 import { redisSubscriber } from '../lib/redis-subscriber.js';
@@ -37,6 +38,10 @@ import {
 // ---------------------------------------------------------------------------
 
 let _wss: WebSocketServer | null = null;
+let _httpServer: HttpServer | null = null;
+let _upgradeListener: ((req: IncomingMessage, socket: Socket, head: Buffer) => void) | null = null;
+let _subscriptionStart: Promise<void> | null = null;
+let _subscriptionsActive = false;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -49,9 +54,10 @@ export function isWsServerRunning(): boolean {
 export async function startWsServer(httpServer: HttpServer): Promise<void> {
   if (_wss) return;
 
+  _httpServer = httpServer;
   _wss = new WebSocketServer({ noServer: true });
 
-  httpServer.on('upgrade', async (req: IncomingMessage, socket, head) => {
+  _upgradeListener = async (req: IncomingMessage, socket, head) => {
     if (req.url?.split('?')[0] !== '/ws') return;
 
     const result = await authorizeUpgrade(req);
@@ -64,11 +70,22 @@ export async function startWsServer(httpServer: HttpServer): Promise<void> {
     _wss!.handleUpgrade(req, socket, head, (ws) => {
       _wss!.emit('connection', ws, req, result.context);
     });
-  });
+  };
+  httpServer.on('upgrade', _upgradeListener);
 
   _wss.on('connection', handleConnection);
 
-  await startRedisSubscriptions();
+  try {
+    await startRedisSubscriptions();
+  } catch (e) {
+    _wss.off('connection', handleConnection);
+    httpServer.off('upgrade', _upgradeListener);
+    await new Promise<void>((resolve) => _wss!.close(() => resolve()));
+    _wss = null;
+    _httpServer = null;
+    _upgradeListener = null;
+    throw e;
+  }
 }
 
 export async function stopWsServer(): Promise<void> {
@@ -77,23 +94,21 @@ export async function stopWsServer(): Promise<void> {
   }
   clearRegistry();
 
-  // Best-effort subscription cleanup, then force the connection down. We do NOT await the
-  // unsubscribe/punsubscribe round-trips — disconnect() tears the connection down
-  // regardless, and a slow round-trip must not block (or hang) shutdown.
-  try {
-    void redisSubscriber.unsubscribe().catch(() => {});
-    void redisSubscriber.punsubscribe().catch(() => {});
-    redisSubscriber.disconnect();
-  } catch {
-    // ignore cleanup errors
-  }
+  await stopRedisSubscriptions();
 
   if (_wss) {
+    _wss.off('connection', handleConnection);
+    if (_upgradeListener && _httpServer) {
+      _httpServer.off('upgrade', _upgradeListener);
+    }
     await new Promise<void>((r, e) =>
       _wss!.close((err) => (err ? e(err) : r())),
     );
     _wss = null;
   }
+
+  _httpServer = null;
+  _upgradeListener = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,28 +223,107 @@ function broadcastPrice(channel: string, raw: string): void {
 // ---------------------------------------------------------------------------
 
 async function startRedisSubscriptions(): Promise<void> {
-  // Control-plane channels (exact) + the price firehose pattern (one psubscribe for
-  // every symbol). Both ride the single dedicated subscriber connection.
-  await redisSubscriber.subscribe('user_events', 'client_events');
-  await redisSubscriber.psubscribe('price:*');
+  if (_subscriptionsActive) return;
+  if (_subscriptionStart) return _subscriptionStart;
 
-  redisSubscriber.on('message', (channel: string, raw: string) => {
-    void (async () => {
-      try {
-        if (channel === 'user_events') {
-          await handleUserEvent(raw);
-        } else if (channel === 'client_events') {
-          await handleClientEvent(raw);
-        }
-      } catch (e) {
-        console.error('[ws] pub/sub handler error', e instanceof Error ? e.message : e);
+  _subscriptionStart = (async () => {
+    try {
+      await ensureRedisSubscriberReady();
+
+      redisSubscriber.off('message', onRedisMessage);
+      redisSubscriber.off('pmessage', onRedisPMessage);
+      redisSubscriber.on('message', onRedisMessage);
+      redisSubscriber.on('pmessage', onRedisPMessage);
+
+      // Control-plane channels (exact) + the price firehose pattern (one psubscribe for
+      // every symbol). Both ride the single dedicated subscriber connection.
+      await redisSubscriber.subscribe('user_events', 'client_events');
+      await redisSubscriber.psubscribe('price:*');
+      _subscriptionsActive = true;
+    } catch (e) {
+      redisSubscriber.off('message', onRedisMessage);
+      redisSubscriber.off('pmessage', onRedisPMessage);
+      if (redisSubscriber.status !== 'wait' && redisSubscriber.status !== 'end') {
+        redisSubscriber.disconnect();
       }
-    })();
-  });
+      throw e;
+    }
+  })();
 
-  redisSubscriber.on('pmessage', (_pattern: string, channel: string, raw: string) => {
-    if (channel.startsWith('price:')) broadcastPrice(channel, raw);
+  try {
+    await _subscriptionStart;
+  } finally {
+    _subscriptionStart = null;
+  }
+}
+
+async function ensureRedisSubscriberReady(): Promise<void> {
+  if (redisSubscriber.status === 'ready') return;
+
+  if (redisSubscriber.status === 'wait' || redisSubscriber.status === 'end') {
+    await redisSubscriber.connect();
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      redisSubscriber.off('ready', onReady);
+      redisSubscriber.off('error', onError);
+      redisSubscriber.off('end', onEnd);
+    };
+    const onReady = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    const onEnd = () => {
+      cleanup();
+      reject(new Error('Redis subscriber connection ended before becoming ready'));
+    };
+
+    redisSubscriber.once('ready', onReady);
+    redisSubscriber.once('error', onError);
+    redisSubscriber.once('end', onEnd);
   });
+}
+
+async function stopRedisSubscriptions(): Promise<void> {
+  _subscriptionStart = null;
+  _subscriptionsActive = false;
+  redisSubscriber.off('message', onRedisMessage);
+  redisSubscriber.off('pmessage', onRedisPMessage);
+
+  if (redisSubscriber.status === 'wait' || redisSubscriber.status === 'end') return;
+
+  await Promise.race([
+    Promise.allSettled([
+      redisSubscriber.unsubscribe(),
+      redisSubscriber.punsubscribe(),
+    ]),
+    new Promise((resolve) => setTimeout(resolve, 1000)),
+  ]).catch(() => {});
+  redisSubscriber.disconnect();
+}
+
+function onRedisMessage(channel: string, raw: string): void {
+  void (async () => {
+    try {
+      if (channel === 'user_events') {
+        await handleUserEvent(raw);
+      } else if (channel === 'client_events') {
+        await handleClientEvent(raw);
+      }
+    } catch (e) {
+      console.error('[ws] pub/sub handler error', e instanceof Error ? e.message : e);
+    }
+  })();
+}
+
+function onRedisPMessage(_pattern: string, channel: string, raw: string): void {
+  if (channel.startsWith('price:')) broadcastPrice(channel, raw);
 }
 
 async function handleUserEvent(raw: string): Promise<void> {

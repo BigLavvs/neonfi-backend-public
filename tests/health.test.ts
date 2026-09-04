@@ -59,17 +59,18 @@ it('247: GET /health with Coinbase up — 200 response includes coinbase:up', as
 });
 
 // ---------------------------------------------------------------------------
-// 248. GET /health with Coinbase down → 503
+// 248. GET /health with Coinbase down but DB/Redis up → 200
 // ---------------------------------------------------------------------------
 
-it('248: GET /health with Coinbase down — 503 response with coinbase:down', async () => {
+it('248: GET /health with Coinbase down but DB/Redis up — 200 response with coinbase:down', async () => {
   mockIsConnected.mockReturnValue(false);
 
   const res = await app.request('/health');
-  expect(res.status).toBe(503);
-  const body = await res.json() as { error: { code: string; message: string } };
-  expect(body.error.code).toBe('HEALTH_FAILED');
-  expect(body.error.message).toContain('coinbase');
+  expect(res.status).toBe(200);
+  const body = await res.json() as { data: { coinbase: string; db: string; redis: string } };
+  expect(body.data.coinbase).toBe('down');
+  expect(body.data.db).toBe('up');
+  expect(body.data.redis).toBe('up');
 });
 
 // ---------------------------------------------------------------------------

@@ -732,7 +732,7 @@ it('392: POST opening historical with a snapshot on/before the date → costBasi
   await prisma.tokenPriceSnapshot.deleteMany({ where: { tokenId: btcId } });
 });
 
-it('393: POST opening historical with NO snapshot on/before the date → 400 PRICE_HISTORY_UNAVAILABLE; nothing created', async () => {
+it('393: POST opening historical with no price from snapshots or providers → 400 PRICE_HISTORY_UNAVAILABLE; nothing created', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
@@ -741,7 +741,7 @@ it('393: POST opening historical with NO snapshot on/before the date → 400 PRI
 
   const res = await assetPost(
     portfolioId,
-    { tokenId: btcId, balance: '2', cost: { mode: 'historical', date: '2020-01-01T00:00:00.000Z' } },
+    { tokenId: btcId, balance: '2', cost: { mode: 'historical', date: '2000-01-01T00:00:00.000Z' } },
     cookies,
   );
   expect(res.status).toBe(400);
@@ -827,7 +827,7 @@ it('396: PATCH { cost:none } → clears cost tracking; avgCost null, costTracked
   expect(a.balance).toBe(2); // balance preserved (balance-only edit keeps existing openingBalance)
 });
 
-it('397: PATCH { cost:historical, date } with no snapshot → 400 PRICE_HISTORY_UNAVAILABLE', async () => {
+it('397: PATCH { cost:historical, date } with no price from snapshots or providers → 400 PRICE_HISTORY_UNAVAILABLE', async () => {
   const cookies = await registerAndLogin();
   const userId = await getUserId();
   const portfolioId = await seedPortfolio(userId, 'manual');
@@ -841,7 +841,7 @@ it('397: PATCH { cost:historical, date } with no snapshot → 400 PRICE_HISTORY_
   const res = await assetPatch(
     portfolioId,
     assetId,
-    { cost: { mode: 'historical', date: '2020-01-01T00:00:00.000Z' } },
+    { cost: { mode: 'historical', date: '2000-01-01T00:00:00.000Z' } },
     cookies,
   );
   expect(res.status).toBe(400);

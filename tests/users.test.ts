@@ -533,7 +533,7 @@ it('52: GET /users/me with cancelled-but-in-period Pro → plan: pro (effectivel
       stripeCustomerId: 'cus_test',
       stripeSubscriptionId: 'sub_test',
       currentPeriodStart: new Date('2026-06-01T00:00:00Z'),
-      currentPeriodEnd: new Date('2026-07-01T00:00:00Z'), // future relative to 2026-06-12
+      currentPeriodEnd: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30),
     },
   });
 

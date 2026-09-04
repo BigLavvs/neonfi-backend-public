@@ -14,7 +14,7 @@ const redisUrl =
     : config.REDIS_URL;
 
 export const redisSubscriber = new Redis(redisUrl, {
-  lazyConnect: false,
+  lazyConnect: true,
 });
 
 redisSubscriber.on('error', (err: Error) => {

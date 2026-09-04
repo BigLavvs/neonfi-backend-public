@@ -190,7 +190,7 @@ it('120: GET /chains — cancelled-in-period pro user → 200, all 15 chains (st
   const userId = await getUserId();
   await createProSubForUser(userId, {
     status: 'cancelled',
-    currentPeriodEnd: new Date('2026-07-01T00:00:00Z'), // future
+    currentPeriodEnd: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30),
   });
 
   const res = await chainGet('', cookies);
