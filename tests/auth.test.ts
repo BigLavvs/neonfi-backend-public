@@ -1,6 +1,6 @@
 // Neonfi backend — Auth module integration tests (Stage 1A).
 //
-// Strategy: option (b) — dev DB + Redis with per-test cleanup.
+// Strategy: isolated test DB + Redis with per-test cleanup.
 // beforeEach truncates `session` and `user` tables and removes all
 // auth-related Redis keys. Lookup tables (auth_provider, onboarding_status,
 // etc.) are seeded once at DB setup and are never modified by these tests.

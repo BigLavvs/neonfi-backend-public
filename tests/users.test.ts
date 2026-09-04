@@ -1,6 +1,6 @@
 // Neonfi backend — Users module integration tests (Stage 2).
 //
-// Strategy: same as auth.test.ts — dev DB + Redis, per-test truncation.
+// Strategy: same as auth.test.ts — isolated test DB + Redis, per-test truncation.
 // beforeEach truncates session and user tables, clears auth Redis keys.
 // Uses Hono's app.request() for in-process HTTP.
 

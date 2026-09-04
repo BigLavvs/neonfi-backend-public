@@ -9,6 +9,7 @@
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 import cron from 'node-cron';
+import { validateTestIsolation } from './test-isolation.js';
 
 loadDotenv();
 
@@ -311,11 +312,10 @@ const schema = z
       .transform((v) => v === 'true')
       .default('false'),
   });
-  // DATABASE_URL_TEST and REDIS_URL_TEST are optional. When present and
-  // NODE_ENV=test, prisma.ts / redis.ts use them instead of the dev URLs
-  // (option a — separate test DB). When absent and NODE_ENV=test, both
-  // singletons fall back to DATABASE_URL / REDIS_URL with per-test table
-  // cleanup (option b — dev DB, chosen by Idowu for Stage 1A).
+  // DATABASE_URL_TEST and REDIS_URL_TEST are mandatory when NODE_ENV=test.
+  // validateTestIsolation() compares logical database/cache targets and exits
+  // before Prisma or Redis clients are created if tests would touch runtime
+  // resources.
 
 const parsed = schema.safeParse(process.env);
 
@@ -327,6 +327,18 @@ if (!parsed.success) {
   // silent-divergence failure mode §0.2 warns about.
   // eslint-disable-next-line no-console
   console.error(`\n[config] Invalid or missing environment variables:\n${issues}\n`);
+  process.exit(1);
+}
+
+const isolationIssues = validateTestIsolation(process.env);
+if (isolationIssues.length > 0) {
+  const issues = isolationIssues
+    .map((i) => `  - ${i.key}: ${i.message}`)
+    .join('\n');
+  // Never print connection strings here. The variable names and reason are enough
+  // for operators to fix test isolation without exposing credentials in logs.
+  // eslint-disable-next-line no-console
+  console.error(`\n[config] Unsafe test environment:\n${issues}\n`);
   process.exit(1);
 }
 

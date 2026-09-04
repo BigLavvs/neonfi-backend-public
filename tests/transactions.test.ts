@@ -80,7 +80,7 @@ async function seedPortfolio(userId: number, type: 'connected' | 'manual'): Prom
 
 // Create a user row directly (no HTTP register/login, no bcrypt) — for fixtures like
 // a "different owner" portfolio where we never authenticate as the user. Far lighter
-// than registerAndLogin, which matters under the slow Neon dev DB.
+// than registerAndLogin, which matters under a remote isolated test DB.
 async function seedUserDirect(email: string): Promise<number> {
   const [authProvider, onboarding] = await Promise.all([
     prisma.authProvider.findUniqueOrThrow({ where: { name: 'email' } }),

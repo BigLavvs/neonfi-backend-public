@@ -1,6 +1,6 @@
 // Neonfi backend — Subscriptions module integration tests (Stage 3A).
 //
-// Strategy: same as auth/users — dev DB + Redis, per-test truncation.
+// Strategy: same as auth/users — isolated test DB + Redis, per-test truncation.
 // Stripe and email module are mocked so no real API calls occur.
 
 import { it, beforeEach, expect, vi } from 'vitest';

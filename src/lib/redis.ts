@@ -14,11 +14,9 @@ const globalForRedis = globalThis as unknown as {
   redis: Redis | undefined;
 };
 
-// When NODE_ENV=test and REDIS_URL_TEST is set, use the test Redis instance so
-// integration tests run in isolation from the dev cache.
-const redisUrl = config.NODE_ENV === 'test' && config.REDIS_URL_TEST
-  ? config.REDIS_URL_TEST
-  : config.REDIS_URL;
+// When NODE_ENV=test, config.ts has already required REDIS_URL_TEST and verified
+// it does not target the runtime Redis database.
+const redisUrl = config.NODE_ENV === 'test' ? config.REDIS_URL_TEST! : config.REDIS_URL;
 
 export const redis: Redis =
   globalForRedis.redis ??

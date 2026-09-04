@@ -73,12 +73,9 @@ const globalForPrisma = globalThis as unknown as {
   prisma: ExtendedPrismaClient | undefined;
 };
 
-// When NODE_ENV=test and DATABASE_URL_TEST is set, use the test database so
-// integration tests run in isolation from the dev database.
-const testDbUrl =
-  config.NODE_ENV === 'test' && config.DATABASE_URL_TEST
-    ? config.DATABASE_URL_TEST
-    : undefined;
+// When NODE_ENV=test, config.ts has already required DATABASE_URL_TEST and
+// verified it does not target the runtime database.
+const testDbUrl = config.NODE_ENV === 'test' ? config.DATABASE_URL_TEST : undefined;
 
 // The SINGLE `new PrismaClient(...)` in the codebase (check-singletons.mjs guards
 // this). Datasources + log preserved exactly; the retry extension wraps THIS base.

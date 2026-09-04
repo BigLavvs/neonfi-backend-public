@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: timescale/timescaledb:2.17.2-pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: neonfi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d neonfi_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      APP_BASE_URL: http://localhost:5173
+      API_BASE_URL: http://localhost:3000
+      JWT_SECRET: 0123456789abcdef0123456789abcdef
+      ACCESS_TOKEN_EXPIRY: 15m
+      REFRESH_TOKEN_EXPIRY: 7d
+      COOKIE_SECRET: 0123456789abcdef0123456789abcdef
+      GOOGLE_CLIENT_ID: ci-google-client-id
+      GOOGLE_CLIENT_SECRET: ci-google-client-secret
+      GOOGLE_REDIRECT_URI: http://localhost:3000/api/v1/auth/google/callback
+      STRIPE_SECRET_KEY: ci-dummy-stripe-secret-key
+      STRIPE_WEBHOOK_SECRET: ci-dummy-stripe-webhook-secret
+      STRIPE_PRO_MONTHLY_PRICE_ID: price_ci_monthly
+      STRIPE_PRO_YEARLY_PRICE_ID: price_ci_yearly
+      MORALIS_API_KEY: ci-moralis-api-key
+      MORALIS_WEBHOOK_SECRET: ci-moralis-webhook-secret
+      COINBASE_WS_URL: wss://ws-feed.exchange.coinbase.com
+      COINMARKETCAP_API_KEY: ci-coinmarketcap-api-key
+      RESEND_API_KEY: ci-resend-api-key
+      EMAIL_FROM_ADDRESS: Neonfi CI <ci@neonfi.test>
+      TOKEN_SYNC_ENABLED: "false"
+      SNAPSHOT_ENABLED: "false"
+      CONNECTED_REPRICE_ENABLED: "false"
+      LIVE_PRICE_FLUSH_ENABLED: "false"
+      DB_KEEPALIVE_ENABLED: "false"
+      PRICE_DEBUG_ENABLED: "false"
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/neonfi_test
+      REDIS_URL: redis://localhost:6379/0
+      REDIS_URL_TEST: redis://localhost:6379/1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run prisma:generate
+
+      - name: Apply database migrations
+        run: npm run migrate:deploy
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/neonfi_test
+          DIRECT_URL: postgresql://postgres:postgres@localhost:5432/neonfi_test
+          NODE_ENV: development
+
+      - name: Configure TimescaleDB hypertable
+        run: npm run db:hypertable
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/neonfi_test
+          DIRECT_URL: postgresql://postgres:postgres@localhost:5432/neonfi_test
+          NODE_ENV: development
+
+      - name: Seed lookup data
+        run: npm run db:seed
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/neonfi_test
+          DIRECT_URL: postgresql://postgres:postgres@localhost:5432/neonfi_test
+          NODE_ENV: development
+
+      - run: npm run check:singletons
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - run: npm test
+        env:
+          NODE_ENV: test

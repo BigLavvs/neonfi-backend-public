@@ -323,6 +323,46 @@ it('90: checkout.session.completed new Pro user → Subscription created, Paymen
   expect(mockSubscriptionsRetrieve).toHaveBeenCalledWith(STRIPE_SUB_ID);
 });
 
+it('99b: handler failure releases Stripe idempotency claim so the same event can retry', async () => {
+  const userId = await createUser('verified');
+  const event = makeEvent('checkout.session.completed', {
+    payment_intent: STRIPE_PI_ID,
+    subscription: STRIPE_SUB_ID,
+    customer: STRIPE_CUST_ID,
+    amount_total: 999,
+    currency: 'usd',
+    payment_status: 'paid',
+    metadata: { userId: String(userId), plan: 'pro', billingCycle: 'monthly' },
+  }, 'evt_handler_retry_001');
+
+  mockConstructEvent.mockReturnValue(event);
+  mockSubscriptionsRetrieve.mockResolvedValueOnce({ items: { data: [] } });
+
+  const failed = await webhookPost(event);
+  expect(failed.status).toBe(500);
+  const failedJson = await failed.json() as { error: { code: string } };
+  expect(failedJson.error.code).toBe('WEBHOOK_HANDLER_ERROR');
+  expect(await redis.get('stripe_event:evt_handler_retry_001')).toBeNull();
+
+  mockSubscriptionsRetrieve.mockResolvedValueOnce({
+    items: { data: [{ current_period_start: 1748678400, current_period_end: 1751356800 }] },
+  });
+  const retried = await webhookPost(event);
+  expect(retried.status).toBe(200);
+  const retriedJson = await retried.json() as { data: { received: boolean; duplicate?: boolean } };
+  expect(retriedJson.data.received).toBe(true);
+  expect(retriedJson.data.duplicate).toBeUndefined();
+
+  const duplicate = await webhookPost(event);
+  expect(duplicate.status).toBe(200);
+  const duplicateJson = await duplicate.json() as { data: { received: boolean; duplicate?: boolean } };
+  expect(duplicateJson.data.received).toBe(true);
+  expect(duplicateJson.data.duplicate).toBe(true);
+
+  const payment = await prisma.payment.findFirst({ where: { stripePaymentIntentId: STRIPE_PI_ID } });
+  expect(payment).not.toBeNull();
+});
+
 // ---------------------------------------------------------------------------
 // 91. checkout.session.completed — free→pro upgrade (Stage 3B path)
 // ---------------------------------------------------------------------------

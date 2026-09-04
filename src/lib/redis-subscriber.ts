@@ -9,8 +9,8 @@ import { Redis } from 'ioredis';
 import { config } from './config.js';
 
 const redisUrl =
-  config.NODE_ENV === 'test' && config.REDIS_URL_TEST
-    ? config.REDIS_URL_TEST
+  config.NODE_ENV === 'test'
+    ? config.REDIS_URL_TEST!
     : config.REDIS_URL;
 
 export const redisSubscriber = new Redis(redisUrl, {

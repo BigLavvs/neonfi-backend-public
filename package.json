@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Neonfi backend — Hono + TypeScript API + WebSocket server (Part 1: Foundations)",
+  "description": "Neonfi backend - Hono + TypeScript API and WebSocket server",
   "main": "dist/index.js",
   "scripts": {
     "postinstall": "prisma generate",
@@ -30,7 +30,7 @@
     "seed": "tsx prisma/seed.ts"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "engineStrict": false,
   "dependencies": {
