@@ -16,6 +16,7 @@ import type {
   WalletTransfer,
 } from '../types.js';
 import { buildSummary, NATIVE_SYMBOLS } from '../build-summary.js';
+import { COV_CHAIN, COV_UPNL_CHAIN, GOLDRUSH_STREAMING_URL, UPNL_TIMEOUT_MS, humanBalance, num, type CovalentHolding, type CovalentItem, type CovLogEvent, type CovNftItem, type CovTxResponse, type UpnlWalletItem } from './goldrush.private.js';
 
 // retrofit-79 (§1): GoldRush Streaming API (GraphQL-over-WebSocket) — the home of the
 // turnkey `upnlForWallet` query (cost basis + realized + unrealized per token). It is a
@@ -23,46 +24,6 @@ import { buildSummary, NATIVE_SYMBOLS } from '../build-summary.js';
 // a Bearer header. slug → the `ChainNameUpnl` enum the query takes (probe-confirmed the 7
 // supported chains — a SUBSET of COV_CHAIN, so PnL gets its own map). Beta endpoint: we pin
 // to the exact fields the probe verified and tolerate schema drift (any miss → null).
-const GOLDRUSH_STREAMING_URL = 'wss://streaming.goldrushdata.com/graphql';
-const UPNL_TIMEOUT_MS = 60000; // server-side compute is ~30-46s for active wallets; bounded headroom.
-const COV_UPNL_CHAIN: Record<string, string> = {
-  eth: 'ETH_MAINNET',
-  base: 'BASE_MAINNET',
-  bnb: 'BSC_MAINNET',
-  polygon: 'POLYGON_MAINNET',
-  optimism: 'OPTIMISM_MAINNET',
-  gnosis: 'GNOSIS_MAINNET',
-  solana: 'SOLANA_MAINNET',
-};
-
-// slug → Covalent chain name. polygon-zkevm intentionally omitted (uncertain mapping).
-const COV_CHAIN: Record<string, string> = {
-  eth: 'eth-mainnet',
-  polygon: 'matic-mainnet',
-  bnb: 'bsc-mainnet',
-  arbitrum: 'arbitrum-mainnet',
-  optimism: 'optimism-mainnet',
-  base: 'base-mainnet',
-  avalanche: 'avalanche-mainnet',
-  fantom: 'fantom-mainnet',
-  linea: 'linea-mainnet',
-  zksync: 'zksync-mainnet',
-  gnosis: 'gnosis-mainnet',
-  cronos: 'cronos-mainnet',
-  mantle: 'mantle-mainnet',
-  solana: 'solana-mainnet',
-};
-
-interface CovalentItem {
-  contract_ticker_symbol?: string | null;
-  contract_name?: string | null;
-  contract_decimals?: number | null;
-  contract_address?: string | null;
-  balance?: string | null;
-  quote?: number | null;
-  quote_rate?: number | null;
-  native_token?: boolean;
-}
 
 export class GoldRushWalletProvider implements WalletDataProvider {
   readonly name = 'goldrush';
@@ -540,87 +501,4 @@ export class GoldRushWalletProvider implements WalletDataProvider {
       return null;
     }
   }
-}
-
-// portfolio_v2 daily holding entry (probe-confirmed: open/high/low/close each carry a USD
-// `quote`; we read the day's close).
-interface CovalentHolding {
-  timestamp?: string | null;
-  close?: { quote?: number | null } | null;
-}
-
-// transactions_v3 (retrofit-63, probe-confirmed shapes) -----------------------
-interface CovDecodedParam {
-  name?: string | null;
-  type?: string | null;
-  value?: unknown;
-}
-interface CovLogEvent {
-  sender_address?: string | null;
-  sender_name?: string | null;
-  sender_contract_ticker_symbol?: string | null;
-  sender_contract_decimals?: number | null;
-  sender_logo_url?: string | null;
-  decoded?: { name?: string | null; params?: CovDecodedParam[] | null } | null;
-}
-interface CovTxItem {
-  block_signed_at?: string | null;
-  tx_hash?: string | null;
-  from_address?: string | null;
-  to_address?: string | null;
-  value?: string | null; // raw native (wei)
-  value_quote?: number | null; // historical USD of the native move
-  fees_paid?: string | null; // raw native gas (wei)
-  gas_metadata?: { contract_decimals?: number | null; contract_ticker_symbol?: string | null } | null;
-  log_events?: CovLogEvent[] | null;
-}
-interface CovTxResponse {
-  data?: {
-    links?: { prev?: string | null; next?: string | null } | null;
-    items?: CovTxItem[] | null;
-  } | null;
-}
-
-// balances_nft (retrofit-63) --------------------------------------------------
-interface CovNftExternalData {
-  name?: string | null;
-  description?: string | null;
-  image?: string | null;
-  image_512?: string | null;
-  image_preview?: string | null;
-}
-interface CovNftData {
-  token_id?: string | null;
-  token_balance?: string | null;
-  external_data?: CovNftExternalData | null;
-}
-interface CovNftItem {
-  contract_name?: string | null;
-  contract_address?: string | null;
-  supports_erc?: string[] | null;
-  is_spam?: boolean;
-  nft_data?: CovNftData[] | null;
-}
-
-// upnlForWallet item (retrofit-79 §1, probe-confirmed: UpnlWalletItem fields are snake_case;
-// cost_basis/current_price/pnl_*_usd are Float; contract_metadata is a nested object).
-interface UpnlWalletItem {
-  token_address?: string | null;
-  cost_basis?: number | null;
-  pnl_realized_usd?: number | null;
-  pnl_unrealized_usd?: number | null;
-}
-
-function num(v: number | string | null | undefined): number | null {
-  if (v == null) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-// Covalent returns the raw integer balance as a string; divide by 10^decimals.
-function humanBalance(raw: string | null | undefined, decimals: number | null): number {
-  if (raw == null) return 0;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return 0;
-  return decimals && decimals > 0 ? n / 10 ** decimals : n;
 }

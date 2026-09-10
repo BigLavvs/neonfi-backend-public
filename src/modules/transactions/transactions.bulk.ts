@@ -247,7 +247,7 @@ export async function bulkCreateTransactions(
     } else {
       // sell
       if (!held) {
-        add('symbol', `you don't hold '${token.symbol}' yet — import its buy first`);
+        add('symbol', `you don't hold '${token.symbol}' yet. Import its buy first`);
         continue;
       }
       const bal = runningBalance.get(token.id) ?? 0;

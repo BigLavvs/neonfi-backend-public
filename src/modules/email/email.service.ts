@@ -317,9 +317,9 @@ export async function sendPlanDowngradeAppliedEmail(opts: {
     subject: `Your Neonfi plan has changed to ${planLabel}`,
     html: `
       <p>Hi ${opts.fullName},</p>
-      <p>Your scheduled plan change has been applied — you are now on the <strong>${planLabel}</strong> plan.</p>
+      <p>Your scheduled plan change has been applied. You are now on the <strong>${planLabel}</strong> plan.</p>
     `,
     text:
-      `Hi ${opts.fullName},\n\nYour scheduled plan change has been applied — you are now on the ${planLabel} plan.`,
+      `Hi ${opts.fullName},\n\nYour scheduled plan change has been applied. You are now on the ${planLabel} plan.`,
   });
 }

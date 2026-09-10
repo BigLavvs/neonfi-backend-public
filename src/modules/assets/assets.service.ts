@@ -90,7 +90,7 @@ export async function addAsset(
       throw new AssetError(
         400,
         'PRICE_HISTORY_UNAVAILABLE',
-        'No price available for the requested date — choose average or no cost',
+        'No price available for the requested date. Choose average or no cost',
         { tokenSymbol: token.symbol, date: body.cost.date },
       );
     }
@@ -225,7 +225,7 @@ export async function updateAsset(
         throw new AssetError(
           400,
           'PRICE_HISTORY_UNAVAILABLE',
-          'No price available for the requested date — choose average or no cost',
+          'No price available for the requested date. Choose average or no cost',
           { date: body.cost.date },
         );
       }

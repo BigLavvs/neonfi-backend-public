@@ -4,7 +4,7 @@ node_modules/
 # Build output
 dist/
 
-# Env files (secrets never committed — System_Implementation Secrets Management)
+# Env files
 .env
 .env.*
 !.env.example
@@ -22,3 +22,5 @@ npm-debug.log*
 Thumbs.db
 .idea/
 .vscode/
+tests/
+docs/refactor

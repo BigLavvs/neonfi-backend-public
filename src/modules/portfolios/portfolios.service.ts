@@ -323,7 +323,7 @@ export async function resyncPortfolio(
     const message =
       plan === 'free'
         ? 'Free plan allows one resync per day. Upgrade to Pro for unlimited resyncs.'
-        : 'You can resync each wallet every 5 minutes — try again shortly.';
+        : 'You can resync each wallet every 5 minutes. Try again shortly.';
     throw new PortfolioError(429, 'RESYNC_RATE_LIMITED', message, { retryAfter: ttl });
   }
 

@@ -23,7 +23,7 @@ pricesRouter.post('/refresh', requireAuth, async (c) => {
   try {
     body = refreshBodySchema.parse(await c.req.json().catch(() => ({})));
   } catch {
-    return c.json(err('VALIDATION_ERROR', 'Invalid request body — max 5 symbols'), 400);
+    return c.json(err('VALIDATION_ERROR', 'Invalid request body. Maximum 5 symbols'), 400);
   }
 
   const user = c.get('user');
@@ -46,7 +46,7 @@ pricesRouter.post('/refresh', requireAuth, async (c) => {
   if (!acquired) {
     const ttl = await redis.ttl(rateLimitKey);
     return c.json(
-      { error: { code: 'TOO_MANY_REQUESTS', message: 'Rate limit exceeded — wait before refreshing again' }, meta: { retryAfterMs: ttl * 1000 } },
+      { error: { code: 'TOO_MANY_REQUESTS', message: 'Rate limit exceeded. Wait before refreshing again' }, meta: { retryAfterMs: ttl * 1000 } },
       429,
     );
   }

@@ -167,7 +167,7 @@ export async function bulkCreateAssets(
         priceAtDate = await fetchHistoricalPriceUsd(token.symbol, asOf);
       }
       if (priceAtDate == null) {
-        add('acquired_date', `no price available for ${acquiredDate} — provide a cost per unit instead`);
+        add('acquired_date', `no price available for ${acquiredDate}. Provide a cost per unit instead`);
         continue;
       }
       openingCostBasis = (qtyNum * priceAtDate).toFixed(8);

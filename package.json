@@ -12,6 +12,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "check:singletons": "node scripts/check-singletons.mjs",
+    "check:file-sizes": "node scripts/check-file-sizes.mjs",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "migrate:dev": "prisma migrate dev",
@@ -24,7 +25,8 @@
     "reclassify:snapshots": "tsx src/scripts/reclassify-connected-snapshots.ts",
     "reclassify:nft-spam": "tsx src/scripts/reclassify-nft-spam.ts",
     "rebuild:connected-history": "tsx src/scripts/rebuild-connected-history.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check": "npm run check:file-sizes && npm run typecheck"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
