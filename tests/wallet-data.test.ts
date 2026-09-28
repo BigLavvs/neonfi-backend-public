@@ -24,7 +24,7 @@ vi.mock('../src/lib/redis.js', () => ({
   },
 }));
 
-import { previewWallet, fetchWalletSummary, fetchWalletPnl, fetchSpamContracts, fetchWalletSpamContracts } from '../src/modules/wallet-data/index.js';
+import { previewWallet, fetchWalletSummary, fetchWalletSummaryForSync, fetchWalletPnl, fetchSpamContracts, fetchWalletSpamContracts } from '../src/modules/wallet-data/index.js';
 import { isHeuristicNftSpam, classifyNftSpam, effectiveNftSpam } from '../src/modules/wallet-data/nft-spam.js';
 import { sumHistoricalTokenValue } from '../src/modules/wallet-data/sync.js';
 import type {
@@ -73,6 +73,24 @@ describe('sumHistoricalTokenValue', () => {
       ]),
     ).toBe(0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Sync provider status
+// ---------------------------------------------------------------------------
+
+it('sync distinguishes verified empty holdings from provider failure', async () => {
+  const provider = (status: 'empty' | 'error'): WalletDataProvider => ({
+    name: status,
+    isConfigured: () => true,
+    supportsChain: () => true,
+    getSummary: async () => ({ status }),
+  });
+  const wallet = '0xabcdef1234567890abcdef1234567890abcdef12';
+  const chain = { slug: 'eth' };
+  expect(await fetchWalletSummaryForSync(wallet, chain, [provider('empty')])).toEqual({ status: 'empty' });
+  expect(await fetchWalletSummaryForSync(wallet, chain, [provider('error')])).toEqual({ status: 'error' });
+  expect(await fetchWalletSummaryForSync(wallet, chain, [provider('empty'), provider('error')])).toEqual({ status: 'error' });
 });
 
 // ---------------------------------------------------------------------------

@@ -23,8 +23,8 @@ vi.mock('../src/modules/email/email.service.js', () => ({
 }));
 
 // Controllable read-side provider chain. The controller imports previewWallet; the sync
-// (sync.ts) imports fetchWalletSummary + fetchTransferPage + fetchNftHoldings — all from
-// this module, so mock all four (retrofit-49 added the history + nft-holdings reads).
+// (sync.ts) imports fetchWalletSummaryForSync + fetchTransferPage + fetchNftHoldings — all from
+// this module, so mock these provider reads (retrofit-49 added history + NFT holdings).
 // retrofit-56 added fetchTransactionCount + fetchValueHistory (connected count + snapshot
 // backfill); default them to null so the sync's best-effort calls are clean no-ops here.
 const {
@@ -45,6 +45,10 @@ const {
 vi.mock('../src/modules/wallet-data/index.js', () => ({
   previewWallet: previewWalletMock,
   fetchWalletSummary: fetchWalletSummaryMock,
+  fetchWalletSummaryForSync: async () => {
+    const summary = await fetchWalletSummaryMock();
+    return summary ? { status: 'ok', summary } : { status: 'empty' };
+  },
   fetchTransferPage: fetchTransferPageMock,
   fetchNftHoldings: fetchNftHoldingsMock,
   fetchTransactionCount: vi.fn().mockResolvedValue(null),

@@ -30,12 +30,16 @@ vi.mock('../src/modules/email/email.service.js', () => ({
 
 // retrofit-59 §1/§2: a connected portfolio's balance no longer comes from recalc'ing the
 // webhook's transactions — recalc skips connected, and the webhook instead REFRESHES balances
-// from the provider summary after the feed write. Mock fetchWalletSummary so the balance the
+// from the provider summary after the feed write. Mock the sync summary so the balance the
 // webhook lands is deterministic; keep the rest of wallet-data real (partial mock).
 const { fetchWalletSummaryMock } = vi.hoisted(() => ({ fetchWalletSummaryMock: vi.fn() }));
 vi.mock('../src/modules/wallet-data/index.js', async (importOriginal) => ({
   ...((await importOriginal()) as object),
   fetchWalletSummary: fetchWalletSummaryMock,
+  fetchWalletSummaryForSync: async () => {
+    const summary = await fetchWalletSummaryMock();
+    return summary ? { status: 'ok', summary } : { status: 'empty' };
+  },
   // retrofit-86: the NFT webhook path now layers in the provider spam-contract set. Stub the two
   // fetchers to empty so the webhook tests stay hermetic (no real Alchemy/GoldRush HTTP) — the
   // name-heuristic + blocklist + bulk signals still run offline against the verdict.
