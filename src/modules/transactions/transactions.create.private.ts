@@ -36,7 +36,7 @@ import type {
   UpdateTransactionBody,
   TransferBody,
 } from './transactions.schemas.js';
-import { recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
+import { lockAssetBalance, recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
 import { computeUsdValue } from './usd-value.js';
 import { toDecimalString } from '../../lib/decimal.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
@@ -95,13 +95,6 @@ export async function createTransaction(
           'Add the token to your portfolio first before logging transactions for it',
         );
       }
-      if (body.direction === 'sell' && Number(body.amount) > Number(asset.balance.toString())) {
-        throw new TransactionError(
-          400,
-          'INSUFFICIENT_BALANCE',
-          'Cannot sell more than the current balance',
-        );
-      }
     }
   }
 
@@ -115,6 +108,15 @@ export async function createTransaction(
 
   const newTxId = await prisma.$transaction(
     async (tx) => {
+      if ((body.type === 'native' || body.type === 'erc20') && body.direction === 'sell' && tokenId !== null) {
+        await lockAssetBalance(tx, portfolio.id, tokenId);
+        const current = await tx.asset.findUnique({
+          where: { portfolioId_tokenId: { portfolioId: portfolio.id, tokenId } },
+        });
+        if (!current || Number(body.amount) > Number(current.balance.toString())) {
+          throw new TransactionError(400, 'INSUFFICIENT_BALANCE', 'Cannot sell more than the current balance');
+        }
+      }
       // retrofit-27 §6: auto-create the Asset for a buy of an unheld token, inside the tx so
       // it rolls back with the rest if the insert fails (e.g. duplicate hash). Pure trade —
       // openingBalance/openingCostBasis default to 0/null; recalc sets cost from this buy.
@@ -204,5 +206,3 @@ export async function createTransaction(
 // Direction convention (differs from Stage 9A manual-portfolio transfer=no-op):
 //   IN  (to === walletAddress) → direction='buy'  → balance += amount
 //   OUT (from === walletAddress) → direction='sell' → balance -= amount
-
-

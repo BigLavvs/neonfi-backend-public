@@ -3,6 +3,12 @@ import type { PrismaTransactionClient } from '../../lib/prisma.js';
 // The $extends'd client's interactive-tx type (see prisma.ts) — not Prisma.TransactionClient.
 type TxClient = PrismaTransactionClient;
 
+// Serialize calculations for one holding. PostgreSQL READ COMMITTED takes a fresh
+// snapshot after this lock is acquired, so a waiting writer sees prior commits.
+export async function lockAssetBalance(tx: TxClient, portfolioId: number, tokenId: number): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM "asset" WHERE "portfolioId" = ${portfolioId} AND "tokenId" = ${tokenId} FOR UPDATE`;
+}
+
 // Recalculates an Asset's balance, average cost, realized PnL — AND the legacy
 // netDeposit — for a (portfolioId, tokenId) pair from its opening lot plus all
 // native/erc20 transactions for that token in that portfolio (retrofit-27).
@@ -53,6 +59,8 @@ export async function recalcAssetBalance(
     select: { type: { select: { name: true } } },
   });
   if (portfolio?.type?.name === 'connected') return;
+
+  await lockAssetBalance(tx, portfolioId, tokenId);
 
   const token = await tx.token.findUnique({ where: { id: tokenId } });
   if (!token) return;
@@ -145,6 +153,8 @@ export async function recalcPortfolioNetDeposit(
   tx: TxClient,
   portfolioId: number,
 ): Promise<void> {
+  // Different asset writes in one portfolio must also serialize the aggregate.
+  await tx.$queryRaw`SELECT id FROM "portfolio" WHERE id = ${portfolioId} FOR UPDATE`;
   // perf #40/#41: sum DB-side with aggregate(_sum) instead of pulling every asset row to reduce
   // in JS (this runs inside the write tx after each per-token recalc, amplified in bulk loops).
   const agg = await tx.asset.aggregate({

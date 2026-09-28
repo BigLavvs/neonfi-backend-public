@@ -54,6 +54,11 @@ export async function updateTransaction(
     throw new TransactionError(404, 'TRANSACTION_NOT_FOUND', 'Transaction not found');
   }
 
+  if (existing.transferGroupId !== null) {
+    throw new TransactionError(409, 'TRANSFER_EDIT_UNSUPPORTED',
+      'Delete the transfer and create a new one to change its paired legs');
+  }
+
   // Resolve new direction if provided
   let newDirectionId: number | undefined;
   if (body.direction !== undefined) {
@@ -316,6 +321,5 @@ export async function deleteTransaction(
 
   await invalidatePnlCache(portfolio.id);
 }
-
 
 

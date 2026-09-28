@@ -44,7 +44,7 @@ import type { CreateTransactionBody } from '../transactions/transactions.schemas
 import { findPortfolioById } from '../portfolios/portfolios.repository.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import {
-  fetchWalletSummary,
+  fetchWalletSummaryForSync,
   fetchTransferPage,
   fetchNftHoldings,
   fetchSpamContracts,
@@ -54,7 +54,7 @@ import {
   fetchWalletPnl,
 } from './index.js';
 import { classifyNftSpam } from './nft-spam.js';
-import type { WalletNftHolding, WalletPnl, WalletTransfer } from './types.js';
+import type { WalletNftHolding, WalletPnl, WalletTransfer, WalletSummary } from './types.js';
 
 // How many transfers to pull per page (initial sync + resync + each "load more").
 // retrofit-74 (§2): 50 (was 100) — the initial sync seeds the latest 50 and each Pro "load more"
@@ -255,8 +255,16 @@ export async function refreshConnectedBalancesFromProvider(
 ): Promise<void> {
   if (portfolio.type.name !== 'connected' || !portfolio.walletAddress || !portfolio.chain) return;
   try {
-    const summary = await fetchWalletSummary(portfolio.walletAddress, { slug: portfolio.chain.slug });
-    const held = await resolveHeldTokens(summary);
+    const result = await fetchWalletSummaryForSync(portfolio.walletAddress, { slug: portfolio.chain.slug });
+    if (result.status === 'error') {
+      console.warn('[wallet-sync] balance refresh skipped: no provider verified holdings', { portfolioId: portfolio.id });
+      return;
+    }
+    const held = await resolveHeldTokens(result.status === 'ok' ? result.summary : null);
+    if (result.status === 'ok' && held.length !== result.summary.tokens.length) {
+      console.warn('[wallet-sync] balance refresh skipped: token resolution incomplete', { portfolioId: portfolio.id });
+      return;
+    }
     await setConnectedBalancesFromSummary(portfolio.id, held);
     await invalidatePnlCache(portfolio.id);
   } catch (e) {
@@ -284,7 +292,7 @@ interface HeldToken {
 // for an auto-listed token resolves to a row that already carries the right price. Per-token
 // best-effort — a token that can't be resolved (e.g. an over-long symbol) is logged & skipped.
 export async function resolveHeldTokens(
-  summary: Awaited<ReturnType<typeof fetchWalletSummary>>,
+  summary: WalletSummary | null,
 ): Promise<HeldToken[]> {
   const held: HeldToken[] = [];
   for (const t of summary?.tokens ?? []) {
@@ -326,12 +334,16 @@ export async function syncConnectedHoldings(
 
   // Current balances (for reconciliation) + the first page of real history, in parallel.
   const [summary, page] = await Promise.all([
-    fetchWalletSummary(address, chain),
+    fetchWalletSummaryForSync(address, chain),
     fetchTransferPage(address, chain, { limit: PAGE_LIMIT }),
   ]);
 
   // Pass 1: pre-resolve held tokens (so prices/contract/logo exist before import).
-  const held = await resolveHeldTokens(summary);
+  if (summary.status === 'error') throw new Error('No wallet balance provider could verify holdings');
+  const held = await resolveHeldTokens(summary.status === 'ok' ? summary.summary : null);
+  if (summary.status === 'ok' && held.length !== summary.summary.tokens.length) {
+    throw new Error('Wallet token resolution incomplete; existing balances preserved');
+  }
 
   // Pass 2: import the real transfer history (native + erc20 + nft transactions + Nft rows).
   // These are the activity FEED — they no longer set the balance (Pass 4 does that).
@@ -392,12 +404,16 @@ export async function resyncConnectedHoldings(
   const pnlPromise = fetchWalletPnl(address, chain, { bypassCache: true }).catch(() => null);
 
   const [summary, page] = await Promise.all([
-    fetchWalletSummary(address, chain),
+    fetchWalletSummaryForSync(address, chain),
     fetchTransferPage(address, chain, { limit: PAGE_LIMIT }),
   ]);
 
   // Resolve held tokens (refreshes prices/contract/logo + the held list).
-  const held = await resolveHeldTokens(summary);
+  if (summary.status === 'error') throw new Error('No wallet balance provider could verify holdings');
+  const held = await resolveHeldTokens(summary.status === 'ok' ? summary.summary : null);
+  if (summary.status === 'ok' && held.length !== summary.summary.tokens.length) {
+    throw new Error('Wallet token resolution incomplete; existing balances preserved');
+  }
 
   // Re-import the latest transfer page (missed transfers insert; recorded ones are no-ops).
   const transfers = page?.transfers ?? [];

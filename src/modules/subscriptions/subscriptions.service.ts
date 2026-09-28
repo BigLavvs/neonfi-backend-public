@@ -173,7 +173,10 @@ export async function upgradeSubscription(
     throw new SubscriptionError(409, 'NO_SUBSCRIPTION_TO_UPGRADE', 'No subscription found. Use POST /subscriptions to activate.');
   }
   if (sub.status.name === 'expired') {
-    throw new SubscriptionError(409, 'SUBSCRIPTION_EXPIRED', 'Subscription has expired. Use POST /subscriptions to reactivate.');
+    // A subsequent plan change stays on /upgrade. The verified Checkout webhook
+    // replaces the expired row after payment; onboarding remains complete.
+    const checkoutUrl = await createProCheckoutSession(user, body.billingCycle, body.returnPath);
+    return { checkoutUrl };
   }
 
   const { billingCycle: requestedBillingCycle } = body;

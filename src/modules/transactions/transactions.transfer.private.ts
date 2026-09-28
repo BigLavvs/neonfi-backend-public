@@ -5,7 +5,6 @@ import { redis } from '../../lib/redis.js';
 import { portfolioDerivedCacheKeys } from '../../lib/portfolio-cache-keys.js';
 import type { PortfolioWithRelations } from '../portfolios/portfolios.dto.js';
 import { findPortfolioById } from '../portfolios/portfolios.repository.js';
-import { findAssetByPortfolioToken } from '../assets/assets.repository.js';
 import {
   createTransactionRow,
   createNativeDetail,
@@ -36,7 +35,7 @@ import type {
   UpdateTransactionBody,
   TransferBody,
 } from './transactions.schemas.js';
-import { recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
+import { lockAssetBalance, recalcAssetBalance, recalcPortfolioNetDeposit } from './recalc.js';
 import { computeUsdValue } from './usd-value.js';
 import { toDecimalString } from '../../lib/decimal.js';
 import { getEffectivePlan } from '../subscriptions/subscriptions.service.js';
@@ -81,24 +80,12 @@ export async function createCrossPortfolioTransfer(
     throw new TransactionError(400, 'UNKNOWN_TOKEN_SYMBOL', `Unknown token symbol: ${body.symbol}`);
   }
 
-  // 4. Source asset must exist and hold enough balance.
-  const sourceAsset = await findAssetByPortfolioToken(source.id, token.id);
-  const balance = sourceAsset ? Number(sourceAsset.balance.toString()) : 0;
-  const amount = Number(body.amount);
-  if (!sourceAsset || balance < amount) {
-    throw new TransactionError(
-      400,
-      'INSUFFICIENT_BALANCE',
-      'Source portfolio has insufficient balance for this transfer',
-    );
-  }
+  // Source balance and carried basis are read under a row lock in the write transaction.
 
-  // 5. Cost-basis carry: per-unit basis = netDeposit / balance (guard balance > 0).
+  // Cost-basis carry: per-unit basis = netDeposit / balance (guard balance > 0).
   //    usdValue = amount × netDeposit / balance, computed with .toFixed(8) so the
   //    conserved-basis invariant is exact at the persisted precision. Both legs use
   //    this same usdValue → basis conserved, no fake PnL (§8.2).
-  const netDeposit = Number(sourceAsset.netDeposit.toString());
-  const usdValue = balance > 0 ? ((amount * netDeposit) / balance).toFixed(8) : '0.00000000';
 
   // 6. Static seed rows resolved via the global prisma client (low in-tx query count),
   //    like seedAcquisitionInTx / createTransactionFromWebhook; the legs + details +
@@ -115,6 +102,17 @@ export async function createCrossPortfolioTransfer(
 
   const { sourceTxId, destTxId } = await prisma.$transaction(
     async (tx) => {
+      await lockAssetBalance(tx, source.id, token.id);
+      const sourceAsset = await tx.asset.findUnique({
+        where: { portfolioId_tokenId: { portfolioId: source.id, tokenId: token.id } },
+      });
+      const balance = sourceAsset ? Number(sourceAsset.balance.toString()) : 0;
+      const amount = Number(body.amount);
+      if (!sourceAsset || balance < amount) {
+        throw new TransactionError(400, 'INSUFFICIENT_BALANCE', 'Source portfolio has insufficient balance for this transfer');
+      }
+      const netDeposit = Number(sourceAsset.netDeposit.toString());
+      const usdValue = ((amount * netDeposit) / balance).toFixed(8);
       // Ensure the dest asset exists — mirror the webhook auto-create. The dest
       // plan-rank is intentionally NOT re-checked: the user already holds this token
       // in the source portfolio, so the transfer adds no NEW distinct holding to gate.
@@ -194,5 +192,3 @@ export async function createCrossPortfolioTransfer(
 // retrofit-49 (#6): resolve each row's token logo from the Token catalog by symbol, in a
 // single `IN` query, then map symbol → logoUrl. nft rows (no symbol) get null. Returns the
 // mapper input so a row with no matching catalog entry simply renders without an image.
-
-

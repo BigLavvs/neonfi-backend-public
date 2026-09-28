@@ -98,6 +98,26 @@ export async function fetchWalletSummary(
   return p.summary ?? null;
 }
 
+// Balance writes must distinguish a verified empty wallet from a provider outage.
+// Preview intentionally merges those outcomes for its UI, so sync uses this result.
+export async function fetchWalletSummaryForSync(
+  address: string,
+  chain: { slug: string },
+  providers: WalletDataProvider[] = PROVIDERS,
+): Promise<{ status: 'ok'; summary: WalletSummary } | { status: 'empty' | 'error' }> {
+  let sawEmpty = false;
+  let sawError = false;
+  for (const p of providers) {
+    if (!p.isConfigured() || !p.supportsChain(chain.slug)) continue;
+    const result = await p.getSummary(address, chain.slug);
+    if (result.status === 'ok' && result.summary) return { status: 'ok', summary: result.summary };
+    if (result.status === 'empty') sawEmpty = true;
+    else sawError = true;
+  }
+  // A mixed empty/error result cannot safely justify clearing existing holdings.
+  return { status: sawEmpty && !sawError ? 'empty' : 'error' };
+}
+
 // retrofit-49: real transfer-history import. Returns the first configured provider's
 // non-null history page (Moralis first — primary + richest); a provider that doesn't
 // implement getTransferHistory, isn't configured, doesn't support the chain, or returns
